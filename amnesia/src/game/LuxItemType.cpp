@@ -18,6 +18,7 @@
  */
 
 #include "LuxItemType.h"
+#include "LuxNetwork.h"
 
 #include "LuxInventory.h"
 #include "LuxPlayer.h"
@@ -158,6 +159,11 @@ bool cLuxItemType_Note::BeforeAddItem(cLuxInventory_Item *apItem)
 
 	cLuxNote *pNote = gpBase->mpJournal->AddNote(apItem->GetStringVal(), apItem->GetImageName());
 	if(pNote==NULL)return true;
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::Note;
+        event.text[0] = apItem->GetStringVal(); event.text[1] = apItem->GetImageName();
+        event.values[0] = int32_t(apItem->GetAmount()); gpBase->mpNetwork->QueuePresentation(event);
+    }
 
 	ProgLog(eLuxProgressLogLevel_Medium, "Picked up note "+ apItem->GetStringVal());
 
@@ -257,6 +263,11 @@ bool cLuxItemType_Diary::BeforeAddItem(cLuxInventory_Item *apItem)
 	
 		pMap->RunScript(sCallbackFunc+"(\""+apItem->GetName()+ "\","+ cString::ToString(lDiaryIdx)+")" );
 	}
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::Diary;
+        event.text[0] = apItem->GetStringVal(); event.text[1] = apItem->GetImageName();
+        event.values[0] = mbShowJournalOnPickup ? 2 : 0; gpBase->mpNetwork->QueuePresentation(event);
+    }
 
 	if(mbShowJournalOnPickup)
 	{

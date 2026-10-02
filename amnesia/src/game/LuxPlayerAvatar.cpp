@@ -759,7 +759,7 @@ void cLuxPlayerAvatar::Update(float afTimeStep)
 
 	////////////////////////////////////////////
 	// Horizontal velocity of the character body drives the gait.
-	cVector3f vVel = pCharBody->GetVelocity(gpBase->mpEngine->GetStepSize());
+    cVector3f vVel = mbUseNetworkVelocity ? mvNetworkVelocity : pCharBody->GetVelocity(gpBase->mpEngine->GetStepSize());
 	cVector3f vVelXZ(vVel.x, 0, vVel.z);
 	float fSpeed = vVelXZ.Length();
 

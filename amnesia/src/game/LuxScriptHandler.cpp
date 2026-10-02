@@ -18,6 +18,7 @@
  */
 
 #include "LuxScriptHandler.h"
+#include "LuxNetwork.h"
 
 #include "LuxMap.h"
 #include "LuxPlayer.h"
@@ -1746,7 +1747,7 @@ static void CoopTeleportPlayer2AfterScriptMove()
 	//for a story that does not know there is one.
 	if(CoopShouldMirrorToOtherPlayer()==false) return;
 
-	if(gpBase->mpMapHandler->GetCoopMode()==false) return;
+    if(gpBase->mpMapHandler->GetCoopMode()==false && !(gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) return;
 	if(gpBase->mpPlayer2==NULL) return;
 	if(ImGuiDebugMenu::GetScriptTeleportBothPlayers()==false) return;
 

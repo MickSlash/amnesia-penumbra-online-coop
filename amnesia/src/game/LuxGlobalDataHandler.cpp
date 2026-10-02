@@ -18,6 +18,7 @@
  */
 
 #include "LuxGlobalDataHandler.h"
+#include "LuxNetwork.h"
 
 #include "LuxMap.h"
 #include "LuxMapHandler.h"
@@ -150,6 +151,7 @@ bool cLuxGlobalDataHandler::RecompileScript(tString *apOutput)
 
 void cLuxGlobalDataHandler::RunScript(const tString& asCommand)
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) return;
 	if(mpScript==NULL) return;
 
 	mpScript->Run(asCommand);

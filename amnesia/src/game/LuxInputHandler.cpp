@@ -1471,6 +1471,35 @@ void cLuxInputHandler::UpdateGamePlayerInput()
 		float pitch = cMath::Clamp(mpPlayer->GetCamera()->GetPitch(), -1.571f, 1.571f);
 		input.pitch = (int16_t)(pitch * 1000.0f);
 		gpBase->mpNetwork->SendLocalInput(input, gpBase->mpEngine->GetStepSize());
+        const eLuxAction inputs[] = {eLuxAction_Interact, eLuxAction_Lantern, eLuxAction_Attack, eLuxAction_Ignite};
+        const online::PlayerAction actions[] = {online::PlayerAction::Interact, online::PlayerAction::Lantern, online::PlayerAction::Attack, online::PlayerAction::Ignite};
+        for(int i = 0; i < 4; ++i) {
+            if(P1BecameTriggerd(inputs[i])) {
+                gpBase->mpNetwork->SendLocalAction(actions[i], true);
+                if(i == 0 && mpPlayer->GetCurrentState() == eLuxPlayerState_UseItem) mpPlayer->ChangeState(eLuxPlayerState_Normal);
+            }
+            if(P1WasTriggerd(inputs[i])) gpBase->mpNetwork->SendLocalAction(actions[i], false);
+        }
+        if(!gpBase->mpInventory->GetDisabled() && P1BecameTriggerd(eLuxAction_Inventory)) {
+            gpBase->mpInventory->SetActivePlayer(mpPlayer);
+            gpBase->mpEngine->GetUpdater()->SetContainer("Inventory");
+            ChangeState(eLuxInputState_Inventory);
+        }
+        if(mState == eLuxInputState_Game && !gpBase->mpInventory->GetDisabled()) {
+            const bool journal = P1BecameTriggerd(eLuxAction_Journal);
+            const bool quests = P1BecameTriggerd(eLuxAction_QuestLog);
+            const bool recent = P1BecameTriggerd(eLuxAction_RecentText);
+            if(journal || quests || recent) {
+                gpBase->mpJournal->SetActivePlayer(mpPlayer);
+                gpBase->mpJournal->SetShowOnBothPlayers(false);
+                gpBase->mpJournal->SetPauseBothPlayers(false);
+                if(recent) gpBase->mpJournal->OpenLastReadText();
+                else {
+                    gpBase->mpEngine->GetUpdater()->SetContainer("Journal");
+                    if(quests) { gpBase->mpJournal->SetForceInstantExit(true); gpBase->mpJournal->ChangeState(eLuxJournalState_QuestLog); }
+                }
+            }
+        }
 		return;
 	}
 	mbP1GameInputRan = true;

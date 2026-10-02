@@ -18,6 +18,7 @@
  */
 
 #include "LuxEnemy.h"
+#include "LuxNetwork.h"
 
 #include "LuxEnemyMover.h"
 #include "LuxEnemyPathfinder.h"
@@ -2428,7 +2429,7 @@ cLuxPlayer* iLuxEnemy::GetTargetPlayer()
 	////////////////////////////////
 	// No coop (or no P2): always Player 1. Also catches a stale pointer left
 	// behind after P2 was destroyed — compared, never dereferenced.
-	if(gpBase->mpMapHandler->GetCoopMode()==false || pP2==NULL || pP2->GetCharacterBody()==NULL)
+    if((gpBase->mpMapHandler->GetCoopMode()==false && !(gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) || pP2==NULL || pP2->GetCharacterBody()==NULL)
 	{
 		mpTargetPlayer = gpBase->mpPlayer;
 	}
@@ -2496,7 +2497,7 @@ void iLuxEnemy::UpdateTargetPlayer(float afTimeStep)
 	// Validates the pointer and resolves to P1 when coop is off / P2 is gone.
 	cLuxPlayer *pCurrent = GetTargetPlayer();
 
-	if(gpBase->mpMapHandler->GetCoopMode()==false || pP2==NULL || pP2->GetCharacterBody()==NULL) return;
+    if((gpBase->mpMapHandler->GetCoopMode()==false && !(gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) || pP2==NULL || pP2->GetCharacterBody()==NULL) return;
 
 	////////////////////////////////
 	// Dead players are never targets (with shared death both go down

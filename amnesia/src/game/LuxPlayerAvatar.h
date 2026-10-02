@@ -97,6 +97,7 @@ public:
 	void DestroyWorldEntities(cLuxMap *apMap);
 
 	void Update(float afTimeStep);
+    void SetNetworkVelocity(const cVector3f& velocity) { mvNetworkVelocity = velocity; mbUseNetworkVelocity = true; }
 
 	// Called from the viewport pre-draw callbacks right before each viewport
 	// renders, so visibility is correct per view (and thus also in that
@@ -118,6 +119,8 @@ public:
 	const cColor& GetColor(){ return mColor; }
 
 private:
+    cVector3f mvNetworkVelocity = cVector3f(0);
+    bool mbUseNetworkVelocity = false;
 	enum eAvatarEntity
 	{
 		eAvatarEntity_Torso = 0,

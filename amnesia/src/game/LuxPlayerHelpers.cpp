@@ -18,6 +18,7 @@
  */
 
 #include "LuxPlayerHelpers.h"
+#include "LuxNetwork.h"
 
 #include "LuxPlayer.h"
 #include "LuxMapHelper.h"
@@ -2459,7 +2460,7 @@ void cLuxPlayerLantern::Update(float afTimeStep)
 
 	////////////////////////////
 	// Lower oil
-	if(mbActive && ::ImGuiDebugMenu::GetFreeUseLantern()==false &&
+    if(mbActive && !(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) && ::ImGuiDebugMenu::GetFreeUseLantern()==false &&
 		gpBase->mpEffectHandler->GetEmotionFlash()->IsActive()==false)
 	{
 		float fOil = mpPlayer->GetLampOil();
@@ -2803,7 +2804,7 @@ void cLuxPlayerDeath::Start()
 	// reset, and the fall/fade/hint/white-flash are mirrored onto their camera
 	// and hud set in Update()/OnDraw() below.
 	cLuxPlayer *pP2Shared = gpBase->mpPlayer2;
-	if(gpBase->mpMapHandler->GetCoopMode() && pP2Shared)
+    if((gpBase->mpMapHandler->GetCoopMode() || (gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) && pP2Shared)
 	{
 		if(pP2Shared->IsDead()==false)
 		{
@@ -2896,7 +2897,7 @@ void cLuxPlayerDeath::Update(float afTimeStep)
 	// same height drop, same roll. Their alphas need no mirror: OnDraw paints
 	// the fade and hint onto both hud sets from the one set of values.
 	cLuxPlayer *pCoopVictim = NULL;
-	if(gpBase->mpMapHandler->GetCoopMode() && gpBase->mpPlayer2 &&
+    if((gpBase->mpMapHandler->GetCoopMode() || (gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) && gpBase->mpPlayer2 &&
 		gpBase->mpPlayer2 != mpPlayer && gpBase->mpPlayer2->GetCharacterBody())
 	{
 		pCoopVictim = gpBase->mpPlayer2;
@@ -3231,7 +3232,7 @@ void cLuxPlayerDeath::ResetGame()
 	// Coop: revive and reset Player 2 too — both players restart together.
 	// (The checkpoint load below places both at the checkpoint start pos.)
 	cLuxPlayer *pP2 = gpBase->mpPlayer2;
-	if(gpBase->mpMapHandler->GetCoopMode() && pP2 && pP2->GetCharacterBody())
+    if((gpBase->mpMapHandler->GetCoopMode() || (gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) && pP2 && pP2->GetCharacterBody())
 	{
 		pP2->SetRoll(0);
 		pP2->GetCamera()->SetRoll(0);

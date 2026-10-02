@@ -18,6 +18,7 @@
  */
 
 #include "LuxMap.h"
+#include "LuxNetwork.h"
 
 #include "impl/ImGuiDebugMenu.h"
 
@@ -336,6 +337,7 @@ void cLuxMap::AfterWorldLoadEntitySetup()
 
 void cLuxMap::OnEnter(bool abRunScript, bool abFirstTime)
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) abRunScript = false;
 	///////////////
 	//On world load for all entities
 	tLuxEntityListIt entityIt = mlstEntities.begin();
@@ -369,6 +371,7 @@ void cLuxMap::OnEnter(bool abRunScript, bool abFirstTime)
 
 void cLuxMap::OnLeave(bool abRunScript)
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) abRunScript = false;
 	if(abRunScript)
 	{
 		if(mpScript) mpScript->Run("OnLeave()");
@@ -379,6 +382,7 @@ void cLuxMap::OnLeave(bool abRunScript)
 
 void cLuxMap::Update(float afTimeStep)
 {
+    if(gpBase->mpNetwork && (gpBase->mpNetwork->IsClientReplica() || gpBase->mpNetwork->WaitingForMap())) return;
 	UpdateCheckCommentaryIconActive(afTimeStep);
     UpdateDissolveEntities(afTimeStep);
 	UpdateTimers(afTimeStep);
@@ -405,6 +409,7 @@ void cLuxMap::Update(float afTimeStep)
 
 void cLuxMap::RunScript(const tString& asCommand)
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) return;
 	if(mpScript==NULL) return;
 	if(this != gpBase->mpMapHandler->GetCurrentMap()) return;
 
@@ -474,7 +479,7 @@ void cLuxMap::PlacePlayerAtStartPos(const tString& asPosName)
 
 		// Coop: Player 2 spawns at the same start position (offset a step to
 		// the side) — level transitions, checkpoints and respawns alike.
-		if(gpBase->mpMapHandler->GetCoopMode() && gpBase->mpPlayer2)
+        if((gpBase->mpMapHandler->GetCoopMode() || (gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) && gpBase->mpPlayer2)
 		{
 			gpBase->mpMapHandler->PlacePlayer2NearPlayer1();
 		}

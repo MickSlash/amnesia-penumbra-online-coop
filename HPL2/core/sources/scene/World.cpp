@@ -115,6 +115,7 @@ namespace hpl {
 		msName=asName;
 
 		mbActive = true;
+        mbPhysicsSimulationEnabled = true;
 
 		mAmbientColor=cColor(0,0);
 
@@ -221,7 +222,7 @@ namespace hpl {
 	void cWorld::Update(float afTimeStep)
 	{
 		START_TIMING(Physics);
-		if(mpPhysicsWorld) mpPhysicsWorld->Update(afTimeStep);
+        if(mpPhysicsWorld && mbPhysicsSimulationEnabled) mpPhysicsWorld->Update(afTimeStep);
 		STOP_TIMING(Physics);
 
 
@@ -250,7 +251,7 @@ namespace hpl {
 
 		while(afTotalTime>0)
 		{
-			if(mpPhysicsWorld) mpPhysicsWorld->Update(afTimeStep);
+            if(mpPhysicsWorld && mbPhysicsSimulationEnabled) mpPhysicsWorld->Update(afTimeStep);
 			UpdateParticles(afTimeStep);
 
 			afTotalTime -= afTimeStep;

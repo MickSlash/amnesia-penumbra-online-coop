@@ -18,6 +18,7 @@
  */
 
 #include "LuxPlayer.h"
+#include "LuxNetwork.h"
 
 #include "LuxMap.h"
 #include "LuxInventory.h"
@@ -410,6 +411,15 @@ void cLuxPlayer::OnStart()
 
 void cLuxPlayer::Update(float afTimeStep)
 {
+    if(gpBase->mpNetwork && (gpBase->mpNetwork->IsClientReplica() || gpBase->mpNetwork->WaitingForMap())) {
+        if(mpAvatar) mpAvatar->Update(afTimeStep);
+        if(gpBase->mpNetwork->IsClientReplica() && mpCharBody) {
+            if(mState == eLuxPlayerState_Normal || mState == eLuxPlayerState_UseItem) mvStates[mState]->Update(afTimeStep);
+            if(mpLantern) mpLantern->Update(afTimeStep);
+            if(mpHands) mpHands->Update(afTimeStep);
+        }
+        return;
+    }
 	////////////////////////
 	// Noclip V-key toggle and movement
 	UpdateNoclip(afTimeStep);
@@ -459,6 +469,7 @@ void cLuxPlayer::Update(float afTimeStep)
 
 void cLuxPlayer::PostUpdate(float afTimeStep)
 {
+    if(gpBase->mpNetwork && (gpBase->mpNetwork->IsClientReplica() || gpBase->mpNetwork->WaitingForMap())) return;
 	////////////////////////
 	// Run Helper message
 	RunHelperMessage(eUpdateableMessage_PostUpdate,afTimeStep);

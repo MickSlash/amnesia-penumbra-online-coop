@@ -165,6 +165,8 @@ namespace hpl {
 
 		void SetActive(bool abX) {mbActive = abX;}
 		inline bool IsActive()  const { return mbActive;}
+        // Replica worlds still animate and render while only the host simulates physics.
+        void SetPhysicsSimulationEnabled(bool enabled) { mbPhysicsSimulationEnabled = enabled; }
 
 		void Update(float afTimeStep);
 
@@ -369,6 +371,7 @@ namespace hpl {
 		tString msName;
 		tWString msFilePath;
 		bool mbActive;
+        bool mbPhysicsSimulationEnabled;
 
 		cGraphics *mpGraphics;
 		cSound* mpSound;

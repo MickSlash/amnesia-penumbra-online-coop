@@ -227,6 +227,7 @@ public:
 	float GetHealth(){ return mfHealth; }
 	float GetSanity(){ return mfSanity; }
 	float GetLampOil(){ return mfLampOil; }
+    void ApplyNetworkVitals(float health, float sanity, float oil) { mfHealth = health; mfSanity = sanity; mfLampOil = oil; }
 
 	float GetTerror(){ return mfTerror; }
 	

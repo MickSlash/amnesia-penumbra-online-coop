@@ -195,7 +195,7 @@ static void SetAvatarVisibleForCamera(cLuxPlayer *apPlayer, cCamera *apViewCam)
 	const bool bMorphed = apPlayer->GetHelperPossess() != NULL &&
 						  apPlayer->GetHelperPossess()->IsMorphed();
 
-	bool bVisible = gpBase->mpMapHandler->GetCoopMode() &&
+    bool bVisible = (gpBase->mpMapHandler->GetCoopMode() || (gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) &&
 					apPlayer->GetCharacterBody() != NULL &&
 					apPlayer->GetCamera() != apViewCam &&
 					bMorphed == false;
@@ -213,7 +213,7 @@ static void SetGunVisibleForCamera(cLuxPlayer *apPlayer, cCamera *apViewCam)
 	// else's view that is a gun hanging in mid-air. Owner's view only, exactly
 	// like the hands. The muzzle FLASH is a real world light and the tracer is a
 	// real world entity, so both stay visible to everyone.
-	bool bOwnView = gpBase->mpMapHandler->GetCoopMode()==false ||
+    bool bOwnView = (gpBase->mpMapHandler->GetCoopMode()==false && !(gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) ||
 					apPlayer->GetCamera() == apViewCam;
 
 	apPlayer->GetHelperGun()->SetViewModelVisibleForCamera(bOwnView);
@@ -228,7 +228,7 @@ static void SetHandsVisibleForCamera(cLuxPlayer *apPlayer, cCamera *apViewCam)
 	// The hands / lantern model (and its flame bloom) only shows in its
 	// owner's own view — the lantern LIGHT keeps shining for everyone.
 	// Outside coop there is only the owner's view, so nothing changes.
-	bool bOwnView = gpBase->mpMapHandler->GetCoopMode()==false ||
+    bool bOwnView = (gpBase->mpMapHandler->GetCoopMode()==false && !(gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) ||
 					apPlayer->GetCamera() == apViewCam;
 
 	apPlayer->GetHands()->SetVisualsVisibleForCamera(bOwnView);
@@ -2355,6 +2355,7 @@ void cLuxMapHandler::ApplyContainerViewportLayout(const tString& asNewContainer)
 	bool bKeepWorldActive = false;
 	if (mbCoopActive && (asNewContainer == "Inventory" || asNewContainer == "Journal"))
 		bKeepWorldActive = true;
+    if(gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers()) bKeepWorldActive = true;
 	if(mpCurrentMap && !bKeepWorldActive)
 		mpCurrentMap->GetWorld()->SetActive(false);
 }
@@ -2364,6 +2365,7 @@ void cLuxMapHandler::ApplyContainerViewportLayout(const tString& asNewContainer)
 
 void cLuxMapHandler::ChangeMap(const tString& asMapName, const tString& asStartPos, const tString& asStartSound, const tString& asEndSound)
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) return;
 	mMapChangeData.mbActive = true;
 	mMapChangeData.msMapFile = cString::SetFileExt(asMapName, "map");
 	mMapChangeData.msStartPos = asStartPos;

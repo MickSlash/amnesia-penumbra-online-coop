@@ -23,6 +23,7 @@
 //----------------------------------------------
 
 #include "LuxBase.h"
+namespace online { struct InventoryState; }
 
 //----------------------------------------------
 
@@ -201,6 +202,9 @@ public:
 	////////////////////////
 	// Actions
 	void LoadScript();
+    online::InventoryState CaptureNetworkInventory(uint32_t epoch);
+    void ApplyNetworkInventory(const online::InventoryState& state);
+    void ApplyNetworkItemAction(cLuxPlayer* player, const tString& item, const tString& secondItem, bool combine);
 
 	cLuxInventory_Item* AddItem(const tString& asName, eLuxItemType aType,
 								const tString& asSubTypeName, const tString& asImageName,

@@ -317,6 +317,9 @@ public:
 	virtual bool ShowOutlinesOnConnectedBodies(){ return true;}
 	
 	const cMatrixf& GetOnLoadTransform(){ return m_mtxOnLoadTransform; }
+    const tString& GetNetworkFile() const { return msFileName; }
+    const cVector3f& GetNetworkScale() const { return mvOnLoadScale; }
+    bool GetEffectsActive() const { return mbEffectsActive; }
 
 	bool GetStaticPhysics(bool abX){ return mbStaticPhysics;}
 	void SetStaticPhysics(bool abX);

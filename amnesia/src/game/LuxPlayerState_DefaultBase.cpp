@@ -18,6 +18,7 @@
  */
 
 #include "LuxPlayerState_DefaultBase.h"
+#include "LuxNetwork.h"
 
 #include "LuxPlayer.h"
 #include "LuxMapHelper.h"
@@ -170,7 +171,7 @@ bool iLuxPlayerState_DefaultBase::OnDoAction(eLuxPlayerAction aAction,bool abPre
 			{
 				// Coop: a level door requires BOTH players nearby, unless the debug
 				// toggle relaxes it to a single player.
-				if(gpBase->mpMapHandler->GetCoopMode() && !ImGuiDebugMenu::GetLevelDoorSinglePlayer() &&
+                if((gpBase->mpMapHandler->GetCoopMode() || (gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) && !ImGuiDebugMenu::GetLevelDoorSinglePlayer() &&
 				   mpEntityInFocus->GetEntityType()==eLuxEntityType_Prop &&
 				   static_cast<iLuxProp*>(mpEntityInFocus)->GetPropType()==eLuxPropType_LevelDoor)
 				{
@@ -209,7 +210,7 @@ bool iLuxPlayerState_DefaultBase::OnDoAction(eLuxPlayerAction aAction,bool abPre
 				// The map script's PlayerInteractCallback. One-shot callbacks clear
 				// themselves inside RunInteractCallbackFunc, so the second player
 				// using the same object never re-fires it.
-				if(mpPlayer->IsPlayer2()==false || ImGuiDebugMenu::GetP2InteractCallbacks())
+                if(mpPlayer->IsPlayer2()==false || ImGuiDebugMenu::GetP2InteractCallbacks() || (gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers()))
 				{
 					mpEntityInFocus->RunInteractCallbackFunc();
 				}

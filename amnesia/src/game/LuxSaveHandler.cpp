@@ -18,6 +18,7 @@
  */
 
 #include "LuxSaveHandler.h"
+#include "LuxNetwork.h"
 
 #include "LuxMapHandler.h"
 #include "LuxMap.h"
@@ -202,6 +203,7 @@ void cLuxSaveHandler::Reset()
 
 void cLuxSaveHandler::SaveGameToFile(const tWString& asFile, bool abSaveSnapshot)
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) return;
 	Log("-------- BEGIN SAVE TO: %s ---------\n", cString::To8Char(asFile).c_str());
 
 	cLuxSaveGame_SaveData* pData = CreateSaveGameData();
@@ -237,6 +239,7 @@ void cLuxSaveHandler::SaveGameToFile(const tWString& asFile, bool abSaveSnapshot
 
 void cLuxSaveHandler::LoadGameFromFile(const tWString& asFile)
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) return;
 	Log("-------- BEGIN LOAD FROM %s ---------\n", cString::To8Char(asFile).c_str());
 
 	cLuxSaveGame_SaveData * pSaveGame = hplNew(cLuxSaveGame_SaveData, ());
@@ -256,6 +259,7 @@ void cLuxSaveHandler::LoadGameFromFile(const tWString& asFile)
 
 bool cLuxSaveHandler::AutoSave()
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) return false;
 	//////////////////////
 	// HARDMODE
 	if (gpBase->mbHardMode)
@@ -274,6 +278,7 @@ bool cLuxSaveHandler::AutoSave()
 
 bool cLuxSaveHandler::AutoLoad(bool abResetProgressLogger)
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) return false;
 	// Wait until any pending save is done.
 	if(mSaveHandlerThreadClass.IsRunning())
 		mSaveHandlerThreadClass.ProcessPendingSaves();
@@ -325,6 +330,7 @@ bool cLuxSaveHandler::SaveFileExists()
 // HARDMODE
 bool cLuxSaveHandler::HardModeSave()
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) return false;
 	SaveGameToFile(gpBase->msProfileSavePath + GetSaveName(_W("HardMode")));
 	return true;
 }
@@ -353,7 +359,7 @@ cLuxSaveGame_SaveData *cLuxSaveHandler::CreateSaveGameData()
 	pSave->mlCoopDualMonitor = gpBase->mpMapHandler->GetDualMonitorIndex();
 
 	pSave->mbHasPlayer2 = false;
-	if(pSave->mbCoopActive && gpBase->mpPlayer2 && gpBase->mpPlayer2->GetCharacterBody())
+    if((pSave->mbCoopActive || (gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())) && gpBase->mpPlayer2 && gpBase->mpPlayer2->GetCharacterBody())
 	{
 		pSave->mPlayer2.FromPlayer(gpBase->mpPlayer2);
 		pSave->mbHasPlayer2 = true;
@@ -381,6 +387,7 @@ cLuxSaveGame_SaveData *cLuxSaveHandler::CreateSaveGameData()
 
 void cLuxSaveHandler::LoadSaveGameData(cLuxSaveGame_SaveData *apSave)
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) return;
 	Log("LOADING SAVE GAME!\n");
 
 	cLuxMap *pOldMap = NULL;
@@ -431,9 +438,11 @@ void cLuxSaveHandler::LoadSaveGameData(cLuxSaveGame_SaveData *apSave)
 	gpBase->mpMapHandler->SetCoopOptGlobalLantern(apSave->mbCoopOptGlobalLantern);
 	gpBase->mpMapHandler->SetDualMonitorIndex(apSave->mlCoopDualMonitor);
 	gpBase->mpMapHandler->SetSplitScreenMode(apSave->mlCoopSplitMode);
-	if(gpBase->mpMapHandler->GetCoopMode() != apSave->mbCoopActive)
+    const bool onlineHost = gpBase->mpNetwork && gpBase->mpNetwork->GetSession().GetRole() == online::Role::Host;
+    const bool splitScreen = !onlineHost && apSave->mbCoopActive;
+    if(gpBase->mpMapHandler->GetCoopMode() != splitScreen)
 	{
-		gpBase->mpMapHandler->SetCoopMode(apSave->mbCoopActive);
+        gpBase->mpMapHandler->SetCoopMode(splitScreen);
 	}
 
 	///////////////////
@@ -495,7 +504,7 @@ void cLuxSaveHandler::LoadSaveGameData(cLuxSaveGame_SaveData *apSave)
 		// Coop: Player 2 is not a registered module, so mirror the world
 		// entity cycle P1 got from the broadcasts above (same map kept —
 		// P2 survived, but its body/avatar must be rebuilt fresh).
-		if(gpBase->mpMapHandler->GetCoopMode() && gpBase->mpPlayer2)
+        if((gpBase->mpMapHandler->GetCoopMode() || onlineHost) && gpBase->mpPlayer2)
 		{
 			gpBase->mpPlayer2->DestroyWorldEntities(pCurrentMap);
 			gpBase->mpPlayer2->Reset();
@@ -524,7 +533,8 @@ void cLuxSaveHandler::LoadSaveGameData(cLuxSaveGame_SaveData *apSave)
 	// Coop: restore Player 2's full state (position, camera, health, sanity,
 	// oil, tinderboxes, crouch, lantern, terror...) onto the freshly created
 	// P2 — same machinery as P1.
-	if(apSave->mbHasPlayer2 && gpBase->mpMapHandler->GetCoopMode() &&
+    if(onlineHost && apSave->mbHasPlayer2 && !gpBase->mpPlayer2) gpBase->mpMapHandler->CreatePlayer2(pCurrentMap);
+    if(apSave->mbHasPlayer2 && (gpBase->mpMapHandler->GetCoopMode() || onlineHost) &&
 		gpBase->mpPlayer2 && gpBase->mpPlayer2->GetCharacterBody())
 	{
 		apSave->mPlayer2.ToPlayer(pCurrentMap, gpBase->mpPlayer2);
@@ -537,6 +547,7 @@ void cLuxSaveHandler::LoadSaveGameData(cLuxSaveGame_SaveData *apSave)
 		cLuxPlayer::CoopSyncSharedTinderboxes();
 	}
 	apSave->mInventory.ToInventory(pCurrentMap, gpBase->mpInventory);
+    if(onlineHost) gpBase->mpNetwork->OnMapEnter(pCurrentMap);
 	apSave->mJournal.ToJournal(pCurrentMap, gpBase->mpJournal);
 	apSave->mMusicHandler.ToMusicHandler(pCurrentMap, gpBase->mpMusicHandler);
 	apSave->mEffectHandler.ToEffectHandler(pCurrentMap, gpBase->mpEffectHandler);

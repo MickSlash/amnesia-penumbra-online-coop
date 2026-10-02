@@ -18,6 +18,9 @@
  */
 
 #include "LuxInventory.h"
+#include "LuxNetwork.h"
+#include "LuxPlayerState.h"
+#include <algorithm>
 
 #include "LuxPlayer.h"
 #include "LuxInputHandler.h"
@@ -326,6 +329,10 @@ bool cLuxInventory_Slot::OnMouseUp(iWidget* apWidget, const cGuiMessageData& aDa
 
 	if(pItem && pPickedItem && pPickedItem != pItem)
 	{
+        if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) {
+            gpBase->mpNetwork->SendInventoryAction(online::PlayerAction::CombineInventory, pItem->GetName(), pPickedItem->GetName());
+            return true;
+        }
 		if(mpInventory->CheckSpecialCombineAction(pItem, pPickedItem, mlIdx)==false)
 		{
 			cLuxCombineItemsCallback *pComb = mpInventory->GetCombineCallback(pItem->GetName(), pPickedItem->GetName());
@@ -378,6 +385,11 @@ bool cLuxInventory_Slot::OnMouseDoubleClick(iWidget* apWidget, const cGuiMessage
 	if(pItem)
 	{
 		iLuxItemType *pItemType = mpInventory->mvItemTypes[pItem->GetType()];
+        if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) {
+            gpBase->mpNetwork->SendInventoryAction(online::PlayerAction::UseInventory, pItem->GetName());
+            if(pItem->GetType() == eLuxItemType_Puzzle) pItemType->OnUse(pItem, mlIdx);
+            return true;
+        }
 
 		pItemType->OnUse(pItem, mlIdx);
 
@@ -672,14 +684,14 @@ int cLuxInventory::GetActivePlayerIndex()
 
 std::vector<cLuxInventory_Item*>& cLuxInventory::GetActiveItems()
 {
-	if (ImGuiDebugMenu::GetFullItemShare()) return mvItems;
+    if (ImGuiDebugMenu::GetFullItemShare() || (gpBase->mpNetwork && gpBase->mpNetwork->UsesSharedInventory())) return mvItems;
 	if (GetActivePlayer()->IsPlayer2()) return mvItemsP2;
 	return mvItems;
 }
 
 cLuxInventory_Item*& cLuxInventory::GetActiveEquippedItem()
 {
-	if (ImGuiDebugMenu::GetFullItemShare()) return mpEquippedItem;
+    if (ImGuiDebugMenu::GetFullItemShare() || (gpBase->mpNetwork && gpBase->mpNetwork->UsesSharedInventory())) return mpEquippedItem;
 	if (GetActivePlayer()->IsPlayer2()) return mpEquippedItemP2;
 	return mpEquippedItem;
 }
@@ -695,7 +707,7 @@ bool cLuxInventory::PlayerHasItemOfType(cLuxPlayer *apPlayer, eLuxItemType aType
 	// the same question. With Full Item Share on there is only one list, so both
 	// players answer from it.
 	std::vector<cLuxInventory_Item*>& vItems =
-		(ImGuiDebugMenu::GetFullItemShare()==false && apPlayer->IsPlayer2()) ? mvItemsP2 : mvItems;
+        (ImGuiDebugMenu::GetFullItemShare()==false && !(gpBase->mpNetwork && gpBase->mpNetwork->UsesSharedInventory()) && apPlayer->IsPlayer2()) ? mvItemsP2 : mvItems;
 
 	for(size_t i=0; i<vItems.size(); ++i)
 	{
@@ -737,7 +749,7 @@ void cLuxInventory::Update(float afTimeStep)
 	// value read back correct while the world sat frozen anyway.
 	//
 	// Single player still pauses.
-	if(gpBase->mpMapHandler->GetCoopMode())
+    if(gpBase->mpMapHandler->GetCoopMode())
 	{
 		gpBase->mpEngine->GetUpdater()->RunMessageOnContainer("Default",
 														eUpdateableMessage_Update, afTimeStep);
@@ -937,7 +949,7 @@ void cLuxInventory::OnEnterContainer(const tString& asOldContainer)
 	//The RESTORES on the way out are left alone. Restoring volume that was never
 	//ducked is a no-op, and it means a bag opened before this build -- or in
 	//single player -- always ends up back at full volume.
-	bool bQuietTheWorld = (gpBase->mpMapHandler->GetCoopMode()==false);
+    bool bQuietTheWorld = (gpBase->mpMapHandler->GetCoopMode()==false && !(gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers()));
 
 	if(bQuietTheWorld)
 		gpBase->mpMapHandler->GetCurrentMap()->GetPhysicsWorld()->FadeoutAllLoopSounds(1.0f);
@@ -1319,7 +1331,7 @@ cLuxInventory_Item * cLuxInventory::AddItem(const tString& asName, eLuxItemType 
 		pOwner = gpBase->mpPlayer2;
 
 	if (mbForceAddToPlayer2 || (pOwner && pOwner->IsPlayer2()))
-		(ImGuiDebugMenu::GetFullItemShare() ? mvItems : mvItemsP2).push_back(pItem);
+        ((ImGuiDebugMenu::GetFullItemShare() || (gpBase->mpNetwork && gpBase->mpNetwork->UsesSharedInventory())) ? mvItems : mvItemsP2).push_back(pItem);
 	else
 		mvItems.push_back(pItem);
 	return pItem;
@@ -1535,9 +1547,75 @@ cLuxCombineItemsCallback*  cLuxInventory::GetCombineCallback(const tString& asIt
 
 void cLuxInventory::RunScript(const tString& asCommand)
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) return;
 	if(mpScript==NULL) return;
 
     mpScript->Run(asCommand);
+}
+online::InventoryState cLuxInventory::CaptureNetworkInventory(uint32_t epoch) {
+    online::InventoryState state; state.epoch = epoch;
+    for(cLuxInventory_Item* item : mvItems) {
+        online::InventoryItem value; value.name = item->GetName(); value.type = uint8_t(item->GetType());
+        value.subtype = item->GetSubType(); value.image = item->GetImageName();
+        value.value = item->GetStringVal(); value.extraValue = item->GetExtraStringVal();
+        value.nameEntry = item->GetGameNameEntry(); value.descriptionEntry = item->GetGameDescEntry();
+        value.amount = int32_t(std::max(0.0f, std::min(100000.0f, item->GetAmount())) * 1000);
+        value.count = uint16_t(std::max(1, std::min(65535, item->GetCount()))); state.items.push_back(value);
+    }
+    return state;
+}
+void cLuxInventory::ApplyNetworkInventory(const online::InventoryState& state) {
+    std::vector<cLuxInventory_Item*> next;
+    for(const auto& value : state.items) {
+        cLuxInventory_Item* item = NULL;
+        for(cLuxInventory_Item* old : mvItems)
+            if(old->GetName() == value.name && uint8_t(old->GetType()) == value.type && old->GetSubType() == value.subtype) { item = old; break; }
+        if(!item) {
+            cGuiGfxElement* image = mpGui->CreateGfxImage(value.image, eGuiMaterial_Alpha);
+            if(!image) { Error("Missing network inventory image '%s'\n", value.image.c_str()); continue; }
+            item = hplNew(cLuxInventory_Item, (value.name, eLuxItemType(value.type), value.subtype, this));
+            item->SetImage(image); item->SetImageName(value.image);
+        }
+        item->SetAmount(value.amount / 1000.0f); item->SetCount(value.count);
+        item->SetStringVal(value.value); item->SetExtraStringVal(value.extraValue);
+        item->SetGameNameEntry(value.nameEntry); item->SetGameDescEntry(value.descriptionEntry);
+        next.push_back(item);
+    }
+    for(cLuxInventory_Item* old : mvItems) if(std::find(next.begin(), next.end(), old) == next.end()) {
+        if(gpBase->mpPlayer->GetCurrentState() == eLuxPlayerState_UseItem) gpBase->mpPlayer->ChangeState(eLuxPlayerState_Normal);
+        if(mpPickedItem == old) mpPickedItem = NULL;
+        if(mpEquippedItem == old) mpEquippedItem = NULL;
+        hplDelete(old);
+    }
+    mvItems.swap(next);
+}
+void cLuxInventory::ApplyNetworkItemAction(cLuxPlayer* player, const tString& name, const tString& secondName, bool combine) {
+    cLuxPlayer* previousContext = mpActivePlayer;
+    mpActivePlayer = player;
+    cLuxPlayer* previousPlayer = cLuxPlayer::CoopBeginActAs(player);
+    cLuxInventory_Item* item = GetItem(name);
+    if(item && player->IsActive() && !player->IsDead()) {
+        if(combine) {
+            cLuxInventory_Item* other = GetItem(secondName);
+            if(other && other != item && !CheckSpecialCombineAction(item, other, GetItemIndex(item))) {
+                cLuxCombineItemsCallback* callback = GetCombineCallback(name, secondName);
+                if(callback) {
+                    const tString callbackName = callback->msName;
+                    const tString command = callback->msFunction + "(\"" + callback->msItemA + "\", \"" + callback->msItemB + "\")";
+                    const bool remove = callback->mbAutoDestroy;
+                    RunScript(command);
+                    if(remove && GetCombineCallback(name, secondName) == callback) RemoveCombineCallback(callbackName);
+                }
+            }
+        } else if(item->GetType() == eLuxItemType_Puzzle) {
+            if(player->GetCurrentState() == eLuxPlayerState_UseItem) player->ChangeState(eLuxPlayerState_Normal);
+            cLuxPlayerStateVars::SetupUseItem(item); player->ChangeState(eLuxPlayerState_UseItem);
+        } else if(item->GetType() == eLuxItemType_Health || item->GetType() == eLuxItemType_Sanity ||
+                  item->GetType() == eLuxItemType_LampOil || item->GetType() == eLuxItemType_Lantern) {
+            GetItemTypeData(item->GetType())->OnUse(item, GetItemIndex(item));
+        }
+    }
+    cLuxPlayer::CoopEndActAs(previousPlayer); mpActivePlayer = previousContext;
 }
 
 bool cLuxInventory::RecompileScript(tString *apOutput)
@@ -1645,7 +1723,7 @@ void cLuxInventory::SetEquippedHandItem(cLuxInventory_Item *apItem)
 
 cLuxInventory_Item* cLuxInventory::GetEquippedHandItem()
 {
-	if (ImGuiDebugMenu::GetFullItemShare()) return mpEquippedItem;
+    if (ImGuiDebugMenu::GetFullItemShare() || (gpBase->mpNetwork && gpBase->mpNetwork->UsesSharedInventory())) return mpEquippedItem;
 	if (mpActivePlayer && mpActivePlayer->IsPlayer2()) return mpEquippedItemP2;
 	return mpEquippedItem;
 }

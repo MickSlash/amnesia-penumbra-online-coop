@@ -18,6 +18,7 @@
  */
 
 #include "LuxMessageHandler.h"
+#include "LuxNetwork.h"
 
 #include "LuxMapHandler.h"
 #include "impl/ImGuiDebugMenu.h"
@@ -164,6 +165,11 @@ void cLuxMessageHandler::SetMessage(const tWString& asText, float afTime)
 
 void cLuxMessageHandler::SetMessage(const tWString& asText, float afTime, int alPlayerIndex)
 {
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::Message;
+        event.text[0] = cString::S16BitToUTF8(asText); event.values[0] = int32_t(cMath::Max(0.0f, afTime) * 1000);
+        gpBase->mpNetwork->QueuePresentation(event);
+    }
 	tWString sParsedText = gpBase->mpHelpFuncs->ParseString(asText);
 	mfMessageAlpha =0.0f;
 	mfMessageTime = afTime <=0 ? gpBase->mpHelpFuncs->GetStringDuration(sParsedText) : afTime;

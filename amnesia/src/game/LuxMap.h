@@ -111,6 +111,7 @@ public:
 	 * Do not call this when IsDeletingAllWorldEntities is true!
 	 */
 	void DestroyEntity(iLuxEntity *apEntity);
+    void FlushNetworkDestruction() { UpdateToBeDesotroyedEntities(false); }
 	iLuxEntity *GetEntityByName(const tString& asName, eLuxEntityType aType=eLuxEntityType_LastEnum, int alSubType=-1);
 	iLuxEntity *GetEntityByID(int alID, eLuxEntityType aType=eLuxEntityType_LastEnum, int alSubType=-1);
 	iLuxEntity *GetLatestEntity(){ return mpLatestAddedEntity;}

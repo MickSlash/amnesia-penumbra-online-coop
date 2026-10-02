@@ -18,6 +18,7 @@
  */
 
 #include "LuxEffectHandler.h"
+#include "LuxNetwork.h"
 
 #include "system/Platform.h"
 
@@ -1353,6 +1354,10 @@ cLuxEffect_PlayVoice::~cLuxEffect_PlayVoice()
 
 void cLuxEffect_PlayVoice::StopVoices(float afFadeOutSpeed)
 {
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::StopVoice;
+        event.values[0] = int32_t(afFadeOutSpeed * 1000); gpBase->mpNetwork->QueuePresentation(event);
+    }
 	if(mpSoundHandler->IsValid(mpVoiceEntry,mlVoiceEntryID)) mpVoiceEntry->FadeOut(afFadeOutSpeed);
 	mpVoiceEntry = NULL;
 
@@ -1369,6 +1374,13 @@ void cLuxEffect_PlayVoice::AddVoice(const tString& asVoiceFile, const tString& a
 									const tString& asTextCat, const tString& asTextEntry, bool abUsePostion, 
 									const cVector3f& avPosition, float afMinDistance, float afMaxDistance)
 {
+    if(gpBase->mpNetwork && gpBase->mpEngine->GetUpdater()->GetCurrentContainerName() != "Journal") {
+        online::Presentation event; event.kind = online::PresentationKind::Voice;
+        event.text = {{asVoiceFile, asEffectFile, asTextCat, asTextEntry}};
+        event.values = {{int32_t(avPosition.x * 1000), int32_t(avPosition.y * 1000), int32_t(avPosition.z * 1000),
+            int32_t(afMinDistance * 1000), int32_t(afMaxDistance * 1000), abUsePostion ? 1 : 0}};
+        gpBase->mpNetwork->QueuePresentation(event);
+    }
 	cLuxVoiceData voiceData;
 
 	//Log("Adding sounds: '%s' and '%s'\n", asVoiceFile.c_str(), asEffectFile.c_str());

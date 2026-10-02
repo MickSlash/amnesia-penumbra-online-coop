@@ -639,6 +639,8 @@ public:
 	//////////////////////
 	//Data
 	cMeshEntity * GetMeshEntity(){ return mpMeshEntity;}
+    const tString& GetNetworkFile() const { return msFileName; }
+    const cVector3f& GetNetworkScale() const { return mvOnLoadScale; }
 	iCharacterBody * GetCharacterBody() { return mpCharBody; }
 
 	iCollideShape* GetAttackShape(int alIdx){ return mvAttackShapes[alIdx];}
