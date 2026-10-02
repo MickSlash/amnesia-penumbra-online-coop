@@ -19,6 +19,8 @@ public:
     bool OwnsRemotePlayer2() const;
     void Reset();
     void SendLocalInput(online::PlayerInput input, float timeStep);
+    // Opt-in QA driver: normal movement/actions, never world state or scripts.
+    bool UpdateQADrive(float timeStep);
     bool IsClientReplica() const { return mSession.GetRole() == online::Role::Client; }
     bool HasNetworkPlayers() const { return mSession.Connected() && OwnsRemotePlayer2(); }
     bool WaitingForMap() const;
@@ -31,6 +33,12 @@ private:
     online::Session mSession;
     uint8_t mPreviousButtons = 0;
     uint16_t mSmokeSeconds = 0;
+    std::string mQADriveFile;
+    unsigned mQADriveSerial = 0;
+    int mQADriveFrames = 0;
+    online::PlayerInput mQADriveInput;
+    bool mQADriveInteract = false, mQADrivePreviousInteract = false;
+    float mQADriveTelemetryTime = 0;
     bool mOriginalFocusWait = true;
     std::chrono::steady_clock::time_point mSmokeStart;
     cLuxPlayer* mRemotePlayer2 = NULL; // observer; MapHandler owns player lifetime

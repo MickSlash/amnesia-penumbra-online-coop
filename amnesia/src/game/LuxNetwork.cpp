@@ -78,10 +78,15 @@ cLuxNetwork::~cLuxNetwork() {
 void cLuxNetwork::OnStart() {
     mOriginalFocusWait = gpBase->mpEngine->GetWaitIfAppOutOfFocus();
     const char* smoke = std::getenv("AMNESIA_NET_SMOKE_SECONDS");
-    if (smoke && Port(smoke, mSmokeSeconds) && mSmokeSeconds <= 60)
+    if (smoke && Port(smoke, mSmokeSeconds) && mSmokeSeconds <= 900)
         mSmokeStart = std::chrono::steady_clock::now();
     else mSmokeSeconds = 0;
     mTestMovement = mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MOVEMENT");
+    const char* drive = std::getenv("AMNESIA_NET_TEST_DRIVE_FILE");
+    if(mSmokeSeconds && drive && *drive) {
+        mQADriveFile = drive;
+        NetLog("[NET/QA] Input driver enabled; original physics and campaign scripts retained");
+    }
     cImGuiConsole::RegisterCommand("net_host", "net_host [port] - listen (connectivity prototype)",
         [this](const cImGuiConsole::tArgs& args) {
             uint16_t port = online::DefaultPort;
@@ -201,6 +206,60 @@ void cLuxNetwork::Update(float timeStep) {
 }
 bool cLuxNetwork::OwnsRemotePlayer2() const {
     return mRemotePlayer2 && mRemotePlayer2 == gpBase->mpPlayer2;
+}
+bool cLuxNetwork::UpdateQADrive(float timeStep) {
+    if(mQADriveFile.empty() || !mSmokeSeconds) return false;
+    cLuxPlayer* player = gpBase->mpPlayer;
+    cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
+    if(!map || !player || !player->GetCharacterBody()) return true;
+    FILE* command = std::fopen(mQADriveFile.c_str(), "rb");
+    if(command) {
+        unsigned serial; int frames, forward, strafe, yaw, pitch, interact;
+        if(std::fscanf(command, "%u %d %d %d %d %d %d", &serial, &frames, &forward, &strafe, &yaw, &pitch, &interact) == 7 &&
+            serial > mQADriveSerial && frames >= 0 && frames <= 120 && forward >= -1000 && forward <= 1000 && strafe >= -1000 && strafe <= 1000 &&
+            yaw >= -3142 && yaw <= 3142 && pitch >= -1571 && pitch <= 1571 && (interact == 0 || interact == 1)) {
+            mQADriveSerial = serial; mQADriveFrames = frames;
+            mQADriveInput.forward = int16_t(forward); mQADriveInput.strafe = int16_t(strafe);
+            mQADriveInput.yaw = int16_t(yaw); mQADriveInput.pitch = int16_t(pitch);
+            mQADriveInteract = interact != 0;
+        }
+        std::fclose(command);
+    }
+    const bool active = mQADriveFrames > 0 && player->IsActive() && !player->IsDead() && !WaitingForMap();
+    if(mQADriveFrames > 0) --mQADriveFrames;
+    online::PlayerInput input = mQADriveInput;
+    if(!active) { input.forward = input.strafe = 0; }
+    if(active) {
+        float delta = input.yaw / 1000.0f - player->GetCamera()->GetYaw();
+        player->AddYaw(std::atan2(std::sin(delta), std::cos(delta)) * 0.5f);
+        player->AddPitch((input.pitch / 1000.0f - player->GetCamera()->GetPitch()) * 0.5f);
+    }
+    if(IsClientReplica()) SendLocalInput(input, timeStep);
+    else if(active) {
+        player->Move(eCharDir_Forward, input.forward / 1000.0f);
+        player->Move(eCharDir_Right, input.strafe / 1000.0f);
+    }
+    bool held = active && mQADriveInteract;
+    if(held != mQADrivePreviousInteract) {
+        if(IsClientReplica()) SendLocalAction(online::PlayerAction::Interact, held);
+        else player->DoAction(eLuxPlayerAction_Interact, held);
+        mQADrivePreviousInteract = held;
+        NetLog(std::string("[NET/QA] Interact=") + (held ? "pressed" : "released") + " focus=" +
+            (player->GetEntityInFocus() ? player->GetEntityInFocus()->GetName() : "none"));
+    }
+    mQADriveTelemetryTime += timeStep;
+    if(mQADriveTelemetryTime >= 0.25f) {
+        mQADriveTelemetryTime = 0;
+        FILE* state = std::fopen((mQADriveFile + ".state").c_str(), "wb");
+        if(state) {
+            cVector3f feet = player->GetCharacterBody()->GetFeetPosition();
+            std::fprintf(state, "%u %s %.4f %.4f %.4f %.4f %.4f %d %.2f %s\n", mEpoch, map->GetFileName().c_str(), feet.x, feet.y, feet.z,
+                player->GetCamera()->GetYaw(), player->GetCamera()->GetPitch(), player->IsActive() ? 1 : 0, player->GetHealth(),
+                player->GetEntityInFocus() ? player->GetEntityInFocus()->GetName().c_str() : "none");
+            std::fclose(state);
+        }
+    }
+    return true;
 }
 bool cLuxNetwork::PlaceRemotePlayer2() {
     iCharacterBody* body = mRemotePlayer2->GetCharacterBody();

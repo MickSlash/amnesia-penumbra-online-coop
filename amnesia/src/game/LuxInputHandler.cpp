@@ -1451,6 +1451,7 @@ void cLuxInputHandler::UpdateGameInput()
 
 void cLuxInputHandler::UpdateGamePlayerInput()
 {
+    if(gpBase->mpNetwork && gpBase->mpNetwork->UpdateQADrive(gpBase->mpEngine->GetStepSize())) return;
 	// Experimental online client sends intent; the host simulates P2. Local
 	// interactions/inventory/movement are withheld until world replication exists.
 	if(gpBase->mpNetwork && gpBase->mpNetwork->GetSession().GetRole() == online::Role::Client)

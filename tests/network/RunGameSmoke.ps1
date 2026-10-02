@@ -30,7 +30,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_DRIVE_FILE')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -49,6 +49,7 @@ try {
         $initPath = Join-Path $runPath "$role-init.cfg"
         $init | Set-Content -LiteralPath $initPath -Encoding utf8
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ROLE', $role)
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DRIVE_FILE', $null)
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$(if ($role -eq 'client' -and $ClientPort -gt 0) { $ClientPort } else { $Port }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ADDRESS', '127.0.0.1')
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_SMOKE_SECONDS', $(if ($Campaign -or $MapOnly) { '60' } elseif ($Replication) { '30' } else { '15' }))

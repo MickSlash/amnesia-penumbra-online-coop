@@ -20,7 +20,7 @@ $init = $init -replace 'DefaultMainSettings(SDL2)?\s*=\s*"[^"]*"', "DefaultMainS
 $init = $init -replace 'File\s*=\s*"00_rainy_hall.map"', 'File = "02_entrance_hall.map"'
 $initPath = Join-Path $run 'init.cfg'
 $init | Set-Content -LiteralPath $initPath -Encoding utf8
-$names = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_SMOKE_SECONDS')
+$names = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_DRIVE_FILE')
 $saved = @{}
 foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
 $p = $null
@@ -35,6 +35,7 @@ try {
     [Environment]::SetEnvironmentVariable('AMNESIA_NET_ROLE','host')
     [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT',[string]$Port)
     [Environment]::SetEnvironmentVariable('AMNESIA_NET_SMOKE_SECONDS','15')
+    [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DRIVE_FILE',$null)
     $p = Start-Process -FilePath "$repo/amnesia/src/game/x64/Release/Lux.exe" -WorkingDirectory $game -ArgumentList $initPath -WindowStyle Hidden -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds(45)
     $listening = $false

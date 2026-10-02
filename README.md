@@ -8,6 +8,7 @@ map transitions, host saves and shared death/checkpoints. New story messages,
 voices and documents have presentation hooks; existing lights replicate state.
 **The complete original campaign is not yet validated.** See the
 [implementation status and remaining gaps](docs/network_architecture.md). The extended [QA report](docs/qa_2026-10-02.md) records intermittent death-state delivery and differences in cutscene, fog and HUD presentation.
+The [Rainy Hall traversal report](docs/qa_2026-10-03.md) records reaching Old Archives through the original exit using normal movement and client interactions on two local processes.
 
 ### Build Windows x64
 
@@ -58,6 +59,7 @@ and `net_disconnect`. Startup accepts `AMNESIA_NET_ROLE`, `AMNESIA_NET_PORT` and
 ```powershell
 ./tests/network/RunTransportTests.ps1
 ./tests/network/RunGameSmoke.ps1 -GameDirectory 'F:\SteamLibrary\steamapps\common\Amnesia The Dark Descent' -Campaign
+./tests/network/RunLevelPlaythrough.ps1 -GameDirectory 'F:\SteamLibrary\steamapps\common\Amnesia The Dark Descent'
 ```
 
 The campaign test launches two hidden game processes using separate test profiles.
@@ -65,6 +67,11 @@ It checks authoritative movement, client camera, entity baseline, pickup,
 inventory use, lighting/message relay, save/load, level change and death/respawn.
 It uses Entrance Hall and Old Archives rather than traversing the full campaign.
 The smoke timer and test fixtures are enabled only by developer test variables.
+The level driver follows Rainy Hall's original corridors, grabs the first door,
+and requests the original exit from the client. It retains physics and campaign
+scripts, including the original introduction. Its input commands expire within
+120 simulation ticks. The driver requires both a smoke timer and an explicit
+`AMNESIA_NET_TEST_DRIVE_FILE`; the normal launcher clears these settings.
 
 Remaining work includes a complete two-PC campaign playthrough, unsupported script
 effects/entities, journal history for joining saved games, and WAN latency/loss
