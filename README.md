@@ -1,5 +1,88 @@
 # Amnesia: The Dark Descent — Local Co-op Mod
 
+## Online Co-op development prototype
+
+Work in progress on `feature/online-coop`. The original local co-op remains the
+gameplay baseline. Online transport and handshake are implemented; this is **not
+yet a playable online campaign**. See [network architecture](docs/network_architecture.md).
+
+### Build Windows x64
+
+This checkout is tested with Visual Studio 2026 Community, MSVC toolset v145 and
+Windows SDK 10.0.26100.0. Retain the extracted HPL2 dependencies from the upstream
+setup instructions below. ENet 1.3.18 is included as source (MIT); no separate
+package manager or ENet DLL is required.
+
+From a Visual Studio developer PowerShell:
+
+```powershell
+msbuild amnesia/src/game/Lux.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145
+msbuild tests/network/NetworkTests.vcxproj /m /p:Configuration=Release /p:Platform=x64
+```
+
+Use the **same compiler for every dependency**. If changing compiler versions,
+run the game command once with `/t:Rebuild` to avoid C1047/LNK1257 from old LTO objects.
+The game output is `amnesia/src/game/x64/Release/Lux.exe` (check MSBuild output).
+Install the executable beside the game's `config`, `maps`, `entities` and
+`resources.cfg`, using your legitimate game installation and an x64 OpenAL runtime.
+Do not commit binaries, runtime data or copyrighted assets.
+
+### Host and join (connection testing only)
+
+Enable the existing developer console in Options → Debug. Commands:
+
+```text
+net_host 27020
+net_join 127.0.0.1 27020
+net_status
+net_ping
+net_disconnect
+```
+
+The default port is 27020 UDP; direct Internet connections require host-side UDP
+port forwarding where necessary. There is no lobby, relay or NAT traversal yet.
+Startup also accepts `AMNESIA_NET_ROLE=host|client`, `AMNESIA_NET_PORT` and
+`AMNESIA_NET_ADDRESS`. Existing init-config command-line behavior is preserved.
+
+### Two-process transport test without game assets
+
+```powershell
+./build/network/NetworkTests.exe
+# Terminal A:
+./build/network/NetworkTests.exe host 27029
+# Terminal B, within eight seconds:
+./build/network/NetworkTests.exe client 27029
+```
+
+Both processes must report PASS. This exercises real localhost UDP, protocol
+handshake, PlayerInput transmission and disconnect cleanup; it does not test
+gameplay rendering. `bad-version 27029` checks rejection of an incompatible peer;
+start a valid client afterwards so the host test can complete.
+
+### Current limitations
+
+Two peers maximum, no reconnect/session resume, no map compatibility handshake,
+player snapshots or interpolation, no replicated world/interactions/inventory/AI/
+damage/scripts/transitions. The host creates P2 without split-screen and applies
+remote movement input; the client sends keyboard/mouse intent at 30 Hz. Its
+camera position cannot yet follow host movement because snapshots are pending.
+A connection alone does not make two campaigns
+share state. Do not use online test sessions for campaign saves.
+
+Automated runtime checks (use a separate development installation when testing):
+
+```powershell
+./tests/network/RunTransportTests.ps1
+./tests/network/RunGameSmoke.ps1 -GameDirectory 'F:\SteamLibrary\steamapps\common\Amnesia The Dark Descent'
+./tests/network/RunHostPlayerTest.ps1 -GameDirectory 'F:\SteamLibrary\steamapps\common\Amnesia The Dark Descent'
+```
+
+The game smoke test opens two hidden game processes with separate test profiles,
+verifies handshake, then exits cleanly. The host player test loads Entrance Hall,
+uses a separate ENet input sender, checks horizontal movement and removal on
+disconnect. These checks do not prove client snapshot rendering or campaign sync.
+`AMNESIA_NET_SMOKE_SECONDS` (1–60) is a developer-only clean-exit timer.
+
 Split-Screen / Dual Monitor Local Co-op for *Amnesia: The Dark Descent*, built on the
 [Amnesia64](https://github.com/buzer2020/Amnesia64) 64-bit fork of Frictional Games'
 open-source HPL2 engine.

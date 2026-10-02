@@ -37,6 +37,7 @@ class cLuxEffectHandler;
 class cLuxDebugHandler;
 class cLuxSaveHandler;
 class cLuxScriptHandler;
+class cLuxNetwork;
 class cLuxHelpFuncs;
 class cLuxEffectRenderer;
 class cLuxMusicHandler;
@@ -253,6 +254,7 @@ public:
 	cLuxDebugHandler *mpDebugHandler;
 	cLuxSaveHandler *mpSaveHandler;
 	cLuxScriptHandler *mpScriptHandler;
+	cLuxNetwork *mpNetwork;
 	cLuxHelpFuncs *mpHelpFuncs;
 	cLuxEffectRenderer *mpEffectRenderer;
 	cLuxInventory *mpInventory;

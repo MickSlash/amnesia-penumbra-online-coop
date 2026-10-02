@@ -11,6 +11,12 @@ file(GLOB serial_source RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
     ../serial_gen/SerialGenAlgo.cpp
 )
 list(REMOVE_ITEM all_sources ${serial_source})
+list(APPEND all_sources network/NetSession.cpp network/NetSession.h)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/enet ${CMAKE_CURRENT_BINARY_DIR}/enet)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/enet/include)
+if(WIN32)
+    target_link_libraries(enet ws2_32 winmm)
+endif()
 
 if (APPLE)
     set(mac_assets
@@ -45,7 +51,7 @@ endif()
 add_executable(Amnesia MACOSX_BUNDLE
     ${full_sources}
 )
-target_link_libraries(Amnesia HPL2)
+target_link_libraries(Amnesia HPL2 enet)
 set_target_properties(Amnesia PROPERTIES
 	COMPILE_DEFINITIONS "${compile_defs}"
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Game-Info.plist"
@@ -69,7 +75,7 @@ ENDIF()
 add_executable(AmnesiaDemo MACOSX_BUNDLE EXCLUDE_FROM_ALL
     ${all_sources}
 )
-target_link_libraries(AmnesiaDemo HPL2)
+target_link_libraries(AmnesiaDemo HPL2 enet)
 set_target_properties(AmnesiaDemo PROPERTIES
 	COMPILE_DEFINITIONS "${demo_compile_defs}"
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Game-Info.plist"

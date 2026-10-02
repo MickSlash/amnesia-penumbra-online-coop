@@ -18,6 +18,7 @@
  */
 
 #include "LuxBase.h"
+#include "LuxNetwork.h"
 
 #include "LuxInputHandler.h"
 
@@ -400,6 +401,7 @@ cLuxBase::cLuxBase()
 	mpCurrentMapLoading = NULL;
 
 	mpPlayer2 = NULL;
+	mpNetwork = NULL;
 
 
 	///////////////////////////////
@@ -1569,6 +1571,7 @@ bool cLuxBase::InitGame()
 	mpHelpFuncs = CreateGlobalModule( cLuxHelpFuncs);
 	mpSaveHandler = CreateGlobalModule( cLuxSaveHandler);
 	mpScriptHandler = CreateGlobalModule( cLuxScriptHandler);
+	mpNetwork = CreateGlobalModule( cLuxNetwork);
 	mpProgressLogHandler = CreateGlobalModule( cLuxProgressLogHandler);
 	
 	//Default

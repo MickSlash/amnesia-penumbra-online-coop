@@ -18,6 +18,7 @@
  */
 
 #include "LuxMapHandler.h"
+#include "LuxNetwork.h"
 
 #include "LuxMap.h"
 #include "LuxPlayer.h"
@@ -1891,8 +1892,9 @@ void cLuxMapHandler::Update(float afTimeStep)
 		mpCurrentMap->Update(afTimeStep);
 
 		// Update Player 2 if coop is active
-		if (mbCoopActive && gpBase->mpPlayer2)
+		if ((mbCoopActive || (gpBase->mpNetwork && gpBase->mpNetwork->OwnsRemotePlayer2())) && gpBase->mpPlayer2)
 		{
+			if(gpBase->mpNetwork) gpBase->mpNetwork->ApplyRemotePlayerInput();
 			UpdatePlayer2(afTimeStep);
 		}
 

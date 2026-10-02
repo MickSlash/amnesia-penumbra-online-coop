@@ -18,6 +18,7 @@
  */
 
 #include "LuxInputHandler.h"
+#include "LuxNetwork.h"
 
 #include "impl/ImGuiConsole.h"
 
@@ -1352,6 +1353,12 @@ bool cLuxInputHandler::UpdateGamepadUIInput()
 
 void cLuxInputHandler::UpdateGameInput()
 {
+	if(gpBase->mpNetwork && gpBase->mpNetwork->GetSession().GetRole() == online::Role::Client)
+	{
+		if(mpInput->BecameTriggerd(eLuxAction_Exit)) gpBase->mpEngine->GetUpdater()->SetContainer("MainMenu");
+		UpdateGamePlayerInput();
+		return;
+	}
 	/////////////////
 	// Debug: co-op player teleports on F1/F2. While the Player Teleport
 	// debug option is ON (default) and coop is running, these OVERRIDE the
@@ -1444,6 +1451,28 @@ void cLuxInputHandler::UpdateGameInput()
 
 void cLuxInputHandler::UpdateGamePlayerInput()
 {
+	// Experimental online client sends intent; the host simulates P2. Local
+	// interactions/inventory/movement are withheld until world replication exists.
+	if(gpBase->mpNetwork && gpBase->mpNetwork->GetSession().GetRole() == online::Role::Client)
+	{
+		online::PlayerInput input;
+		if(mpPlayer->IsActive() && !mpPlayer->IsDead())
+		{
+			cVector2l mouse = GetFrameMouseRel();
+			float scale = mfMouseSensitivity / (1.7f * mpGraphics->GetLowLevel()->GetScreenSizeFloat().y);
+			mpPlayer->AddYaw(-mouse.x * scale);
+			mpPlayer->AddPitch((mbInvertMouse ? 1.0f : -1.0f) * mouse.y * scale);
+			input.forward = (P1IsTriggerd(eLuxAction_Forward) ? 1000 : 0) - (P1IsTriggerd(eLuxAction_Backward) ? 1000 : 0);
+			input.strafe = (P1IsTriggerd(eLuxAction_Right) ? 1000 : 0) - (P1IsTriggerd(eLuxAction_Left) ? 1000 : 0);
+			input.buttons = (P1IsTriggerd(eLuxAction_Jump) ? 1 : 0) | (P1IsTriggerd(eLuxAction_Crouch) ? 2 : 0) | (P1IsTriggerd(eLuxAction_Run) ? 4 : 0);
+		}
+		float yaw = mpPlayer->GetCamera()->GetYaw();
+		input.yaw = (int16_t)(atan2f(sinf(yaw), cosf(yaw)) * 1000.0f);
+		float pitch = cMath::Clamp(mpPlayer->GetCamera()->GetPitch(), -1.571f, 1.571f);
+		input.pitch = (int16_t)(pitch * 1000.0f);
+		gpBase->mpNetwork->SendLocalInput(input, gpBase->mpEngine->GetStepSize());
+		return;
+	}
 	mbP1GameInputRan = true;
 
 	//The filter runs at the top of Update() now, for the whole tick and for every
@@ -3253,6 +3282,7 @@ bool cLuxInputHandler::UpdatePlayer2RawInput()
 
 void cLuxInputHandler::UpdatePlayer2Input()
 {
+	if(gpBase->mpNetwork && gpBase->mpNetwork->GetSession().GetRole() != online::Role::Offline) return;
 	//A second keyboard and mouse instead of the pad. Returns false when that is
 	//switched off or unavailable, and the gamepad path below runs as it always has.
 	if(UpdatePlayer2RawInput()) return;
