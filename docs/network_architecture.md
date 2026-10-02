@@ -1,5 +1,12 @@
 # Amnesia Online Co-op — architettura e stato
 
+## QA successiva
+
+La [verifica estesa del 2 ottobre](qa_2026-10-02.md) aggiunge screenshot di livelli
+originali, prova del Grunt, stress ASAN e rete con ritardo/perdita. Ha trovato
+consegna intermittente dello stato di morte e differenze di cutscene/fog/HUD.
+Il passaggio delle prove precedenti non certifica la robustezza di questi casi.
+
 ## Stato implementato
 
 La branch `feature/online-coop` contiene una prima integrazione giocabile per due

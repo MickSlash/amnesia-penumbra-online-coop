@@ -22,6 +22,10 @@
 #include <cmath>
 #include <algorithm>
 namespace {
+bool TestFlag(const char* name) {
+    const char* value = std::getenv(name);
+    return value && std::string(value) == "1";
+}
 bool Port(const std::string& text, uint16_t& value) {
     if (text.empty() || text.size() > 5) return false;
     unsigned number = 0;
@@ -77,7 +81,7 @@ void cLuxNetwork::OnStart() {
     if (smoke && Port(smoke, mSmokeSeconds) && mSmokeSeconds <= 60)
         mSmokeStart = std::chrono::steady_clock::now();
     else mSmokeSeconds = 0;
-    mTestMovement = mSmokeSeconds && std::getenv("AMNESIA_NET_TEST_MOVEMENT") != NULL;
+    mTestMovement = mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MOVEMENT");
     cImGuiConsole::RegisterCommand("net_host", "net_host [port] - listen (connectivity prototype)",
         [this](const cImGuiConsole::tArgs& args) {
             uint16_t port = online::DefaultPort;
@@ -309,7 +313,7 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
         // ownership are checked by the host's existing player state.
         if(player->GetCurrentState() == eLuxPlayerState_Normal || player->GetCurrentState() == eLuxPlayerState_UseItem)
             player->GetCurrentStateData()->Update(0);
-        if(mSmokeSeconds && std::getenv("AMNESIA_NET_TEST_PICKUP") && action.action == online::PlayerAction::Interact && action.pressed) {
+        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_PICKUP") && action.action == online::PlayerAction::Interact && action.pressed) {
             cVector3f ray = player->GetInteractionForward();
             NetLog("[NET/TEST] Pickup ray=" + std::to_string(ray.x) + "," + std::to_string(ray.y) + "," + std::to_string(ray.z) +
                 " focus=" + (player->GetEntityInFocus() ? player->GetEntityInFocus()->GetName() : "none"));
@@ -450,6 +454,10 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         }
         online::Snapshot snapshot;
         if(mSession.ReadSnapshot(snapshot) && (!mReceivedSnapshot || snapshot.sequence != mReceivedSequence)) {
+            if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_ENEMY") && !mTestEnemyDamage &&
+                (snapshot.players[0].health < 9900 || snapshot.players[1].health < 9900)) {
+                mTestEnemyDamage = true; NetLog("[NET/TEST] Host enemy damage applied on client");
+            }
             if(!mReceivedSnapshot) {
                 NetLog("[NET/STATE] First authoritative player snapshot applied");
                 const auto& p = snapshot.players[1]; mReplicaInitialFeet = cVector3f(p.x / 1000.0f, p.y / 1000.0f, p.z / 1000.0f);
@@ -519,7 +527,35 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         return;
     }
     if(!gpBase->mpPlayer2 || !gpBase->mpPlayer2->GetCharacterBody()) return;
-    if(mSmokeSeconds && std::getenv("AMNESIA_NET_TEST_PICKUP") && !mTestPickupSpawned) {
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_ENEMY")) {
+        if(!mTestEnemySpawned) {
+            cLuxPlayer* player = gpBase->mpPlayer2;
+            cVector3f position = player->GetCharacterBody()->GetFeetPosition() + player->GetCamera()->GetForward() * 3.0f;
+            map->CreateEntity("online_test_grunt", "entities/enemy/servant_grunt/servant_grunt.ent", cMath::MatrixTranslate(position), cVector3f(1));
+            iLuxEntity* entity = map->GetEntityByName("online_test_grunt");
+            if(entity && entity->GetEntityType() == eLuxEntityType_Enemy) {
+                iLuxEnemy* enemy = static_cast<iLuxEnemy*>(entity);
+                enemy->SetActive(true); enemy->ChangeState(eLuxEnemyState_Wait); enemy->SetDisabled(true);
+                mTestEnemyInitialPosition = enemy->GetCharacterBody()->GetPosition(); mTestEnemySpawned = true;
+                NetLog("[NET/TEST] Spawned authoritative enemy fixture");
+            } else { NetLog("[NET/TEST] Enemy fixture creation FAILED"); mSession.Stop(); return; }
+        }
+        iLuxEntity* entity = map->GetEntityByName("online_test_grunt");
+        if(entity && entity->GetEntityType() == eLuxEntityType_Enemy) {
+            iLuxEnemy* enemy = static_cast<iLuxEnemy*>(entity);
+            if(!mTestEnemyHunting && now - mSmokeStart > std::chrono::seconds(30)) {
+                enemy->SetDisabled(false); enemy->ShowPlayerPosition(); enemy->ChangeState(eLuxEnemyState_Hunt); mTestEnemyHunting = true;
+            }
+            cVector3f delta = enemy->GetCharacterBody()->GetPosition() - mTestEnemyInitialPosition;
+            if(!mTestEnemyMoved && delta.x*delta.x + delta.z*delta.z > 0.01f) {
+                mTestEnemyMoved = true; NetLog("[NET/TEST] Host enemy moved under authoritative AI");
+            }
+            if(!mTestEnemyDamage && (gpBase->mpPlayer->GetHealth() < 99 || gpBase->mpPlayer2->GetHealth() < 99)) {
+                mTestEnemyDamage = true; NetLog("[NET/TEST] Host enemy caused player damage");
+            }
+        }
+    }
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_PICKUP") && !mTestPickupSpawned) {
         cLuxPlayer* player = gpBase->mpPlayer2;
         cVector3f position = player->GetCamera()->GetPosition() + player->GetCamera()->GetForward() * 1.2f;
         map->CreateEntity("online_test_tinderbox", "entities/item/tinderbox/tinderbox.ent", cMath::MatrixTranslate(position), cVector3f(1));
@@ -546,7 +582,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             mTestPotionUsed = true; NetLog("[NET/TEST] Host validated remote inventory use; one potion consumed");
         }
     }
-    if(mSmokeSeconds && std::getenv("AMNESIA_NET_TEST_CAMPAIGN") && mTestPotionUsed && mTestPickupFinished && mObservedRemoteMovement) {
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_CAMPAIGN") && mTestPotionUsed && mTestPickupFinished && mObservedRemoteMovement) {
         float elapsed = std::chrono::duration<float>(now - mSmokeStart).count();
         if(!mTestSaveLoaded && elapsed > 8) {
             mTestSaveLoaded = true;
@@ -565,8 +601,10 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             mTestDeathStarted = true;
             gpBase->mpPlayer2->SetHealth(0);
             NetLog("[NET/TEST] Triggered authoritative shared death");
+            mTestDeathObserved = gpBase->mpPlayer->IsDead() && gpBase->mpPlayer2->IsDead();
+            NetLog("[NET/TEST] Death health host=" + std::to_string(gpBase->mpPlayer->GetHealth()) + " remote=" + std::to_string(gpBase->mpPlayer2->GetHealth()));
         }
-        if(mTestDeathStarted && !mTestRevived && !gpBase->mpPlayer->IsDead() && !gpBase->mpPlayer2->IsDead()) {
+        if(mTestDeathObserved && !mTestRevived && !gpBase->mpPlayer->IsDead() && !gpBase->mpPlayer2->IsDead()) {
             mTestRevived = true;
             NetLog("[NET/TEST] Both players revived at host checkpoint");
         }
@@ -591,7 +629,12 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         p.flags = (player->GetCharacterBody()->GetActiveSize() == 1 ? 1 : 0) |
             (player->GetHelperLantern()->IsActive() ? 2 : 0) | (player->IsActive() ? 4 : 0) | (player->IsDead() ? 8 : 0);
     }
-    mSession.SendSnapshot(snapshot);
+    const bool snapshotSent = mSession.SendSnapshot(snapshot);
+    const bool dead = (snapshot.players[1].flags & 8) != 0;
+    if(mSmokeSeconds && snapshotSent && (!mTestHasLifeSnapshot || mTestLastSentDead != dead)) {
+        mTestHasLifeSnapshot = true; mTestLastSentDead = dead;
+        NetLog("[NET/TEST] Sent remote life snapshot dead=" + std::to_string(dead ? 1 : 0) + " sequence=" + std::to_string(snapshot.sequence));
+    }
     ReplicateWorld(map);
     ReplicateLights(map);
     for(unsigned count = 0; count < 64 && !mPendingPresentation.empty(); ++count) {
@@ -700,6 +743,12 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
     } else if(state.type == eLuxEntityType_Enemy && !state.bodies.empty()) {
         iLuxEnemy* enemy = static_cast<iLuxEnemy*>(entity);
         if(enemy->GetCharacterBody()) enemy->GetCharacterBody()->SetPosition(UnpackTransform(state.bodies[0]).GetTranslation());
+        if(mSmokeSeconds && state.name == "online_test_grunt") {
+            cVector3f position = UnpackTransform(state.bodies[0]).GetTranslation();
+            if(!mTestHasEnemyReplica) { mTestHasEnemyReplica = true; mTestReplicaEnemyInitialPosition = position; NetLog("[NET/TEST] Authoritative enemy created on client"); }
+            cVector3f delta = position - mTestReplicaEnemyInitialPosition;
+            if(!mTestReplicaEnemyMoved && delta.x*delta.x + delta.z*delta.z > 0.01f) { mTestReplicaEnemyMoved = true; NetLog("[NET/TEST] Authoritative enemy movement applied on client"); }
+        }
     }
     cMeshEntity* mesh = entity->GetMeshEntity();
     if(mesh) {

@@ -4,12 +4,16 @@ $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $logDir = [IO.Path]::GetDirectoryName($exePath)
 & $exePath
 if ($LASTEXITCODE -ne 0) { throw 'Protocol validation failed' }
-function Test-Connection([int]$TestPort, [bool]$RejectVersion) {
+function Test-Connection([int]$TestPort, [bool]$RejectVersion, [bool]$Malformed = $false) {
     $hostProcess = Start-Process -FilePath $exePath -ArgumentList 'host', $TestPort -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logDir/host-$TestPort.log" -RedirectStandardError "$logDir/host-$TestPort.err"
     try {
         if ($RejectVersion) {
             & $exePath bad-version $TestPort
             if ($LASTEXITCODE -ne 0) { throw 'Version rejection failed' }
+        }
+        if ($Malformed) {
+            & $exePath malformed $TestPort
+            if ($LASTEXITCODE -ne 0) { throw 'Malformed gameplay rejection failed' }
         }
         & $exePath client $TestPort
         if ($LASTEXITCODE -ne 0) { throw 'Client test failed' }
@@ -23,3 +27,4 @@ function Test-Connection([int]$TestPort, [bool]$RejectVersion) {
 }
 Test-Connection $Port $false
 Test-Connection ($Port + 1) $true
+Test-Connection ($Port + 2) $false $true

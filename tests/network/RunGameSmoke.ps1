@@ -2,17 +2,23 @@ param(
     [Parameter(Mandatory=$true)][string]$GameDirectory,
     [string]$Executable = "$PSScriptRoot/../../amnesia/src/game/x64/Release/Lux.exe",
     [int]$Port = 27032,
+    [int]$ClientPort = 0,
     [switch]$Replication,
-    [switch]$Campaign
+    [switch]$Campaign,
+    [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
+    [switch]$Visual,
+    [switch]$MapOnly,
+    [switch]$Enemy
 )
 $ErrorActionPreference = 'Stop'
 if ($Campaign) { $Replication = $true }
+if ($Enemy) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $repoPath = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
-$runPath = Join-Path $repoPath $(if ($Replication) { 'build/player-replication' } else { 'build/game-smoke' })
+$runPath = Join-Path $repoPath $(if ($Enemy) { 'build/enemy-test' } elseif ($MapOnly) { "build/visual-qa/$($StartMap.Replace('.map',''))" } elseif ($Replication) { 'build/player-replication' } else { 'build/game-smoke' })
 New-Item -ItemType Directory -Force -Path $runPath | Out-Null
-$runId = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
+$runId = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') + '_' + [Guid]::NewGuid().ToString('N').Substring(0,8)
 $settingsPath = Join-Path $runPath 'settings.cfg'
 @'
 <Main ShowMenu="true" ShowPreMenu="false" SaveConfig="false" DefaultProfileName="net_test" UpdateLogActive="false" />
@@ -24,7 +30,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -32,25 +38,28 @@ try {
         $profile = "OnlineCoopSmoke_${runId}_$role"
         $profiles[$role] = Join-Path ([Environment]::GetFolderPath('MyDocuments')) "Amnesia/$profile/hpl.log"
         $init = $baseConfig -replace 'MainSaveFolder\s*=\s*"[^"]*"', "MainSaveFolder = `"$profile`""
+        if ($Visual) { $init = $init -replace 'GameName\s*=\s*"[^"]*"', "GameName = `"Amnesia Online QA [$role]`"" }
         $init = $init -replace 'DefaultMainSettings(SDL2)?\s*=\s*"[^"]*"', "DefaultMainSettings`$1 = `"$settingsPath`""
-        if ($Replication -and $role -eq 'host') {
+        if (($Replication -or $MapOnly) -and $role -eq 'host') {
             $hostSettings = Join-Path $runPath 'host-settings.cfg'
             ([IO.File]::ReadAllText($settingsPath) -replace 'ShowMenu="true"', 'ShowMenu="false"') | Set-Content -LiteralPath $hostSettings -Encoding utf8
             $init = $init.Replace($settingsPath, $hostSettings)
-            $init = $init -replace 'File\s*=\s*"00_rainy_hall.map"', 'File = "02_entrance_hall.map"'
+            $init = $init -replace 'File\s*=\s*"00_rainy_hall.map"', "File = `"$StartMap`""
         }
         $initPath = Join-Path $runPath "$role-init.cfg"
         $init | Set-Content -LiteralPath $initPath -Encoding utf8
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ROLE', $role)
-        [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$Port)
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$(if ($role -eq 'client' -and $ClientPort -gt 0) { $ClientPort } else { $Port }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ADDRESS', '127.0.0.1')
-        [Environment]::SetEnvironmentVariable('AMNESIA_NET_SMOKE_SECONDS', $(if ($Campaign) { '60' } elseif ($Replication) { '30' } else { '15' }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_SMOKE_SECONDS', $(if ($Campaign -or $MapOnly) { '60' } elseif ($Replication) { '30' } else { '15' }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_MOVEMENT', $(if ($Replication -and $role -eq 'client') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_PICKUP', $(if ($Replication -and $role -eq 'host') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_CAMPAIGN', $(if ($Campaign -and $role -eq 'host') { '1' } else { $null }))
-        $processes += Start-Process -FilePath $exePath -WorkingDirectory $gamePath -ArgumentList $initPath -WindowStyle Hidden -PassThru
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_ENEMY', $(if ($Enemy) { '1' } else { $null }))
+        $style = if ($Visual) { 'Normal' } else { 'Hidden' }
+        $processes += Start-Process -FilePath $exePath -WorkingDirectory $gamePath -ArgumentList $initPath -WindowStyle $style -PassThru
     }
-    $deadline = [DateTime]::UtcNow.AddSeconds($(if ($Campaign) { 90 } else { 50 }))
+    $deadline = [DateTime]::UtcNow.AddSeconds($(if ($Campaign -or $MapOnly) { 90 } else { 50 }))
     while (@($processes | Where-Object { !$_.HasExited }).Count -gt 0 -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 250
     }
@@ -62,10 +71,25 @@ try {
     foreach ($role in @('host','client')) {
         $log = [IO.File]::ReadAllText($profiles[$role])
         [IO.File]::WriteAllText((Join-Path $runPath "$role.log"), $log)
+    }
+    foreach ($role in @('host','client')) {
+        $log = [IO.File]::ReadAllText((Join-Path $runPath "$role.log"))
         if (!$log.Contains('Protocol handshake accepted') -or !$log.Contains('Smoke test finished')) {
             throw "$role did not finish a handshake and clean smoke exit: $($profiles[$role])"
         }
         Write-Output "PASS: $role game handshake and clean exit ($($profiles[$role]))"
+        if ($MapOnly) {
+            if ($log.Contains('Spawned remote pickup fixture') -or $log.Contains('Requested authoritative campaign level transition')) { throw 'Map-only run unexpectedly enabled scripted test fixtures' }
+            $markers = if ($role -eq 'host') { @('Complete host entity baseline sent') } else { @('Complete host entity baseline applied','First authoritative player snapshot applied') }
+            foreach ($marker in $markers) { if (!$log.Contains($marker)) { throw "Missing $role map proof: $marker" } }
+            if ($log.Contains('Rejected:') -or $log.Contains('closing session') -or $log.Contains('readiness timed out')) { throw "$role map synchronization failed" }
+            Write-Output "PASS: $role baseline and player replication on $StartMap"
+            if($Enemy) {
+                $enemyMarkers = if($role -eq 'host') { @('Spawned authoritative enemy fixture','Host enemy moved under authoritative AI','Host enemy caused player damage') } else { @('Authoritative enemy created on client','Authoritative enemy movement applied on client','Host enemy damage applied on client') }
+                foreach($marker in $enemyMarkers) { if(!$log.Contains($marker)) { throw "Missing $role enemy proof: $marker" } }
+                Write-Output "PASS: $role enemy motion and damage replication"
+            }
+        }
         if ($Replication) {
             $markers = if ($role -eq 'host') { @('Announced epoch=', 'Remote Player 2 moved under network input', 'Complete host entity baseline sent', 'Host validated remote pickup; exactly one tinderbox awarded') } else { @('Replica loaded epoch=', 'First authoritative player snapshot applied', 'Created host avatar in replica world', 'Complete host entity baseline applied', 'Client camera/body moved from authoritative snapshots', 'Host pickup destruction replicated to client') }
             foreach ($marker in $markers) { if (!$log.Contains($marker)) { throw "Missing $role replication proof: $marker" } }

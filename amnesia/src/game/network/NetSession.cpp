@@ -345,6 +345,8 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         if (!DecodeSnapshot(p, n, snapshot)) { Reject("invalid player snapshot"); return; }
         if (hasMap_ && snapshot.epoch == map_.epoch && (!hasSnapshot_ ||
             (snapshot.sequence - snapshot_.sequence != 0 && snapshot.sequence - snapshot_.sequence < 0x80000000u))) {
+            if(!hasSnapshot_ || ((snapshot_.players[1].flags ^ snapshot.players[1].flags) & 8))
+                log_("[NET/STATE] Received remote life snapshot dead=" + std::to_string((snapshot.players[1].flags & 8) ? 1 : 0) + " sequence=" + std::to_string(snapshot.sequence));
             snapshot_ = snapshot; hasSnapshot_ = true;
         }
         return;

@@ -7,7 +7,7 @@ client, replicated players/world, validated interactions, shared inventory,
 map transitions, host saves and shared death/checkpoints. New story messages,
 voices and documents have presentation hooks; existing lights replicate state.
 **The complete original campaign is not yet validated.** See the
-[implementation status and remaining gaps](docs/network_architecture.md).
+[implementation status and remaining gaps](docs/network_architecture.md). The extended [QA report](docs/qa_2026-10-02.md) records intermittent death-state delivery and differences in cutscene, fog and HUD presentation.
 
 ### Build Windows x64
 

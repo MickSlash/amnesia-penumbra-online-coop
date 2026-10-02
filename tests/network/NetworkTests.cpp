@@ -10,6 +10,31 @@ static void Check(bool ok, const char* message) {
     if (!ok) { std::cerr << "FAIL: " << message << '\n'; std::exit(1); }
 }
 static void Log(const std::string& line) { std::cout << line << std::endl; }
+template<class T, class Encoder, class Decoder>
+static void StressCodec(const T& seed, Encoder encode, Decoder decode) {
+    const auto baseline = encode(seed);
+    Check(!baseline.empty(), "stress seed must be valid");
+    uint32_t random = 0x917bc42u;
+    auto next = [&]() { random ^= random << 13; random ^= random >> 17; random ^= random << 5; return random; };
+    for(unsigned iteration = 0; iteration < 10000; ++iteration) {
+        auto packet = baseline;
+        if(iteration % 3 == 0) packet.resize(next() % (baseline.size() + 65));
+        for(unsigned edit = 0; edit < 3 && packet.size() > 5; ++edit)
+            packet[5 + next() % (packet.size() - 5)] ^= uint8_t(next());
+        T result;
+        if(decode(packet.data(), packet.size(), result)) Check(encode(result) == packet, "accepted malformed-input stress packet must roundtrip exactly");
+    }
+}
+static void MalformedInputStressTest() {
+    PlayerInput input; StressCodec(input, EncodeInput, DecodeInput);
+    Snapshot snapshot; snapshot.epoch = 1; StressCodec(snapshot, EncodeSnapshot, DecodeSnapshot);
+    MapState map; map.epoch = 1; map.fingerprint = 1; map.file = "maps/test.map"; StressCodec(map, EncodeMap, DecodeMap);
+    EntityState entity; entity.epoch = 1; entity.name = "box"; StressCodec(entity, EncodeEntity, DecodeEntity);
+    InventoryState inventory; inventory.epoch = 1; InventoryItem item; item.name = "key"; inventory.items.push_back(item);
+    StressCodec(inventory, EncodeInventory, DecodeInventory);
+    Presentation event; event.epoch = 1; event.text[0] = "Story"; StressCodec(event, EncodePresentation, DecodePresentation);
+    std::cout << "PASS: 60000 deterministic malformed-input codec stress cases\n";
+}
 static void InputLifetimeTest() {
     Session host(Log), client(Log);
     Check(host.StartHost(27045) && client.StartClient("127.0.0.1", 27045), "lifetime test startup");
@@ -138,26 +163,39 @@ int main(int argc, char** argv) {
     story.text[0] = "voice/test.ogg"; story.target = 3; Check(EncodePresentation(story).empty(), "story recipient bounded");
     story.target = 0; story.kind = PresentationKind(99); Check(EncodePresentation(story).empty(), "story kind bounded");
     story.kind = PresentationKind::Message; story.text[0] = std::string(4097, 'x'); Check(EncodePresentation(story).empty(), "story text bounded");
-    if (argc == 1) { std::cout << "PASS: protocol validation\n"; InputLifetimeTest(); return 0; }
+    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); return 0; }
     const bool host = std::string(argv[1]) == "host";
     const bool badVersion = std::string(argv[1]) == "bad-version";
+    const bool malformed = std::string(argv[1]) == "malformed";
     const bool movementProbe = std::string(argv[1]) == "move-client";
     uint16_t port = argc > 2 ? uint16_t(std::stoi(argv[2])) : DefaultPort;
-    if (badVersion) {
+    if (badVersion || malformed) {
         Check(enet_initialize() == 0, "raw ENet init");
-        ENetHost* raw = enet_host_create(nullptr, 1, 2, 0, 0); Check(raw != nullptr, "raw host");
+        ENetHost* raw = enet_host_create(nullptr, 1, 3, 0, 0); Check(raw != nullptr, "raw host");
         ENetAddress address = {}; address.port = port; enet_address_set_host(&address, "127.0.0.1");
-        Check(enet_host_connect(raw, &address, 2, ProtocolVersion + 1) != nullptr, "raw connect");
+        ENetPeer* rawPeer = enet_host_connect(raw, &address, 3, badVersion ? ProtocolVersion + 1 : ProtocolVersion);
+        Check(rawPeer != nullptr, "raw connect");
         ENetEvent event; bool rejected = false;
         for (int i = 0; i < 500 && !rejected; ++i) {
             while (enet_host_service(raw, &event, 0) > 0) {
-                if (event.type == ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(event.packet);
+                if(malformed && event.type == ENET_EVENT_TYPE_CONNECT) {
+                    const uint8_t hello[] = {'A','O',0,uint8_t(ProtocolVersion),uint8_t(Message::Hello)};
+                    enet_peer_send(rawPeer,0,enet_packet_create(hello,sizeof(hello),ENET_PACKET_FLAG_RELIABLE));
+                }
+                if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+                    if(malformed && event.packet->dataLength == 9 && event.packet->data[4] == uint8_t(Message::Welcome)) {
+                        auto invalidInput = EncodeInput(input); invalidInput[13] = 0x7f; invalidInput[14] = 0xff;
+                        enet_peer_send(rawPeer,1,enet_packet_create(invalidInput.data(),invalidInput.size(),0));
+                    }
+                    enet_packet_destroy(event.packet);
+                }
                 if (event.type == ENET_EVENT_TYPE_DISCONNECT) rejected = true;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         enet_host_destroy(raw); enet_deinitialize();
-        Check(rejected, "incompatible peer rejection"); std::cout << "PASS: incompatible peer rejected\n"; return 0;
+        Check(rejected, "invalid peer rejection");
+        std::cout << (malformed ? "PASS: malformed gameplay input rejected\n" : "PASS: incompatible peer rejected\n"); return 0;
     }
     Session session(Log);
     Check(host ? session.StartHost(port) : session.StartClient("127.0.0.1", port), "start transport");

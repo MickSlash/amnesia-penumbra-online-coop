@@ -68,7 +68,11 @@ private:
     bool mTestPotionRequested = false, mTestPotionUsed = false, mTestSaveLoaded = false, mTestTransitionStarted = false;
     bool mClientDead = false;
     bool mWasClient = false, mHadClientConnection = false;
-    bool mTestDeathStarted = false, mTestRevived = false;
+    bool mTestDeathStarted = false, mTestDeathObserved = false, mTestRevived = false;
+    bool mTestHasLifeSnapshot = false, mTestLastSentDead = false;
+    bool mTestEnemySpawned = false, mTestEnemyHunting = false, mTestEnemyMoved = false;
+    bool mTestEnemyDamage = false, mTestHasEnemyReplica = false, mTestReplicaEnemyMoved = false;
+    cVector3f mTestEnemyInitialPosition, mTestReplicaEnemyInitialPosition;
     std::deque<online::Presentation> mPendingPresentation;
     std::map<std::string, std::vector<uint8_t>> mLightBytes;
     bool mLoggedLighting = false;
