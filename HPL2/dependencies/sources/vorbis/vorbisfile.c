@@ -2312,7 +2312,7 @@ static int _ov_64_seek_lap(OggVorbis_File *vf,ogg_int64_t pos,
                            int (*localseek)(OggVorbis_File *,ogg_int64_t)){
   vorbis_info *vi;
   float **lappcm;
-  float **pcm;
+  float **pcm=NULL;
   const float *w1,*w2;
   int n1,n2,ch1,ch2,hs;
   int i,ret;
@@ -2351,6 +2351,7 @@ static int _ov_64_seek_lap(OggVorbis_File *vf,ogg_int64_t pos,
   vorbis_synthesis_lapout(&vf->vd,&pcm);
 
   /* splice */
+  if(!pcm)return(OV_EFAULT);
   _ov_splice(pcm,lappcm,n1,n2,ch1,ch2,w1,w2);
 
   /* done */
