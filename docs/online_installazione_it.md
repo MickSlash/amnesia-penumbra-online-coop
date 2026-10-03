@@ -29,6 +29,8 @@ Entrare nella stessa LAN o rete virtuale. Nel campo IP usare l'IPv4 LAN, Hamachi
 
 Consentire `bin\Lux.exe` nel firewall e la porta UDP scelta **su entrambi i PC**, perché il client può diventare host durante il recupero. Lasciare il firewall attivo. Usare la stessa porta e dati identici. Non sono inclusi ricerca automatica dei server, matchmaking, relay o NAT traversal. Per Internet diretto serve una porta raggiungibile; per la migrazione anche il precedente client deve essere raggiungibile dall'altro PC.
 
+Questa build limita i datagrammi ENet a **1200 byte** per lasciare spazio all'incapsulamento delle VPN. Il limite è negoziato durante la connessione; i messaggi più grandi vengono frammentati da ENet. Nei test locali la correzione permette di trasferire lo stato iniziale e i checkpoint anche quando la rete scarta tutti i datagrammi sopra 1200 byte. Non è una misura della MTU effettiva di Radmin o Hamachi, né una garanzia su ogni tunnel. Per aggiornare, estrarre il nuovo ZIP in una cartella nuova e avviare il launcher da lì **su entrambi i PC**; non eliminare i profili o i salvataggi. Diagnosi e confronto prima/dopo in `docs/qa_radmin_diagnosi_2026-10-03.md` dentro `source.zip`.
+
 ## Salvataggi, journal e recupero
 
 L'host salva campagna e stato di entrambi sotto `Documenti\Amnesia\AmnesiaOnlineCoop_Host\online`. Il launcher grafico usa questa cartella su ciascun PC, anche come client, per permettere il cambio di autorità. I vecchi profili dello script restano nella propria sottocartella: selezionarli con **Change Profile** per i rispettivi salvataggi.
@@ -46,6 +48,9 @@ Inventario e progressione sono condivisi. Olio e attivazione della lanterna sono
 - Campagna completa, puzzle, inseguimenti, finali e Hard da verificare su due PC. Le prove coprono integrazioni e alcuni livelli, non un'intera partita.
 - Prediction locale limitata al movimento orizzontale, con collisioni e correzione dell'host. Salti, crouch e oggetti fisici restano autorevoli; reti lente possono ancora causare correzioni visibili.
 - Migrazione provata tra processi locali; crash del PC, riapertura del gioco, partizioni prolungate e WAN richiedono ulteriori prove.
+- Con 100 ms simulati e perdita periodica del 5%, una regressione ha rilevato una caduta durante il cambio livello: il recupero ricostruisce il mondo, ma il client non osserva l'intera sequenza di morte/ripresa. Il limite dei datagrammi risolve il caso di perdita per dimensione verificato, ma non certifica la stabilità con forte perdita di pacchetti.
 - Alcuni effetti script, creazione/trasformazione delle luci e tipi di entità fuori dal roster richiedono copertura. Audio e particelle replicano stato e ciclo di vita, non ogni campione sonoro o il seme casuale degli emettitori.
 
 Gli errori sono nel `hpl.log` della cartella del profilo. Se non si collega, controllare IP, porta, firewall, build e dati. La console sviluppatore conserva `net_status` e `net_ping`, ma non serve per iniziare una partita.
+
+I nuovi messaggi di connessione riportano `[t=...ms]` dal contatore monotono del singolo PC, la dimensione negoziata dei datagrammi, il codice ricevuto alla disconnessione e il tempo dall'ultimo pacchetto applicativo. I contatori dei due PC non hanno la stessa origine. `[NET/DIAG] Transport service paused` segnala un intervallo superiore a un secondo senza servizio della rete sul thread del gioco, possibile anche durante un caricamento: da solo non identifica la causa. Se le cadute persistono, conservare i log di entrambi prima di riavviare il gioco.

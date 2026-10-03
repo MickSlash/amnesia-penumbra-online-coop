@@ -12,6 +12,8 @@ struct _ENetPeer;
 namespace online {
 constexpr uint16_t ProtocolVersion = 5;
 constexpr uint16_t DefaultPort = 27020;
+// ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
+constexpr uint32_t TransportDatagramBytes = 1200;
 enum class Role { Offline, Host, Client };
 enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17 };
 struct JournalEntry {
@@ -171,6 +173,7 @@ private:
     Role role_ = Role::Offline;
     bool initialized_ = false, ready_ = false, hasInput_ = false;
     uint32_t started_ = 0, lastInput_ = 0;
+    uint32_t lastPoll_ = 0, lastPacket_ = 0;
     PlayerInput input_;
     Snapshot snapshot_;
     MapState map_;

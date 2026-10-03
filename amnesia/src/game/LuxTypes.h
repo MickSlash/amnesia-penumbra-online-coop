@@ -791,7 +791,7 @@ class cLuxHeadPosAdd : public iSerializable
 {
 	kSerializableClassInit(cLuxHeadPosAdd)
 public:
-	cLuxHeadPosAdd() : mvAdd(0), mbMoving(false) {}
+	cLuxHeadPosAdd() : mvAdd(0), mbMoving(false), mvMoveGoal(0), mfMoveSpeed(0), mfMoveSlowDownDist(0) {}
 
 	cVector3f mvAdd;
 

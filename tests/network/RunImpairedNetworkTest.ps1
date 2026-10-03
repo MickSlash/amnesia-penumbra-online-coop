@@ -7,7 +7,9 @@ param(
     [switch]$Media,
     [switch]$Prediction,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
-    [switch]$MapOnly
+    [switch]$MapOnly,
+    [ValidateRange(576,65507)][int]$MaxDatagramBytes = 65507,
+    [string]$Executable = "$PSScriptRoot/../../amnesia/src/game/x64/Release/Lux.exe"
 )
 $ErrorActionPreference = 'Stop'
 $run = Join-Path (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path 'build/impaired-network'
@@ -22,7 +24,7 @@ using System.Net.Sockets;
 using System.Threading;
 public static class CoopUdpRelay {
     class Pending { public byte[] Data; public EndPoint Target; public Socket Socket; public long Due; }
-    public static string Run(int port, int delay, int dropEvery, int seconds) {
+    public static string Run(int port, int delay, int dropEvery, int seconds, int ceiling) {
         using(var front = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
         using(var back = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)) {
             front.Bind(new IPEndPoint(IPAddress.Loopback, port));
@@ -30,6 +32,7 @@ public static class CoopUdpRelay {
             EndPoint server = new IPEndPoint(IPAddress.Loopback, port+1), client = null;
             var queue = new Queue<Pending>(); var clock = Stopwatch.StartNew();
             var buffer = new byte[65536]; long received = 0, dropped = 0, forwarded = 0, bytes = 0;
+            long oversized = 0; int largest = 0, largestForwarded = 0;
             while(clock.ElapsedMilliseconds < seconds*1000L) {
                 for(int side=0; side<2; ++side) {
                     var socket = side==0 ? front : back;
@@ -47,6 +50,8 @@ public static class CoopUdpRelay {
                         }
                         if(side==0) client=source;
                         received++;
+                        largest=Math.Max(largest,n);
+                        if(n>ceiling) { oversized++; dropped++; continue; }
                         if(received % dropEvery == 0 || queue.Count >= 4096) { dropped++; continue; }
                         EndPoint target = side==0 ? server : client;
                         if(target==null) continue;
@@ -59,11 +64,12 @@ public static class CoopUdpRelay {
                     try { packet.Socket.SendTo(packet.Data,packet.Target); }
                     catch(SocketException error) { if(error.SocketErrorCode==SocketError.ConnectionReset) { dropped++; continue; } throw; }
                     forwarded++; bytes+=packet.Data.Length;
+                    largestForwarded=Math.Max(largestForwarded,packet.Data.Length);
                 }
                 Thread.Sleep(1);
             }
             if(received==0 || dropped==0) throw new Exception("Relay did not exercise packet loss");
-            return "received="+received+" forwarded="+forwarded+" dropped="+dropped+" forwardedBytes="+bytes+" oneWayDelayMs="+delay;
+            return "received="+received+" forwarded="+forwarded+" dropped="+dropped+" forwardedBytes="+bytes+" oneWayDelayMs="+delay+" oversizedDropped="+oversized+" largestDatagram="+largest+" largestForwarded="+largestForwarded+" ceiling="+ceiling;
         }
     }
 }
@@ -72,17 +78,17 @@ $relayScript = Join-Path $run 'relay.ps1'
 $sourceFile = Join-Path $run 'relay.cs'
 $relaySource | Set-Content -LiteralPath $sourceFile -Encoding utf8
 @'
-param([string]$Source,[int]$Port,[int]$Delay,[int]$DropEvery)
+param([string]$Source,[int]$Port,[int]$Delay,[int]$DropEvery,[int]$Ceiling)
 $ErrorActionPreference='Stop'
 Add-Type -Path $Source
-[CoopUdpRelay]::Run($Port,$Delay,$DropEvery,75)
+[CoopUdpRelay]::Run($Port,$Delay,$DropEvery,75,$Ceiling)
 '@ | Set-Content -LiteralPath $relayScript -Encoding utf8
 $shellPath = (Get-Process -Id $PID).Path
-$relay = Start-Process -FilePath $shellPath -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-File',$relayScript,'-Source',$sourceFile,'-Port',$Port,'-Delay',$OneWayDelayMs,'-DropEvery',$DropEvery) -RedirectStandardOutput "$run/relay.log" -RedirectStandardError "$run/relay.err"
+$relay = Start-Process -FilePath $shellPath -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-File',$relayScript,'-Source',$sourceFile,'-Port',$Port,'-Delay',$OneWayDelayMs,'-DropEvery',$DropEvery,'-Ceiling',$MaxDatagramBytes) -RedirectStandardOutput "$run/relay.log" -RedirectStandardError "$run/relay.err"
 try {
     Start-Sleep -Seconds 2
     if($relay.HasExited) { throw 'UDP relay failed to start; inspect build/impaired-network/relay.err' }
-    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly) -Media:$Media -Prediction:$Prediction -StartMap $StartMap -MapOnly:$MapOnly
+    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Executable $Executable -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly) -Media:$Media -Prediction:$Prediction -StartMap $StartMap -MapOnly:$MapOnly
     if (!$relay.WaitForExit(15000)) { throw 'UDP relay did not exit on its timer' }
     $relay.Refresh()
     if($relay.ExitCode -ne 0) { throw 'UDP relay failed; inspect relay.err' }
@@ -91,6 +97,9 @@ try {
     Get-Content -LiteralPath "$run/relay.log"
     Write-Output 'PASS: campaign integration through delayed/lossy localhost UDP relay'
 } finally {
+    # Keep the counters even when the game assertions fail (e.g. an MTU
+    # blackhole regression); the relay's own bounded timer releases sockets.
+    if(!$relay.HasExited) { [void]$relay.WaitForExit(15000) }
     if(!$relay.HasExited) { Stop-Process -Id $relay.Id }
     foreach($role in @('host','client')) {
         $log = Join-Path $gameLogs "$role.log"

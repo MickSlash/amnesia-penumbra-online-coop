@@ -340,7 +340,9 @@ bool DecodeInput(const uint8_t* p, size_t n, PlayerInput& i) {
     if (!ValidInput(value)) return false;
     i = value; return true;
 }
-Session::Session(Logger logger) : log_(logger) { std::random_device random; identity_ = (uint64_t(random()) << 32) | random(); if(!identity_) identity_ = 1; }
+Session::Session(Logger logger) : log_([logger](const std::string& line) {
+    logger(line + " [t=" + std::to_string(enet_time_get()) + "ms]");
+}) { std::random_device random; identity_ = (uint64_t(random()) << 32) | random(); if(!identity_) identity_ = 1; }
 Session::~Session() { Stop(); }
 bool Session::Initialize() {
     if (enet_initialize() != 0) { log_("[NET/CONNECTION] ENet initialization failed"); return false; }
@@ -352,6 +354,7 @@ bool Session::StartHost(uint16_t port, bool resume) {
     host_ = enet_host_create(&address, 1, 4, 0, 0);
     if (!host_) { log_("[NET/CONNECTION] Cannot bind host socket"); Stop(); return false; }
     host_->maximumPacketSize = 65536; host_->maximumWaitingData = 262144;
+    host_->mtu = TransportDatagramBytes;
     role_ = Role::Host;
     log_("[NET/CONNECTION] Listening on 0.0.0.0:" + std::to_string(port)); return true;
 }
@@ -360,6 +363,7 @@ bool Session::StartClient(const std::string& name, uint16_t port, bool resume) {
     host_ = enet_host_create(nullptr, 1, 4, 0, 0);
     if (!host_) { Stop(); return false; }
     host_->maximumPacketSize = 65536; host_->maximumWaitingData = 262144;
+    host_->mtu = TransportDatagramBytes;
     ENetAddress address = {}; address.port = port;
     if (enet_address_set_host(&address, name.c_str()) != 0) { log_("[NET/CONNECTION] Invalid host address"); Stop(); return false; }
     peer_ = enet_host_connect(host_, &address, 4, ProtocolVersion);
@@ -372,6 +376,7 @@ void Session::Stop() {
     if (host_) enet_host_destroy(host_);
     if (initialized_) enet_deinitialize();
     host_ = nullptr; peer_ = nullptr; initialized_ = ready_ = hasInput_ = false; role_ = Role::Offline;
+    lastPoll_ = lastPacket_ = 0;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; map_ = MapState();
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
@@ -526,6 +531,10 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
 }
 void Session::Poll() {
     if (!host_) return;
+    const uint32_t now = enet_time_get();
+    if(lastPoll_ && uint32_t(now - lastPoll_) > 1000)
+        log_("[NET/DIAG] Transport service paused on game thread for " + std::to_string(uint32_t(now - lastPoll_)) + " ms");
+    lastPoll_ = now;
     ENetEvent e;
     // Bound work per logic tick; malformed peers cannot monopolize the game loop.
     for (int count = 0; count < 64 && enet_host_service(host_, &e, 0) > 0; ++count) {
@@ -536,16 +545,19 @@ void Session::Poll() {
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
             enet_peer_timeout(peer_, 8, 3000, 10000);
             if (role_ == Role::Host && e.data != ProtocolVersion) { Reject("incompatible connect version"); continue; }
-            log_("[NET/CONNECTION] Peer connected");
+            lastPacket_ = now;
+            log_("[NET/CONNECTION] Peer connected; UDP payload cap=" + std::to_string(peer_->mtu) + " bytes");
                         if(role_ == Role::Client) {
                 auto hello = Header(Message::Hello); U32(hello, uint32_t(identity_ >> 32)); U32(hello, uint32_t(identity_)); U16(hello, listenPort_);
                 if(!Send(hello, 0, true)) Reject("cannot send Hello");
             }
         } else if (e.type == ENET_EVENT_TYPE_RECEIVE) {
-            if (e.peer == peer_) Receive(e.packet->data, e.packet->dataLength, e.channelID);
+            if (e.peer == peer_) { lastPacket_ = now; Receive(e.packet->data, e.packet->dataLength, e.channelID); }
             enet_packet_destroy(e.packet);
         } else if (e.type == ENET_EVENT_TYPE_DISCONNECT && e.peer == peer_) {
-            peer_ = nullptr; ready_ = hasInput_ = false; log_("[NET/CONNECTION] Peer disconnected or timed out");
+            peer_ = nullptr; ready_ = hasInput_ = false;
+            log_("[NET/CONNECTION] Peer disconnected or timed out; remote reason=" + std::to_string(e.data) +
+                "; last received application packet age=" + std::to_string(uint32_t(now - lastPacket_)) + " ms");
             hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
             entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;

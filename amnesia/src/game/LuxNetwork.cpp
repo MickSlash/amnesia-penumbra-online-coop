@@ -547,7 +547,9 @@ bool cLuxNetwork::Host(uint16_t port) {
     mConnectPort = port;
     gpBase->mpMainConfig->SetString("Online","Port",std::to_string(port));
     mRecoveryCheckpoint.bytes.clear(); mMigrationAttempted = mMigrationHost = false;
-    return mSession.StartHost(port);
+    const bool started = mSession.StartHost(port);
+    if(started) gpBase->mpEngine->SetWaitIfAppOutOfFocus(false);
+    return started;
 }
 bool cLuxNetwork::Join(const std::string& address, uint16_t port) {
     mEverConnected = mRecovering = false; mConnectionGeneration = 0;
@@ -556,7 +558,9 @@ bool cLuxNetwork::Join(const std::string& address, uint16_t port) {
     gpBase->mpMainConfig->SetString("Online","Port",std::to_string(port));
     mRecoveryCheckpoint.bytes.clear(); mMigrationAttempted = mMigrationHost = false;
     mSession.SetListenPort(port);
-    return mSession.StartClient(address, port);
+    const bool started = mSession.StartClient(address, port);
+    if(started) gpBase->mpEngine->SetWaitIfAppOutOfFocus(false);
+    return started;
 }
 void cLuxNetwork::Disconnect() { mSession.Stop(); mRecovering = mEverConnected = false; }
 std::string cLuxNetwork::ConnectionStatus() const {
@@ -812,7 +816,9 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         ApplyReplica(gpBase->mpPlayer2, interpolated.players[0], false);
         if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) {
             const float elapsed = std::chrono::duration<float>(now - mSmokeStart).count();
-            if(!mTestLanternRequested && elapsed > 5 && gpBase->mpPlayer->GetLampOil() > 20) {
+            if(!mTestLanternRequested && elapsed > 5 && mBaselineApplied && mAppliedInventory &&
+                gpBase->mpInventory->GetItem("online_lantern_fixture") && gpBase->mpPlayer->GetLampOil() > 20 &&
+                gpBase->mpPlayer->GetLampOil() < 50) {
                 SendLocalAction(online::PlayerAction::Lantern, true);
                 SendLocalAction(online::PlayerAction::Lantern, false);
                 mTestLanternRequested = true;
@@ -930,7 +936,8 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
     }
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_CAMPAIGN") && mTestPotionUsed && mTestPickupFinished && mObservedRemoteMovement) {
         float elapsed = std::chrono::duration<float>(now - mSmokeStart).count();
-        if(!mTestSaveLoaded && elapsed > 8) {
+        if(!mTestSaveLoaded && elapsed > 8 &&
+            (!TestFlag("AMNESIA_NET_TEST_MEDIA") || mTestLanternLocalLogged)) {
             mTestSaveLoaded = true;
             const int tinderboxes = gpBase->mpPlayer2->GetTinderboxes();
             const bool loaded = gpBase->mpSaveHandler->AutoSave() && gpBase->mpSaveHandler->AutoLoad(false);
@@ -1339,7 +1346,7 @@ void cLuxNetwork::UpdateMediaTest(cLuxMap* map, float elapsed) {
         gpBase->mpPlayer->GetHelperLantern()->IsActive() && gpBase->mpPlayer->GetLampOil() - gpBase->mpPlayer2->GetLampOil() > 10) {
         mTestLanternLocalLogged = true; NetLog("[NET/TEST] Host validated remote lantern with independent oil");
     }
-    if(mTestMediaSpawned && !mTestMediaChanged && elapsed > 12) {
+    if(mTestMediaSpawned && !mTestMediaChanged && elapsed > 12 && mTestMediaRestoreLogged) {
         auto* sound = world->GetSoundEntity("online_media_fixture_sound"); auto* ps = world->GetParticleSystem("online_media_fixture_particle");
         if(!sound || !ps) { NetLog("[NET/TEST] Saved media missing after load FAILED"); mSession.Stop(); return; }
         sound->SetVolume(0.15f); ps->SetColor(cColor(0.15f, 0.8f, 0.3f, 1)); ps->SetPosition(ps->GetWorldPosition() + cVector3f(0.5f, 0, 0));
