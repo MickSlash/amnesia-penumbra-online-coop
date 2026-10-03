@@ -1833,7 +1833,7 @@ void iLuxProp::SaveToSaveData(iLuxEntity_SaveData* apSaveData)
 	pData->mvPS.Resize(mvParticleSystems.size());
 	for(size_t i=0; i<mvParticleSystems.size(); ++i)
 	{
-		if(pWorld->ParticleSystemExists(mvParticleSystems[i])==false)
+		if(mvParticleSystems[i] && pWorld->ParticleSystemExists(mvParticleSystems[i])==false)
 		{
 			mvParticleSystems[i] = NULL;
 			Warning("particle system %d in %s does not exist anymore!\n",i,GetName().c_str());

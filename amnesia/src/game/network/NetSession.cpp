@@ -376,7 +376,7 @@ void Session::Stop() {
     if (host_) enet_host_destroy(host_);
     if (initialized_) enet_deinitialize();
     host_ = nullptr; peer_ = nullptr; initialized_ = ready_ = hasInput_ = false; role_ = Role::Offline;
-    lastPoll_ = lastPacket_ = 0;
+    lastPoll_ = lastPacket_ = lastDiagnostic_ = 0;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; map_ = MapState();
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
@@ -532,7 +532,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
 void Session::Poll() {
     if (!host_) return;
     const uint32_t now = enet_time_get();
-    if(lastPoll_ && uint32_t(now - lastPoll_) > 1000)
+    if(lastPoll_ && uint32_t(now - lastPoll_) > 250)
         log_("[NET/DIAG] Transport service paused on game thread for " + std::to_string(uint32_t(now - lastPoll_)) + " ms");
     lastPoll_ = now;
     ENetEvent e;
@@ -565,6 +565,22 @@ void Session::Poll() {
     }
     if (peer_ && !ready_ && uint32_t(enet_time_get() - started_) > 5000) { Reject("handshake timeout"); fatal_ = false; }
     enet_host_flush(host_);
+    if(peer_ && ready_ && (!lastDiagnostic_ || uint32_t(now - lastDiagnostic_) >= 5000)) {
+        lastDiagnostic_ = now;
+        size_t queuedBytes = 0;
+        for(auto it = enet_list_begin(&peer_->outgoingSendReliableCommands);
+            it != enet_list_end(&peer_->outgoingSendReliableCommands); it = enet_list_next(it))
+            queuedBytes += reinterpret_cast<ENetOutgoingCommand*>(it)->fragmentLength;
+        log_("[NET/STATS] rtt_ms=" + std::to_string(peer_->roundTripTime) +
+            " rtt_variance_ms=" + std::to_string(peer_->roundTripTimeVariance) +
+            " reliable_loss_per_mille=" + std::to_string(uint64_t(peer_->packetLoss)*1000/ENET_PEER_PACKET_LOSS_SCALE) +
+            " throttle=" + std::to_string(peer_->packetThrottle) + "/" + std::to_string(ENET_PEER_PACKET_THROTTLE_SCALE) +
+            " reliable_queued_bytes=" + std::to_string(queuedBytes) +
+            " reliable_in_flight_bytes=" + std::to_string(peer_->reliableDataInTransit) +
+            " receive_waiting_bytes=" + std::to_string(peer_->totalWaitingData) +
+            " application_age_ms=" + std::to_string(uint32_t(now - lastPacket_)) +
+            " ack_age_ms=" + std::to_string(uint32_t(now - peer_->lastReceiveTime)));
+    }
 }
 bool Session::SendInput(const PlayerInput& input) { return role_ == Role::Client && ready_ && Send(EncodeInput(input), 1, false); }
 bool Session::ReadInput(PlayerInput& input) const {

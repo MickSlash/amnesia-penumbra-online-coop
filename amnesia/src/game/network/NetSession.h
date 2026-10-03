@@ -174,6 +174,7 @@ private:
     bool initialized_ = false, ready_ = false, hasInput_ = false;
     uint32_t started_ = 0, lastInput_ = 0;
     uint32_t lastPoll_ = 0, lastPacket_ = 0;
+    uint32_t lastDiagnostic_ = 0;
     PlayerInput input_;
     Snapshot snapshot_;
     MapState map_;

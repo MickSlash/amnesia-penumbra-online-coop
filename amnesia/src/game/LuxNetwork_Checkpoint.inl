@@ -4,10 +4,11 @@
 namespace {
 bool CompressCheckpoint(const char* text, size_t size, std::vector<uint8_t>& output) {
     if(!size || size > online::MaxCheckpointBytes) return false;
-    cBinaryBuffer compressed;
-    if(!compressed.CompressAndAdd(const_cast<char*>(text),size,1,false)) return false;
     output = {'Z','C','P','1',uint8_t(size >> 24),uint8_t(size >> 16),uint8_t(size >> 8),uint8_t(size)};
-    output.insert(output.end(),compressed.GetDataPointer(),compressed.GetDataPointer()+compressed.GetSize());
+    uLongf compressedSize = compressBound(uLong(size));
+    output.resize(8+compressedSize);
+    if(compress2(output.data()+8,&compressedSize,reinterpret_cast<const Bytef*>(text),uLong(size),1) != Z_OK) { output.clear(); return false; }
+    output.resize(8+compressedSize);
     return output.size() <= online::MaxCheckpointBytes;
 }
 bool ExpandCheckpoint(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
@@ -27,9 +28,25 @@ bool ExpandCheckpoint(const std::vector<uint8_t>& input, std::vector<uint8_t>& o
 }
 struct CheckpointField { cSerializeMemberField field; tString inlineClass; };
 using CheckpointSchema = std::map<tString, CheckpointField>;
-bool CheckpointDerived(tString name, const tString& base) {
+// Workers use immutable copies: the engine registry/factories and logging stay
+// on the game thread. The schema cache below is only accessed on that thread.
+struct CheckpointTypes {
+    std::map<tString, CheckpointSchema> schemas;
+    std::map<tString, tString> parents;
+    mutable tString error;
+};
+void CheckpointLog(const CheckpointTypes* types, const tString& line) {
+    if(!types) NetLog(line);
+    else if(types->error.empty()) types->error = line;
+}
+bool CheckpointDerived(tString name, const tString& base, const CheckpointTypes* types = NULL) {
     for(unsigned i = 0; i < 32 && !name.empty(); ++i) {
         if(name == base) return true;
+        if(types) {
+            const auto found = types->parents.find(name);
+            if(found == types->parents.end()) return false;
+            name = found->second; continue;
+        }
         auto* type = cSerializeClass::GetClass(name); if(!type) return false;
         name = type->msParentName;
     }
@@ -78,51 +95,51 @@ bool CheckpointScalar(TiXmlElement* node, unsigned type) {
     }
     return components == required;
 }
-bool CheckpointClass(TiXmlElement* node, const tString& expected, unsigned depth, unsigned& count) {
-    if(!node || depth > 48 || ++count > 300000 || !node->Attribute("type")) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+bool CheckpointClass(TiXmlElement* node, const tString& expected, unsigned depth, unsigned& count, const CheckpointTypes* types = NULL) {
+    if(!node || depth > 48 || ++count > 300000 || !node->Attribute("type")) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
     const tString name = node->Attribute("type");
-    if(!CheckpointDerived(name,expected)) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
-    const auto* schema = CheckpointGetSchema(name); if(!schema) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+    if(!CheckpointDerived(name,expected,types)) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+    const auto* schema = types ? (types->schemas.count(name) ? &types->schemas.at(name) : NULL) : CheckpointGetSchema(name); if(!schema) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
     std::map<tString,bool> seen;
     for(auto* child = node->FirstChildElement(); child; child = child->NextSiblingElement()) {
-        if(++count > 300000 || !child->Attribute("name")) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+        if(++count > 300000 || !child->Attribute("name")) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
         const tString fieldName = child->Attribute("name"), tag = child->Value();
         const auto found = schema->find(fieldName);
-        if(found == schema->end() || !seen.emplace(fieldName,true).second) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+        if(found == schema->end() || !seen.emplace(fieldName,true).second) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
         const auto& f = found->second.field;
         if(f.mMainType == eSerializeMainType_Variable) {
             if(f.mType == eSerializeType_Class) {
-                if(tag != "class" || !CheckpointClass(child,found->second.inlineClass,depth+1,count)) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+                if(tag != "class" || !CheckpointClass(child,found->second.inlineClass,depth+1,count,types)) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
             } else if(f.mType == eSerializeType_ClassPointer) {
                 tString base = fieldName == "mpSavedMaps" ? "cLuxSavedGameMapCollection" : fieldName == "mpStateData" ? "iLuxPlayerState_SaveData" : "";
-                if(base.empty() || tag != "class_ptr" || !CheckpointClass(child,base,depth+1,count)) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+                if(base.empty() || tag != "class_ptr" || !CheckpointClass(child,base,depth+1,count,types)) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
             } else {
                 int type = 0;
                 if(tag != "var" || child->QueryIntAttribute("type",&type) != TIXML_SUCCESS || type != f.mType || !CheckpointScalar(child,type)) {
-                    NetLog("[NET/RECOVERY] Invalid save scalar: " + name + "." + fieldName);
-                    { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+                    CheckpointLog(types,"[NET/RECOVERY] Invalid save scalar: " + name + "." + fieldName);
+                    { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
                 }
             }
         } else {
             int type = 0; unsigned elements = 0;
-            if(tag != (f.mMainType == eSerializeMainType_Array ? "array" : "container") || child->QueryIntAttribute("type",&type) != TIXML_SUCCESS || type != f.mType) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+            if(tag != (f.mMainType == eSerializeMainType_Array ? "array" : "container") || child->QueryIntAttribute("type",&type) != TIXML_SUCCESS || type != f.mType) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
             if(f.mMainType == eSerializeMainType_Container && type == eSerializeType_Class &&
                 (!child->Attribute("class_type") || f.msClassName != child->Attribute("class_type"))) return false;
             for(auto* entry = child->FirstChildElement(); entry; entry = entry->NextSiblingElement()) {
-                if(++elements > 20000 || ++count > 300000) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+                if(++elements > 20000 || ++count > 300000) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
                 if(type == eSerializeType_Class || type == eSerializeType_ClassPointer) {
                     const tString base = f.mMainType == eSerializeMainType_Array ? found->second.inlineClass : f.msClassName;
-                    if(base.empty() || !CheckpointClass(entry,base,depth+1,count)) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
-                } else if(!CheckpointScalar(entry,type)) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+                    if(base.empty() || !CheckpointClass(entry,base,depth+1,count,types)) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+                } else if(!CheckpointScalar(entry,type)) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
             }
-            if(f.mMainType == eSerializeMainType_Array && elements != f.mlArraySize) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+            if(f.mMainType == eSerializeMainType_Array && elements != f.mlArraySize) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
         }
     }
     for(const auto& field : *schema)
-        if(!seen.count(field.first) && field.second.field.mType != eSerializeType_ClassPointer) { NetLog("[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
+        if(!seen.count(field.first) && field.second.field.mType != eSerializeType_ClassPointer) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
     return true;
 }
-bool CheckpointDocument(const std::vector<uint8_t>& bytes, TiXmlDocument& doc) {
+bool CheckpointParse(const std::vector<uint8_t>& bytes, TiXmlDocument& doc) {
     if(bytes.empty() || bytes.size() > online::MaxCheckpointBytes) return false;
     const tString text(bytes.begin(),bytes.end());
     if(text.find('\0') != tString::npos || text.find("<!") != tString::npos) return false;
@@ -137,9 +154,13 @@ bool CheckpointDocument(const std::vector<uint8_t>& bytes, TiXmlDocument& doc) {
     }
     if(depth) return false;
     doc.Parse(text.c_str());
-    auto* root = doc.RootElement(); unsigned count = 0;
+    auto* root = doc.RootElement();
     return !doc.Error() && root && tString(root->Value()) == "SaveGame" && root->FirstChildElement("class") &&
-        !root->FirstChildElement("class")->NextSiblingElement() && CheckpointClass(root->FirstChildElement("class"),"cLuxSaveGame_SaveData",0,count);
+        !root->FirstChildElement("class")->NextSiblingElement();
+}
+bool CheckpointDocument(const std::vector<uint8_t>& bytes, TiXmlDocument& doc, const CheckpointTypes* types = NULL) {
+    unsigned count = 0;
+    return CheckpointParse(bytes,doc) && CheckpointClass(doc.RootElement()->FirstChildElement("class"),"cLuxSaveGame_SaveData",0,count,types);
 }
 TiXmlElement* FindCheckpointField(TiXmlElement* element, const char* tag, int type) {
     if(!element) return NULL;
@@ -149,7 +170,7 @@ TiXmlElement* FindCheckpointField(TiXmlElement* element, const char* tag, int ty
         if(auto* found = FindCheckpointField(child,tag,type)) return found;
     return NULL;
 }
-bool TestNativeCheckpointValidation(const TiXmlDocument& original) {
+bool TestNativeCheckpointValidation(const TiXmlDocument& original, const CheckpointTypes* types = NULL) {
     for(int test = 0; test < 3; ++test) {
         TiXmlDocument altered(original);
         auto* root = altered.RootElement();
@@ -161,48 +182,223 @@ bool TestNativeCheckpointValidation(const TiXmlDocument& original) {
         }
         TiXmlPrinter printer; altered.Accept(&printer);
         std::vector<uint8_t> bytes(printer.CStr(),printer.CStr()+printer.Size()); TiXmlDocument checked;
-        if(CheckpointDocument(bytes,checked)) return false;
+        if(CheckpointDocument(bytes,checked,types)) return false;
     }
     return true;
 }
+bool TestMissingParticleSave() {
+    cEnginePS_SaveData data;
+    const float invalid = std::numeric_limits<float>::quiet_NaN();
+    data.mvSize = cVector3f(invalid); data.mColor = cColor(invalid);
+    for(int r = 0; r < 4; ++r) for(int c = 0; c < 4; ++c) data.m_mtxTransform.m[r][c] = invalid;
+    data.mfMinFadeDistanceStart = data.mfMinFadeDistanceEnd = invalid;
+    data.mfMaxFadeDistanceStart = data.mfMaxFadeDistanceEnd = invalid;
+    data.mlID = 42; data.mbActive = data.mbVisible = data.mbFadeAtDistance = true;
+    data.mvEmitterActive.Resize(1); data.mvEmitterActive[0].mbActive = true;
+    data.FromPS(NULL);
+    TiXmlElement root("Test"); cSerializeClass::SaveToElement(&data,"",&root); unsigned count = 0;
+    return data.mlID == -1 && data.msType.empty() && !data.mbActive && !data.mbVisible && !data.mbFadeAtDistance &&
+        !data.mvEmitterActive.Size() && CheckpointClass(root.FirstChildElement("class"),"cEnginePS_SaveData",0,count);
 }
+struct CheckpointWork {
+    online::Checkpoint checkpoint;
+    TiXmlDocument doc;
+    CheckpointTypes types;
+    std::vector<tString> names;
+    size_t nextName = 0;
+    int64_t parseMs = 0, validateMs = 0;
+};
+bool ParseCheckpointWork(const std::shared_ptr<CheckpointWork>& work) {
+    const auto start = std::chrono::steady_clock::now();
+    std::vector<uint8_t> expanded;
+    if(!ExpandCheckpoint(work->checkpoint.bytes,expanded)) return false;
+    work->checkpoint.bytes = std::move(expanded);
+    if(!CheckpointParse(work->checkpoint.bytes,work->doc)) { work->doc.Clear(); return false; }
+    std::map<tString,bool> names;
+    std::vector<TiXmlElement*> pending = {work->doc.RootElement()};
+    while(!pending.empty()) {
+        auto* node = pending.back(); pending.pop_back();
+        const tString tag = node->Value();
+        if((tag == "class" || tag == "class_ptr") && node->Attribute("type"))
+            names.emplace(node->Attribute("type"),true);
+        if(names.size() > 4096) { work->doc.Clear(); return false; }
+        for(auto* child = node->FirstChildElement(); child; child = child->NextSiblingElement()) pending.push_back(child);
+    }
+    for(const auto& name : names) work->names.push_back(name.first);
+    work->parseMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
+    return true;
+}
+bool CopyCheckpointType(CheckpointWork& work, const tString& name) {
+    const auto* schema = CheckpointGetSchema(name);
+    if(!schema) return false;
+    work.types.schemas.emplace(name,*schema);
+    tString parent = name;
+    for(unsigned i = 0; i < 32 && !parent.empty(); ++i) {
+        auto* type = cSerializeClass::GetClass(parent); if(!type) return false;
+        work.types.parents.emplace(parent,type->msParentName);
+        parent = type->msParentName;
+    }
+    return parent.empty();
+}
+bool ValidateCheckpointWork(const std::shared_ptr<CheckpointWork>& work, bool testValidation, bool slowTest) {
+    const auto start = std::chrono::steady_clock::now();
+    // QA can deliberately hold this worker without stopping rendering or ENet.
+    if(slowTest) std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    unsigned count = 0;
+    bool valid = CheckpointClass(work->doc.RootElement()->FirstChildElement("class"),"cLuxSaveGame_SaveData",0,count,&work->types);
+    if(valid && testValidation) valid = TestNativeCheckpointValidation(work->doc,&work->types);
+    work->doc.Clear(); // release the large DOM on the worker too
+    work->validateMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
+    return valid;
+}
+}
+struct cLuxCheckpointValidation {
+    std::shared_ptr<CheckpointWork> work;
+    std::future<bool> future;
+    uint32_t generation = 0;
+    uint64_t context = 0;
+    unsigned stage = 0; // parse, copy engine metadata, validate
+    int64_t mainMaxUs = 0;
+};
+struct cLuxCheckpointCapture {
+    struct Work {
+        TiXmlDocument doc;
+        online::Checkpoint checkpoint;
+        uint64_t hash = 0;
+        int64_t workerMs = 0;
+    };
+    std::shared_ptr<Work> work;
+    std::future<bool> future;
+    uint32_t generation = 0;
+    uint64_t context = 0;
+    int64_t captureUs = 0, serializeUs = 0, mainUs = 0;
+};
 void cLuxNetwork::UpdateCheckpoint(float timeStep) {
-    online::Checkpoint received;
-    if(IsClientReplica()) {
-        if(mSession.ReadCheckpoint(received)) {
-            std::vector<uint8_t> expanded;
-            if(!ExpandCheckpoint(received.bytes,expanded)) { NetLog("[NET/RECOVERY] Invalid compressed checkpoint discarded"); return; }
-            received.bytes = std::move(expanded);
-            TiXmlDocument doc;
-            if(!CheckpointDocument(received.bytes,doc)) { NetLog("[NET/RECOVERY] Invalid native save schema; checkpoint discarded"); return; }
-            if(mRecoveryTest) {
-                static bool checked = false;
-                if(!checked) {
-                    checked = true;
-                    if(!TestNativeCheckpointValidation(doc)) { NetLog("[NET/TEST] FAIL: native checkpoint validation"); return; }
-                    NetLog("[NET/TEST] Native checkpoint rejects unknown classes, short vectors and mismatched container factories");
+    if(mCheckpointCapture && mCheckpointCapture->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto& job = *mCheckpointCapture;
+        bool valid = false;
+        try { valid = job.future.get(); } catch(const std::exception&) {}
+        const bool current = mSession.GetRole() == online::Role::Host && mSession.Connected() &&
+            job.context == mCheckpointContext && job.generation == mSession.Generation() && job.work->checkpoint.epoch == mEpoch;
+        if(valid && current) {
+            mSendingCheckpoint = std::move(job.work->checkpoint);
+            mCheckpointOffset = 0; mCheckpointHash = job.work->hash;
+            NetLog("[NET/RECOVERY] Captured campaign checkpoint bytes=" + std::to_string(mSendingCheckpoint.bytes.size()));
+        } else NetLog(current ? "[NET/RECOVERY] Campaign checkpoint compression failed or exceeded size limit" : "[NET/RECOVERY] Obsolete host checkpoint worker result discarded");
+        NetLog("[NET/PERF] Host checkpoint main_us=" + std::to_string(job.mainUs) + " capture_us=" + std::to_string(job.captureUs) +
+            " serialize_us=" + std::to_string(job.serializeUs) + " worker_print_compress_ms=" + std::to_string(job.work->workerMs));
+        mCheckpointCapture.reset();
+    }
+    if(mCheckpointValidation) {
+        auto& job = *mCheckpointValidation;
+        const auto mainStart = std::chrono::steady_clock::now();
+        if(mSmokeSeconds && mRecoveryTest && !mCheckpointStaleTestTriggered && job.stage == 2 &&
+            TestFlag("AMNESIA_NET_TEST_STALE_CHECKPOINT") && job.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            mCheckpointStaleTestTriggered = true; ++mCheckpointContext;
+            NetLog("[NET/TEST] Invalidated in-flight checkpoint context for stale worker regression");
+        }
+        const bool current = IsClientReplica() && mSession.Connected() && job.context == mCheckpointContext &&
+            job.generation == mSession.Generation() && job.work->checkpoint.epoch == mEpoch;
+        bool finished = false, valid = false;
+        try {
+            if(job.stage != 1 && job.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                valid = job.future.get();
+                if(job.stage == 0 && valid) job.stage = 1;
+                else finished = true;
+            }
+            if(job.stage == 1 && !finished) {
+                bool metadataValid = current;
+                // Factories and registry access must stay on the game thread.
+                // Amortize copying across frames rather than walking the save here.
+                while(metadataValid && job.work->nextName < job.work->names.size()) {
+                    metadataValid = CopyCheckpointType(*job.work,job.work->names[job.work->nextName++]);
+                    if(std::chrono::steady_clock::now()-mainStart >= std::chrono::milliseconds(2)) break;
+                }
+                if(!metadataValid || job.work->nextName == job.work->names.size()) {
+                    const auto work = job.work;
+                    const bool testValidation = mRecoveryTest != 0;
+                    const bool slowTest = mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_SLOW_CHECKPOINT");
+                    job.future = std::async(std::launch::async,[work,metadataValid,testValidation,slowTest]() {
+                        if(!metadataValid) { work->doc.Clear(); return false; }
+                        return ValidateCheckpointWork(work,testValidation,slowTest);
+                    });
+                    job.stage = 2;
                 }
             }
-            mRecoveryCheckpoint = std::move(received);
-            mSession.AcknowledgeCheckpoint(mRecoveryCheckpoint.id);
-            NetLog("[NET/RECOVERY] Complete campaign checkpoint received bytes=" + std::to_string(mRecoveryCheckpoint.bytes.size()));
+            if(finished && valid && current) {
+                if(mRecoveryTest) NetLog("[NET/TEST] Native checkpoint rejects unknown classes, short vectors and mismatched container factories");
+                if(valid) {
+                    mRecoveryCheckpoint = std::move(job.work->checkpoint);
+                    // Never acknowledge unvalidated or obsolete checkpoint work.
+                    mSession.AcknowledgeCheckpoint(mRecoveryCheckpoint.id);
+                    NetLog("[NET/RECOVERY] Complete campaign checkpoint received bytes=" + std::to_string(mRecoveryCheckpoint.bytes.size()));
+                }
+            }
+        } catch(const std::exception&) {
+            finished = true; valid = false;
+        }
+        job.mainMaxUs = std::max(job.mainMaxUs,int64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-mainStart).count()));
+        if(finished) {
+            if(!current) NetLog("[NET/RECOVERY] Obsolete checkpoint worker result discarded");
+            else if(!valid) {
+                if(!job.work->types.error.empty()) NetLog(job.work->types.error);
+                NetLog("[NET/RECOVERY] Invalid native save schema; checkpoint discarded");
+            }
+            NetLog("[NET/PERF] Client checkpoint worker_parse_ms=" + std::to_string(job.work->parseMs) +
+                " worker_validation_ms=" + std::to_string(job.work->validateMs) + " main_max_us=" + std::to_string(job.mainMaxUs));
+            mCheckpointValidation.reset(); // the future is ready; never join a busy worker in Update
+        }
+    }
+    if(IsClientReplica()) {
+        online::Checkpoint received;
+        if(!mCheckpointValidation && mSession.ReadCheckpoint(received)) {
+            const auto mainStart = std::chrono::steady_clock::now();
+            auto job = std::make_shared<cLuxCheckpointValidation>();
+            job->work = std::make_shared<CheckpointWork>();
+            job->work->checkpoint = std::move(received);
+            job->generation = mSession.Generation(); job->context = mCheckpointContext;
+            const auto work = job->work;
+            try {
+                job->future = std::async(std::launch::async,[work]() { return ParseCheckpointWork(work); });
+                job->mainMaxUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-mainStart).count();
+                mCheckpointValidation = std::move(job);
+            } catch(const std::exception&) { NetLog("[NET/RECOVERY] Checkpoint worker unavailable; previous checkpoint retained"); }
         }
         return;
     }
     if(mSession.GetRole() != online::Role::Host || !mSession.IsMapReady(mEpoch) || !mBaselineSent || WaitingForMap() || !HasNetworkPlayers()) return;
     mCheckpointTimer += timeStep;
-    if(mSendingCheckpoint.bytes.empty() && (mCheckpointTimer >= 20 || mLastCheckpointEpoch != mEpoch)) {
+    if(!mCheckpointCapture && mSendingCheckpoint.bytes.empty() && (mCheckpointTimer >= 20 || mLastCheckpointEpoch != mEpoch)) {
+        const auto start = std::chrono::steady_clock::now();
+        auto job = std::make_shared<cLuxCheckpointCapture>();
+        job->work = std::make_shared<cLuxCheckpointCapture::Work>();
+        job->generation = mSession.Generation(); job->context = mCheckpointContext;
         auto* save = gpBase->mpSaveHandler->CreateSaveGameData(); save->mpSavedMaps = gpBase->mpMapHandler->GetSavedMapCollection();
-        TiXmlDocument doc; auto* root = new TiXmlElement("SaveGame"); doc.LinkEndChild(root);
+        const auto capturedAt = std::chrono::steady_clock::now();
+        auto* root = new TiXmlElement("SaveGame"); job->work->doc.LinkEndChild(root);
+        // Snapshot all engine data on the game thread, including borrowed saved
+        // maps. The worker receives an owning XML tree with no engine pointers.
         cSerializeClass::SaveToElement(save,"",root);
         save->mpSavedMaps = NULL; hplDelete(save);
-        TiXmlPrinter printer; doc.Accept(&printer);
-        if(printer.Size() > online::MaxCheckpointBytes) { NetLog("[NET/RECOVERY] Campaign save exceeds checkpoint transfer limit"); mCheckpointTimer = 0; return; }
-        mSendingCheckpoint.epoch = mEpoch; mSendingCheckpoint.id = ++mCheckpointID;
-        if(!CompressCheckpoint(printer.CStr(),printer.Size(),mSendingCheckpoint.bytes)) { mCheckpointTimer = 0; return; }
-        mCheckpointOffset = 0; mCheckpointHash = online::CheckpointHash(mSendingCheckpoint.bytes);
+        const auto serializedAt = std::chrono::steady_clock::now();
+        job->captureUs = std::chrono::duration_cast<std::chrono::microseconds>(capturedAt-start).count();
+        job->serializeUs = std::chrono::duration_cast<std::chrono::microseconds>(serializedAt-capturedAt).count();
+        job->work->checkpoint.epoch = mEpoch; job->work->checkpoint.id = ++mCheckpointID;
+        const auto work = job->work;
+        try {
+            job->future = std::async(std::launch::async,[work]() {
+                const auto start = std::chrono::steady_clock::now();
+                TiXmlPrinter printer; work->doc.Accept(&printer);
+                const bool valid = CompressCheckpoint(printer.CStr(),printer.Size(),work->checkpoint.bytes);
+                if(valid) work->hash = online::CheckpointHash(work->checkpoint.bytes);
+                work->doc.Clear();
+                work->workerMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
+                return valid;
+            });
+            job->mainUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
+            mCheckpointCapture = std::move(job);
+        } catch(const std::exception&) { NetLog("[NET/RECOVERY] Host checkpoint worker unavailable"); }
         mLastCheckpointEpoch = mEpoch; mCheckpointTimer = 0;
-        NetLog("[NET/RECOVERY] Captured campaign checkpoint bytes=" + std::to_string(mSendingCheckpoint.bytes.size()));
     }
     // One non-fragmented 1 KiB chunk per 60 Hz tick, on its own bulk channel.
     // Slow links keep movement/audio queues independent of the checkpoint.
@@ -261,6 +457,8 @@ void cLuxNetwork::UpdateRecoveryTest() {
     auto* map = gpBase->mpMapHandler->GetCurrentMap(); if(!map) return;
     const auto now = std::chrono::steady_clock::now();
     if(mSession.GetRole() == online::Role::Host && mSession.Connected() && mBaselineSent && gpBase->mpPlayer2 && !mRecoveryTestFixtures && !mMigrationHost) {
+        if(!TestMissingParticleSave()) { NetLog("[NET/TEST] FAIL: absent particle retained invalid serialized fields"); return; }
+        NetLog("[NET/TEST] Missing particle save clears stale/non-finite fields before checkpoint serialization");
         mRecoveryTestFixtures = true;
         gpBase->mpJournal->AddNote("online_recovery_note", "note_letter.tga");
         int index = 0;

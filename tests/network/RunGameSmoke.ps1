@@ -104,6 +104,9 @@ try {
             Write-Output "PASS: $role sound/particle lifecycle, music, effects, saved media and independent lanterns"
         }
         if ($MapOnly) {
+            if($role -eq 'client' -and (!$log.Contains('Complete campaign checkpoint received') -or $log.Contains('Invalid native save schema'))) {
+                throw 'Map replica did not receive valid native campaign checkpoints'
+            }
             if ($log.Contains('Spawned remote pickup fixture') -or $log.Contains('Requested authoritative campaign level transition')) { throw 'Map-only run unexpectedly enabled scripted test fixtures' }
             $markers = if ($role -eq 'host') { @('Complete host entity baseline sent') } else { @('Complete host entity baseline applied','First authoritative player snapshot applied') }
             foreach ($marker in $markers) { if (!$log.Contains($marker)) { throw "Missing $role map proof: $marker" } }
@@ -123,6 +126,9 @@ try {
             if (!$log.Contains($inventoryMarker)) { throw "Missing $role inventory proof: $inventoryMarker" }
             if ($role -eq 'client' -and (!$log.Contains('Host scripted lighting applied') -or !$log.Contains('Host story message applied on client'))) { throw 'Client story/light presentation failed' }
             if ($Campaign) {
+                if($role -eq 'client' -and (!$log.Contains('Complete campaign checkpoint received') -or $log.Contains('Invalid native save schema'))) {
+                    throw 'Client did not retain valid native campaign checkpoints throughout the integration test'
+                }
                 if (!$log.Contains('epoch=3') -or !$log.Contains('01_old_archives.map')) { throw "$role failed campaign map/save synchronization" }
                 if ($role -eq 'host' -and !$log.Contains('Host save/load retained remote player state')) { throw 'Host save/load failed' }
                 $deathMarker = if ($role -eq 'host') { 'Triggered authoritative shared death' } else { 'Authoritative death applied on client' }

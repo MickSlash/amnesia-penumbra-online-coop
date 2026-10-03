@@ -35,6 +35,9 @@
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
+#include <future>
+#include <thread>
+#include <limits>
 namespace {
 bool TestFlag(const char* name) {
     const char* value = std::getenv(name);
@@ -215,7 +218,19 @@ void cLuxNetwork::Update(float timeStep) {
         gpBase->mpEngine->GetUpdater()->SetContainer("MainMenu");
         NetLog("[NET/CONNECTION] Client session ended; replica world unloaded");
     }
+    const auto replicationStart = std::chrono::steady_clock::now();
     UpdateReplication(timeStep);
+    if(mSession.GetRole() != online::Role::Offline) {
+        const auto replicationEnd = std::chrono::steady_clock::now();
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(replicationEnd-replicationStart).count();
+        mReplicationTotalUs += us; mReplicationMaxUs = std::max(mReplicationMaxUs,int64_t(us)); ++mReplicationSamples;
+        if(!mReplicationStatsAt.time_since_epoch().count()) mReplicationStatsAt = replicationEnd;
+        if(replicationEnd-mReplicationStatsAt >= std::chrono::seconds(5)) {
+            NetLog("[NET/PERF] Replication role=" + std::string(IsClientReplica() ? "client" : "host") +
+                " average_us=" + std::to_string(mReplicationTotalUs/mReplicationSamples) + " max_us=" + std::to_string(mReplicationMaxUs));
+            mReplicationStatsAt = replicationEnd; mReplicationTotalUs = mReplicationMaxUs = mReplicationSamples = 0;
+        }
+    }
     UpdateRecoveryTest();
     UpdateCheckpoint(timeStep);
     if(IsClientReplica() && gpBase->mpEngine->GetUpdater()->GetCurrentContainerName() != "Default") {
@@ -402,7 +417,7 @@ void cLuxNetwork::Reset() {
     mInputAccumulator = 0;
     mPendingLookYaw = mPendingLookPitch = 0; mHasLookSequence = false;
     mClientObjectLook = mClientScriptLook = mRemoteRotate = false;
-    mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0;
+    mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0; mLastSnapshotAt = {};
     mPrediction.Clear();
     mEntityBytes.clear(); mEntityStates.clear(); mReplicaIDs.clear(); mLoggedWorldReplica = false;
     mBaselineApplied = false; mBaselineSent = false; mClientMoved = false;
@@ -551,6 +566,7 @@ bool cLuxNetwork::WaitingForMap() const {
         mMapAnnounced && !mSession.IsMapReady(mEpoch);
 }
 bool cLuxNetwork::Host(uint16_t port) {
+    ++mCheckpointContext;
     mEverConnected = mRecovering = false; mConnectionGeneration = 0;
     mConnectPort = port;
     gpBase->mpMainConfig->SetString("Online","Port",std::to_string(port));
@@ -560,6 +576,7 @@ bool cLuxNetwork::Host(uint16_t port) {
     return started;
 }
 bool cLuxNetwork::Join(const std::string& address, uint16_t port) {
+    ++mCheckpointContext;
     mEverConnected = mRecovering = false; mConnectionGeneration = 0;
     mConnectAddress = address; mConnectPort = port;
     gpBase->mpMainConfig->SetString("Online","LastAddress",address);
@@ -570,7 +587,7 @@ bool cLuxNetwork::Join(const std::string& address, uint16_t port) {
     if(started) gpBase->mpEngine->SetWaitIfAppOutOfFocus(false);
     return started;
 }
-void cLuxNetwork::Disconnect() { mSession.Stop(); mRecovering = mEverConnected = false; }
+void cLuxNetwork::Disconnect() { ++mCheckpointContext; mSession.Stop(); mRecovering = mEverConnected = false; }
 std::string cLuxNetwork::ConnectionStatus() const {
     if(mInputLeasePaused) return "La rete non risponde: campagna in pausa, attesa del partner.";
     if(mMigrationHost && mRecovering) return "Host trasferito a questo PC. Campagna recuperata, in attesa del partner.";
@@ -614,7 +631,7 @@ void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
     mReplicaMediaIDs.clear(); mMediaStates.clear(); mMediaBaselineApplied = false;
     gpBase->mpMusicHandler->Reset();
     gpBase->mpEngine->GetSound()->GetMusicHandler()->Stop(1000);
-    mSnapshots.clear(); mReceivedSnapshot = false;
+    mSnapshots.clear(); mReceivedSnapshot = false; mLastSnapshotAt = {};
     mHasClientLife = false; mClientDead = false;
     mPendingLookYaw = mPendingLookPitch = 0; mClientObjectLook = false;
     map->GetWorld()->SetPhysicsSimulationEnabled(false);
@@ -657,7 +674,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
     if(!mSession.Connected()) {
         mSendingCheckpoint.bytes.clear(); mLastCheckpointEpoch = 0;
         mMapAnnounced = false; mHostMapFile.clear();
-        mSnapshots.clear(); mReceivedSnapshot = false;
+        mSnapshots.clear(); mReceivedSnapshot = false; mLastSnapshotAt = {};
         mHasClientLife = mHasHostLife = false; mClientDead = false;
         if(map) map->GetWorld()->SetPhysicsSimulationEnabled(!IsClientReplica() && !mRecovering);
         return;
@@ -699,8 +716,11 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             }
         }
         online::MediaState media;
-        for(int count = 0; count < 128 && mSession.ReadMedia(media); ++count)
+        bool mediaIDsReady = false;
+        for(int count = 0; count < 128 && mSession.ReadMedia(media); ++count) {
+            if(!mediaIDsReady) { EnsureMediaIDs(map->GetWorld(),mNextMediaID); mediaIDsReady = true; }
             if(media.epoch == mEpoch) ApplyMedia(map, media);
+        }
         online::Presentation event;
         for(int count = 0; count < 128 && mSession.ReadPresentation(event); ++count)
             if(event.epoch == mEpoch && event.target != 1) ApplyPresentation(map, event);
@@ -752,6 +772,12 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         online::Snapshot snapshot;
         if(mSession.ReadSnapshot(snapshot) && (!mReceivedSnapshot ||
             (snapshot.sequence - mReceivedSequence != 0 && snapshot.sequence - mReceivedSequence < 0x80000000u))) {
+            if(mLastSnapshotAt.time_since_epoch().count()) {
+                const auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - mLastSnapshotAt).count();
+                if(gap > 250) NetLog("[NET/DIAG] Authoritative snapshot gap=" + std::to_string(gap) +
+                    " ms epoch=" + std::to_string(mEpoch) + " rtt_ms=" + std::to_string(mSession.Ping()));
+            }
+            mLastSnapshotAt = now;
             if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_ENEMY") && !mTestEnemyDamage &&
                 (snapshot.players[0].health < 9900 || snapshot.players[1].health < 9900)) {
                 mTestEnemyDamage = true; NetLog("[NET/TEST] Host enemy damage applied on client");
@@ -1011,10 +1037,11 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         if(!mSession.SendLife(snapshot)) { NetLog("[NET/STATE] Cannot send life transition; closing session"); mSession.Stop(); return; }
         mHostLife = snapshot; mHasHostLife = true;
     }
-    const bool mediaReady = ReplicateMedia(map);
-    if(!mSession.Connected()) return;
     if(mSnapshotAccumulator < 1.0f / 20.0f) return;
     mSnapshotAccumulator = std::fmod(mSnapshotAccumulator, 1.0f / 20.0f);
+    // Rebuild media once per replication tick, rather than once per engine frame.
+    const bool mediaReady = ReplicateMedia(map);
+    if(!mSession.Connected()) return;
     const bool snapshotSent = mSession.SendSnapshot(snapshot);
     const bool dead = (snapshot.players[1].flags & 8) != 0;
     if(mSmokeSeconds && snapshotSent && (!mTestHasLifeSnapshot || mTestLastSentDead != dead)) {
@@ -1248,7 +1275,6 @@ bool cLuxNetwork::ReplicateMedia(cLuxMap* map) {
 }
 void cLuxNetwork::ApplyMedia(cLuxMap* map, const online::MediaState& s) {
     cWorld* world = map->GetWorld(); const MediaKey key(uint8_t(s.kind), s.id);
-    EnsureMediaIDs(world, mNextMediaID);
     auto previous = mMediaStates.find(key);
     if(s.kind == online::MediaKind::Music) {
         const int priority = int(s.id) - 1;

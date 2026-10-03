@@ -6,6 +6,9 @@
 #include <chrono>
 #include <deque>
 #include <map>
+#include <memory>
+struct cLuxCheckpointValidation;
+struct cLuxCheckpointCapture;
 // Engine-facing adapter. Socket/protocol details remain in network/.
 class cLuxNetwork : public iLuxUpdateable {
 public:
@@ -72,6 +75,7 @@ private:
     float mSnapshotAccumulator = 0;
     bool mMapAnnounced = false, mReceivedSnapshot = false, mTestMovement = false;
     std::chrono::steady_clock::time_point mMapWaitStart;
+    std::chrono::steady_clock::time_point mLastSnapshotAt;
     struct TimedSnapshot { online::Snapshot state; std::chrono::steady_clock::time_point received; };
     std::deque<TimedSnapshot> mSnapshots;
     uint32_t mActionSequence = 0;
@@ -104,6 +108,13 @@ private:
     uint16_t mConnectPort = online::DefaultPort;
     std::chrono::steady_clock::time_point mRetryAt, mRecoveryStart;
     online::Checkpoint mRecoveryCheckpoint, mSendingCheckpoint;
+    std::shared_ptr<cLuxCheckpointValidation> mCheckpointValidation;
+    std::shared_ptr<cLuxCheckpointCapture> mCheckpointCapture;
+    uint64_t mCheckpointContext = 0; // invalidates work across explicit session changes
+    bool mCheckpointStaleTestTriggered = false;
+    int64_t mReplicationTotalUs = 0, mReplicationMaxUs = 0;
+    uint32_t mReplicationSamples = 0;
+    std::chrono::steady_clock::time_point mReplicationStatsAt;
     uint32_t mCheckpointID = 0, mCheckpointOffset = 0, mLastCheckpointEpoch = 0;
     uint64_t mCheckpointHash = 0;
     float mCheckpointTimer = 0;

@@ -4,6 +4,8 @@ Build sperimentale Windows x64, protocollo 5, due giocatori. Entrambi devono pos
 
 Questa build corregge anche la camminata continua del client dopo il rilascio dei tasti: aggiornare **entrambi**, incluso l'host. La prova dell'arresto avanti/laterale è documentata in `docs/qa_movimento_2026-10-03.md` dentro `source.zip`.
 
+Riduce inoltre le pause periodiche: validazione dei checkpoint client e stampa/compressione host vengono eseguite in background. Sono ottimizzate le scansioni di audio/particelle e corretti i campi non inizializzati delle particelle assenti nei salvataggi. Misure e prove in `docs/qa_lag_cpu_2026-10-04.md` dentro `source.zip`; la scomparsa di ogni rallentamento sui PC remoti richiede ancora una prova con questa build.
+
 ## Avvio senza PowerShell
 
 1. Estrarre **tutto lo ZIP** in una cartella propria. Conservare `AmnesiaCoop.exe`, `bin` e gli altri file insieme.
@@ -55,4 +57,4 @@ Inventario e progressione sono condivisi. Olio e attivazione della lanterna sono
 
 Gli errori sono nel `hpl.log` della cartella del profilo. Se non si collega, controllare IP, porta, firewall, build e dati. La console sviluppatore conserva `net_status` e `net_ping`, ma non serve per iniziare una partita.
 
-I nuovi messaggi di connessione riportano `[t=...ms]` dal contatore monotono del singolo PC, la dimensione negoziata dei datagrammi, il codice ricevuto alla disconnessione e il tempo dall'ultimo pacchetto applicativo. I contatori dei due PC non hanno la stessa origine. `[NET/DIAG] Transport service paused` segnala un intervallo superiore a un secondo senza servizio della rete sul thread del gioco, possibile anche durante un caricamento: da solo non identifica la causa. Se le cadute persistono, conservare i log di entrambi prima di riavviare il gioco.
+I nuovi messaggi di connessione riportano `[t=...ms]` dal contatore monotono del singolo PC, la dimensione negoziata dei datagrammi, il codice ricevuto alla disconnessione e il tempo dall'ultimo pacchetto applicativo. I contatori dei due PC non hanno la stessa origine. `[NET/DIAG] Transport service paused` segnala un intervallo superiore a 250 ms senza servizio della rete sul thread del gioco, possibile anche durante un caricamento: da solo non identifica la causa. `[NET/STATS]` registra RTT, variazione e code del trasporto; `[NET/PERF]` distingue replica e checkpoint. Se ritardo o blocchi persistono, conservare il `hpl.log` di entrambi subito dopo la partita e prima di riaprire il gioco, che può sovrascriverlo. Il launcher usa `Documenti\Amnesia\AmnesiaOnlineCoop_Host\hpl.log` anche per il client.

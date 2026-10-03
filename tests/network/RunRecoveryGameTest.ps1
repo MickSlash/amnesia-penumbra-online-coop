@@ -3,6 +3,8 @@ param(
     [Parameter(Mandatory=$true)][string]$GameDirectory,
     [ValidateSet('reconnect','migrate')][string]$Mode = 'reconnect',
     [int]$Port = 27060,
+    [switch]$SlowCheckpoint,
+    [switch]$StaleCheckpoint,
     [string]$Executable = "$PSScriptRoot/../../amnesia/src/game/x64/Release/Lux.exe"
 )
 $ErrorActionPreference = 'Stop'
@@ -38,6 +40,8 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ADDRESS','127.0.0.1')
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_SMOKE_SECONDS','60')
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_RECOVERY',$Mode)
+        if($SlowCheckpoint) { [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_SLOW_CHECKPOINT','1') }
+        if($StaleCheckpoint) { [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_STALE_CHECKPOINT','1') }
         $processes += Start-Process -FilePath $exe -WorkingDirectory $game -ArgumentList $path -WindowStyle Hidden -PassThru
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(95)
@@ -53,6 +57,20 @@ try {
     }
     $client = [IO.File]::ReadAllText((Join-Path $run 'client.log')); $hostText = [IO.File]::ReadAllText((Join-Path $run 'host.log'))
     if(!$client.Contains('Complete campaign checkpoint received')) { throw 'Client never received validated campaign checkpoint' }
+    if(!$hostText.Contains('Missing particle save clears stale/non-finite fields')) { throw 'Missing particle save regression did not run' }
+    if($StaleCheckpoint) {
+        $invalidated = $client.IndexOf('Invalidated in-flight checkpoint context')
+        $discarded = $client.IndexOf('Obsolete checkpoint worker result discarded')
+        $accepted = $client.IndexOf('Complete campaign checkpoint received')
+        if($invalidated -lt 0 -or $discarded -le $invalidated -or $accepted -le $discarded) { throw 'Stale worker was not discarded before accepting a later valid checkpoint' }
+        Write-Output 'PASS: stale in-flight worker discarded; later validated checkpoint restored recovery'
+    }
+    if($SlowCheckpoint) {
+        $timings = [regex]::Matches($client,'worker_validation_ms=(\d+) main_max_us=(\d+)')
+        $responsive = @($timings | Where-Object { [int]$_.Groups[1].Value -ge 350 -and [int]$_.Groups[2].Value -lt 16000 })
+        if(!$responsive.Count) { throw 'Slow worker did not complete without a 16 ms game-thread checkpoint stall' }
+        Write-Output 'PASS: deliberately delayed checkpoint worker (350 ms) completed with game-thread slices below 16 ms'
+    }
     if($Mode -eq 'migrate') {
         if(!$client.Contains('Host migrated from complete campaign checkpoint') -or !$client.Contains('Migration restored campaign variable and swapped individual player states') -or !$hostText.Contains('Former host yielded authority')) { throw 'Host migration did not restore campaign and reverse roles' }
     } else { if(!$hostText.Contains('Original host listening again after two-second outage') -or !$client.Contains('Replica loaded epoch=2')) { throw 'Short outage recovery did not rebuild client map' } }
@@ -60,6 +78,6 @@ try {
 } finally {
     foreach($role in @('host','client')) { if($logs.ContainsKey($role) -and (Test-Path -LiteralPath $logs[$role])) { Copy-Item -LiteralPath $logs[$role] -Destination (Join-Path $run "$role.log") -Force } }
     foreach($process in $processes) { if(!$process.HasExited) { Stop-Process -Id $process.Id } }
-    foreach($name in @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_RECOVERY')) { [Environment]::SetEnvironmentVariable($name,$null) }
+    foreach($name in @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_SLOW_CHECKPOINT','AMNESIA_NET_TEST_STALE_CHECKPOINT')) { [Environment]::SetEnvironmentVariable($name,$null) }
     foreach($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name,$saved[$name]) }
 }

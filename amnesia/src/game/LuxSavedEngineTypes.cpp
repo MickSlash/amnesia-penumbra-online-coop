@@ -743,9 +743,15 @@ void cEnginePS_SaveData::FromPS(cParticleSystem *apPS)
 	}
 	else
 	{
-		msName = "NULL";
-		msType = "";
-		mvEmitterActive.Clear();
+        // An absent emitter still occupies a serialized prop slot. Initialize
+        // every field so checkpoints never contain stale memory or NaN values.
+        msName = "NULL"; msType = ""; mlID = -1;
+        mvSize = cVector3f(1); m_mtxTransform = cMatrixf::Identity;
+        mColor = cColor(1); mbFadeAtDistance = false;
+        mfMinFadeDistanceStart = mfMinFadeDistanceEnd = 0;
+        mfMaxFadeDistanceStart = mfMaxFadeDistanceEnd = 0;
+        mbActive = mbVisible = false;
+        mvEmitterActive.Clear();
 	}
 }
 
