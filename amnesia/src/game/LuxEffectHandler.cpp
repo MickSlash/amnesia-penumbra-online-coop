@@ -465,6 +465,7 @@ cLuxEffect_RadialBlur::cLuxEffect_RadialBlur()
 {
 	mfSize =0;
 	mfSizeGoal =0;
+	mfFadeSpeed =0;
 	mfBlurStartDist =0;
 }
 
@@ -537,6 +538,7 @@ void cLuxEffect_RadialBlur::Reset()
 {
 	mfSize =0;
 	mfSizeGoal =0;
+	mfFadeSpeed =0;
 	mfBlurStartDist =0;
 
 	gpBase->mpMapHandler->GetPostEffect_RadialBlur()->Reset();
@@ -558,6 +560,7 @@ cLuxEffect_SepiaColor::cLuxEffect_SepiaColor()
 
 	mfAmount =0;
 	mfAmountGoal =0;
+	mfFadeSpeed =0;
 }
 
 //-----------------------------------------------------------------------
@@ -633,6 +636,7 @@ void cLuxEffect_SepiaColor::Reset()
 {
 	mfAmount =0;
 	mfAmountGoal =0;
+	mfFadeSpeed =0;
 	gpBase->mpMapHandler->GetPostEffect_Sepia()->Reset();
 	gpBase->mpMapHandler->GetPostEffect_Sepia()->SetActive(false);
 }
@@ -790,6 +794,7 @@ cLuxEffect_ImageTrail::cLuxEffect_ImageTrail()
 {
 	mfAmount =0;
 	mfAmountGoal =0;
+	mfFadeSpeed =0;
 }
 
 void cLuxEffect_ImageTrail::FadeTo(float afAmount, float afSpeed)
@@ -835,6 +840,7 @@ void cLuxEffect_ImageTrail::Reset()
 {
 	mfAmount =0;
 	mfAmountGoal =0;
+	mfFadeSpeed =0;
 	gpBase->mpMapHandler->GetPostEffect_ImageTrail()->Reset();
 	gpBase->mpMapHandler->GetPostEffect_ImageTrail()->SetActive(false);
 }

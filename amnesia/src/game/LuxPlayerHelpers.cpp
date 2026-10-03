@@ -2569,7 +2569,8 @@ void cLuxPlayerLantern::SetActive(bool abX, bool abUseEffects, bool abCheckForOi
 
 	/////////////////
 	// Check if disabled
-	if(abX && mbDisabled)
+	// Authoritative replicas bypass local permissions, including stale disabled state.
+	if(abCheckIfAllowed && abX && mbDisabled)
 	{
 		return;
 	}

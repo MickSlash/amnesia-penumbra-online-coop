@@ -353,7 +353,7 @@ bool Session::StartHost(uint16_t port, bool resume) {
     ENetAddress address = {}; address.host = ENET_HOST_ANY; address.port = port;
     host_ = enet_host_create(&address, 1, 4, 0, 0);
     if (!host_) { log_("[NET/CONNECTION] Cannot bind host socket"); Stop(); return false; }
-    host_->maximumPacketSize = 65536; host_->maximumWaitingData = 262144;
+    host_->maximumPacketSize = 65536; host_->maximumWaitingData = TransportWaitingDataBytes;
     host_->mtu = TransportDatagramBytes;
     role_ = Role::Host;
     log_("[NET/CONNECTION] Listening on 0.0.0.0:" + std::to_string(port)); return true;
@@ -362,7 +362,7 @@ bool Session::StartClient(const std::string& name, uint16_t port, bool resume) {
     Stop(); fatal_ = false; if(!resume) { expectedIdentity_ = 0; checkpointAck_ = 0; } if (name.empty() || !port || !Initialize()) return false;
     host_ = enet_host_create(nullptr, 1, 4, 0, 0);
     if (!host_) { Stop(); return false; }
-    host_->maximumPacketSize = 65536; host_->maximumWaitingData = 262144;
+    host_->maximumPacketSize = 65536; host_->maximumWaitingData = TransportWaitingDataBytes;
     host_->mtu = TransportDatagramBytes;
     ENetAddress address = {}; address.port = port;
     if (enet_address_set_host(&address, name.c_str()) != 0) { log_("[NET/CONNECTION] Invalid host address"); Stop(); return false; }
@@ -377,15 +377,37 @@ void Session::Stop() {
     if (initialized_) enet_deinitialize();
     host_ = nullptr; peer_ = nullptr; initialized_ = ready_ = hasInput_ = false; role_ = Role::Offline;
     lastPoll_ = lastPacket_ = lastDiagnostic_ = 0;
-    hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; map_ = MapState();
+    hasSnapshot_ = hasMap_ = false; readyEpoch_ = snapshotBackups_ = 0; map_ = MapState();
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
 }
 void Session::SuspendTransportForTest() {
     const Role previous = role_; Stop(); role_ = previous;
 }
-bool Session::Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reliable) {
+bool Session::BulkReady(size_t bytes) const {
+    if(!peer_) return false;
+    size_t outstanding = peer_->reliableDataInTransit + bytes;
+    for(auto it = enet_list_begin(&peer_->outgoingSendReliableCommands);
+        it != enet_list_end(&peer_->outgoingSendReliableCommands); it = enet_list_next(it)) {
+        outstanding += reinterpret_cast<ENetOutgoingCommand*>(it)->fragmentLength;
+        if(outstanding > 32768) return false;
+    }
+    if(outstanding > 32768) return false;
+    const uint32_t now = enet_time_get();
+    for(auto it = enet_list_begin(&peer_->sentReliableCommands);
+        it != enet_list_end(&peer_->sentReliableCommands); it = enet_list_next(it)) {
+        const auto* command = reinterpret_cast<const ENetOutgoingCommand*>(it);
+        if(command->packet && (command->sendAttempts > 1 || uint32_t(now - command->sentTime) > 250)) return false;
+    }
+    // Timed-out commands are requeued before sending; retain the gate until ACK.
+    for(auto it = enet_list_begin(&peer_->outgoingSendReliableCommands);
+        it != enet_list_end(&peer_->outgoingSendReliableCommands); it = enet_list_next(it))
+        if(reinterpret_cast<const ENetOutgoingCommand*>(it)->sendAttempts > 1) return false;
+    return true;
+}
+bool Session::Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reliable, bool bulk) {
     if (!peer_ || bytes.empty()) return false;
+    if(bulk && !BulkReady(bytes.size())) return false;
     ENetPacket* packet = enet_packet_create(bytes.data(), bytes.size(), reliable ? ENET_PACKET_FLAG_RELIABLE : 0);
     if (!packet) return false;
     if (enet_peer_send(peer_, channel, packet) != 0) { enet_packet_destroy(packet); return false; }
@@ -516,13 +538,14 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         }
         return;
     }
-    if (ready_ && role_ == Role::Client && channel == 1 && p[4] == uint8_t(Message::Snapshot)) {
+    if (ready_ && role_ == Role::Client && (channel == 1 || channel == 0) && p[4] == uint8_t(Message::Snapshot)) {
         Snapshot snapshot;
         if (!DecodeSnapshot(p, n, snapshot)) { Reject("invalid player snapshot"); return; }
         if (hasMap_ && snapshot.epoch == map_.epoch && (!hasSnapshot_ ||
             (snapshot.sequence - snapshot_.sequence != 0 && snapshot.sequence - snapshot_.sequence < 0x80000000u))) {
             if(!hasSnapshot_ || ((snapshot_.players[1].flags ^ snapshot.players[1].flags) & 8))
                 log_("[NET/STATE] Received remote life snapshot dead=" + std::to_string((snapshot.players[1].flags & 8) ? 1 : 0) + " sequence=" + std::to_string(snapshot.sequence));
+            if(channel == 0) ++snapshotBackups_;
             snapshot_ = snapshot; hasSnapshot_ = true;
         }
         return;
@@ -544,6 +567,9 @@ void Session::Poll() {
             entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
             enet_peer_timeout(peer_, 8, 3000, 10000);
+            // BulkReady regulates the large reliable stream. RTT spikes during
+            // loading/ACK bursts must not make ENet discard every player pose.
+            enet_peer_throttle_configure(peer_, ENET_PEER_PACKET_THROTTLE_INTERVAL, ENET_PEER_PACKET_THROTTLE_SCALE, 0);
             if (role_ == Role::Host && e.data != ProtocolVersion) { Reject("incompatible connect version"); continue; }
             lastPacket_ = now;
             log_("[NET/CONNECTION] Peer connected; UDP payload cap=" + std::to_string(peer_->mtu) + " bytes");
@@ -577,7 +603,7 @@ void Session::Poll() {
             " throttle=" + std::to_string(peer_->packetThrottle) + "/" + std::to_string(ENET_PEER_PACKET_THROTTLE_SCALE) +
             " reliable_queued_bytes=" + std::to_string(queuedBytes) +
             " reliable_in_flight_bytes=" + std::to_string(peer_->reliableDataInTransit) +
-            " receive_waiting_bytes=" + std::to_string(peer_->totalWaitingData) +
+            " receive_waiting_bytes=" + std::to_string(peer_->totalWaitingData) + " bulk_paused=" + std::to_string(!BulkReady(0)) +
             " application_age_ms=" + std::to_string(uint32_t(now - lastPacket_)) +
             " ack_age_ms=" + std::to_string(uint32_t(now - peer_->lastReceiveTime)));
     }
@@ -594,6 +620,7 @@ void Session::SetLobbyReady(bool ready) {
     auto out = Header(Message::Peer); out.push_back(ready ? 1 : 0); U16(out, listenPort_); Send(out, 0, true);
 }
 bool Session::SendSnapshot(const Snapshot& s) { return role_ == Role::Host && ready_ && IsMapReady(s.epoch) && Send(EncodeSnapshot(s), 1, false); }
+bool Session::SendSnapshotBackup(const Snapshot& s) { return role_ == Role::Host && ready_ && IsMapReady(s.epoch) && Send(EncodeSnapshot(s), 0, true); }
 bool Session::ReadSnapshot(Snapshot& s) const { if (!ready_ || !hasSnapshot_) return false; s = snapshot_; return true; }
 bool Session::SendLife(const Snapshot& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeLife(s), 2, true); }
 bool Session::ReadLife(Snapshot& s) {
@@ -610,7 +637,7 @@ bool Session::SendMapReady(uint32_t epoch) {
     auto out = Header(Message::MapReady); U32(out, epoch); return Send(out, 0, true);
 }
 bool Session::IsMapReady(uint32_t epoch) const { return ready_ && hasMap_ && epoch && readyEpoch_ == epoch; }
-bool Session::SendEntity(const EntityState& e) { return role_ == Role::Host && IsMapReady(e.epoch) && Send(EncodeEntity(e), 2, true); }
+bool Session::SendEntity(const EntityState& e) { return role_ == Role::Host && IsMapReady(e.epoch) && Send(EncodeEntity(e), 2, true, true); }
 bool Session::ReadEntity(EntityState& e) { if(entities_.empty()) return false; e = std::move(entities_.front()); entities_.pop_front(); return true; }
 bool Session::SendAction(const ActionRequest& a) {
     if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 6 || a.item.size() > 128 || a.secondItem.size() > 128) return false;
@@ -626,14 +653,14 @@ bool Session::SendWorldReady(uint32_t epoch) {
 bool Session::IsWorldReady(uint32_t epoch) const { return ready_ && epoch && worldReadyEpoch_ == epoch && entities_.empty() && media_.empty(); }
 bool Session::SendInventory(const InventoryState& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeInventory(s), 2, true); }
 bool Session::ReadInventory(InventoryState& s) const { if(!ready_ || !hasInventory_) return false; s = inventory_; return true; }
-bool Session::SendPresentation(const Presentation& event) { return role_ == Role::Host && IsMapReady(event.epoch) && Send(EncodePresentation(event), 2, true); }
+bool Session::SendPresentation(const Presentation& event) { return role_ == Role::Host && IsMapReady(event.epoch) && Send(EncodePresentation(event), 2, true, true); }
 bool Session::ReadPresentation(Presentation& event) { if(presentation_.empty()) return false; event = std::move(presentation_.front()); presentation_.pop_front(); return true; }
-bool Session::SendMedia(const MediaState& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeMedia(s), 2, true); }
+bool Session::SendMedia(const MediaState& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeMedia(s), 2, true, true); }
 bool Session::ReadMedia(MediaState& s) { if(media_.empty()) return false; s = std::move(media_.front()); media_.pop_front(); return true; }
 bool Session::SendJournal(const JournalState& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeJournal(s), 2, true); }
 bool Session::ReadJournal(JournalState& s) const { if(!ready_ || !hasJournal_ || !hasMap_ || journal_.epoch != map_.epoch) return false; s = journal_; return true; }
 bool Session::SendCheckpoint(const CheckpointChunk& c) {
-    if(role_ != Role::Host || !IsMapReady(c.epoch) || !Send(EncodeCheckpoint(c),3,true)) return false;
+    if(role_ != Role::Host || !IsMapReady(c.epoch) || !Send(EncodeCheckpoint(c),3,true,true)) return false;
     if(c.offset + c.bytes.size() == c.total) checkpointSent_ = c.id;
     return true;
 }

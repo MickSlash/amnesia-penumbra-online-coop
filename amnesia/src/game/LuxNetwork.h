@@ -61,7 +61,7 @@ private:
     uint32_t mAppliedLookSequence = 0;
     bool mHasLookSequence = false, mClientObjectLook = false, mClientScriptLook = false;
     online::MovementPrediction mPrediction;
-    bool mPredictionTestObserved = false;
+    bool mPredictionTestObserved = false, mPredictionSmoothTestObserved = false;
     bool mRemoteRotate = false;
     cVector3f mRemoteSpawnFeet;
     bool mObservedRemoteMovement = false;
@@ -72,7 +72,7 @@ private:
     void ApplyReplica(cLuxPlayer* player, const online::PlayerState& state, bool localView);
     uint32_t mEpoch = 0, mSnapshotSequence = 0, mReceivedSequence = 0;
     std::string mHostMapFile;
-    float mSnapshotAccumulator = 0;
+    float mSnapshotAccumulator = 0, mSnapshotBackupAccumulator = 0, mWorldReplicationAccumulator = 0;
     bool mMapAnnounced = false, mReceivedSnapshot = false, mTestMovement = false;
     std::chrono::steady_clock::time_point mMapWaitStart;
     std::chrono::steady_clock::time_point mLastSnapshotAt;
@@ -114,6 +114,8 @@ private:
     bool mCheckpointStaleTestTriggered = false;
     int64_t mReplicationTotalUs = 0, mReplicationMaxUs = 0;
     uint32_t mReplicationSamples = 0;
+    int64_t mSnapshotGapTotalMs = 0, mSnapshotGapMaxMs = 0;
+    uint32_t mSnapshotGapSamples = 0;
     std::chrono::steady_clock::time_point mReplicationStatsAt;
     uint32_t mCheckpointID = 0, mCheckpointOffset = 0, mLastCheckpointEpoch = 0;
     uint64_t mCheckpointHash = 0;
@@ -150,6 +152,7 @@ private:
     bool mTestMediaSpawned = false, mTestMediaChanged = false, mTestMediaRemoved = false;
     bool mTestMediaRestoreLogged = false, mTestLanternRemoteLogged = false, mTestLanternLocalLogged = false;
     bool mTestLanternRequested = false, mTestLanternIndependentLogged = false;
+    bool mTestLanternDisabled = false, mTestLanternHandsLogged = false, mTestSnapshotBackupLogged = false;
     void UpdateMediaTest(cLuxMap* map, float elapsed);
     int mNextMediaID = 1000000000; // give unsaved runtime objects stable engine IDs
     bool ReplicateMedia(cLuxMap* map);

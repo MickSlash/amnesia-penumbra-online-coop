@@ -470,7 +470,11 @@ void cLuxPlayer::Update(float afTimeStep)
 
 void cLuxPlayer::PostUpdate(float afTimeStep)
 {
-    if(gpBase->mpNetwork && (gpBase->mpNetwork->IsClientReplica() || gpBase->mpNetwork->WaitingForMap())) return;
+    if(gpBase->mpNetwork && (gpBase->mpNetwork->IsClientReplica() || gpBase->mpNetwork->WaitingForMap())) {
+        // Replica cameras move without physics; held objects still follow them.
+        if(gpBase->mpNetwork->IsClientReplica() && mpCharBody && mpHands) mpHands->PostUpdate(afTimeStep);
+        return;
+    }
 	////////////////////////
 	// Run Helper message
 	RunHelperMessage(eUpdateableMessage_PostUpdate,afTimeStep);

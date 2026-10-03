@@ -10,10 +10,13 @@
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 5;
+constexpr uint16_t ProtocolVersion = 6;
 constexpr uint16_t DefaultPort = 27020;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
 constexpr uint32_t TransportDatagramBytes = 1200;
+// Baselines plus out-of-order checkpoint chunks must leave room for a missing
+// reliable packet. A 256 KiB cap can reject the very retransmit that drains it.
+constexpr uint32_t TransportWaitingDataBytes = 4 * 1024 * 1024;
 enum class Role { Offline, Host, Client };
 enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17 };
 struct JournalEntry {
@@ -121,6 +124,9 @@ public:
     bool SendInput(const PlayerInput& input);
     bool ReadInput(PlayerInput& input) const; // expires after 250 ms
     bool SendSnapshot(const Snapshot& snapshot);
+    // Low-rate reliable pose on control channel; never a life discontinuity.
+    bool SendSnapshotBackup(const Snapshot& snapshot);
+    uint32_t SnapshotBackupsReceived() const { return snapshotBackups_; }
     bool ReadSnapshot(Snapshot& snapshot) const;
     bool SendLife(const Snapshot& snapshot);
     bool ReadLife(Snapshot& snapshot);
@@ -164,7 +170,8 @@ public:
     bool SetLocalIdentity(uint64_t identity) { if(role_ != Role::Offline || !identity) return false; identity_ = identity; return true; }
 private:
     bool Initialize();
-    bool Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reliable);
+    bool Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reliable, bool bulk = false);
+    bool BulkReady(size_t bytes) const;
     void Receive(const uint8_t* data, size_t size, uint8_t channel);
     void Reject(const char* reason);
     Logger log_;
@@ -179,7 +186,7 @@ private:
     Snapshot snapshot_;
     MapState map_;
     bool hasSnapshot_ = false, hasMap_ = false;
-    uint32_t readyEpoch_ = 0;
+    uint32_t readyEpoch_ = 0, snapshotBackups_ = 0;
     std::deque<EntityState> entities_;
     std::deque<ActionRequest> actions_;
     uint32_t lastAction_ = 0;

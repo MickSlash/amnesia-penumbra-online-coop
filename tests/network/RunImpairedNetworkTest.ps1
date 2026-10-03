@@ -6,6 +6,7 @@ param(
     [ValidateRange(2,1000)][int]$DropEvery = 20,
     [switch]$Media,
     [switch]$Prediction,
+    [switch]$SnapshotBlackout,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$MapOnly,
     [ValidateRange(576,65507)][int]$MaxDatagramBytes = 65507,
@@ -88,7 +89,7 @@ $relay = Start-Process -FilePath $shellPath -WindowStyle Hidden -PassThru -Argum
 try {
     Start-Sleep -Seconds 2
     if($relay.HasExited) { throw 'UDP relay failed to start; inspect build/impaired-network/relay.err' }
-    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Executable $Executable -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly) -Media:$Media -Prediction:$Prediction -StartMap $StartMap -MapOnly:$MapOnly
+    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Executable $Executable -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly) -Media:$Media -Prediction:$Prediction -SnapshotBlackout:$SnapshotBlackout -StartMap $StartMap -MapOnly:$MapOnly
     if (!$relay.WaitForExit(15000)) { throw 'UDP relay did not exit on its timer' }
     $relay.Refresh()
     if($relay.ExitCode -ne 0) { throw 'UDP relay failed; inspect relay.err' }

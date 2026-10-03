@@ -1,10 +1,14 @@
 # Installare e giocare ad Amnesia Online Co-op
 
-Build sperimentale Windows x64, protocollo 5, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono in `docs/qa_recovery_2026-10-03.md` dentro `source.zip`.
+Build sperimentale Windows x64, protocollo 6, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono in `docs/qa_recovery_2026-10-03.md` dentro `source.zip`.
 
 Questa build corregge anche la camminata continua del client dopo il rilascio dei tasti: aggiornare **entrambi**, incluso l'host. La prova dell'arresto avanti/laterale è documentata in `docs/qa_movimento_2026-10-03.md` dentro `source.zip`.
 
 Riduce inoltre le pause periodiche: validazione dei checkpoint client e stampa/compressione host vengono eseguite in background. Sono ottimizzate le scansioni di audio/particelle e corretti i campi non inizializzati delle particelle assenti nei salvataggi. Misure e prove in `docs/qa_lag_cpu_2026-10-04.md` dentro `source.zip`; la scomparsa di ogni rallentamento sui PC remoti richiede ancora una prova con questa build.
+
+La versione 6 corregge la posizione della lanterna in prima persona sul client e l'applicazione delle lanterne autorevoli anche con permessi locali obsoleti. Invia snapshot a 60 Hz, aggiunge stati affidabili di riserva ogni 100 ms e quando una lanterna cambia stato, senza riavviare prediction o interpolazione. Audio ed entità restano a 20 Hz. Riassorbe gradualmente le piccole correzioni del movimento e rinvia i dati del mondo quando ci sono troppe informazioni in attesa o ritrasmissioni. Corregge inoltre il limite di ricezione di 256 KiB che poteva impedire il recupero dei pacchetti mancanti durante il cambio livello. **Aggiornare entrambi i PC**: le build del protocollo 5 vengono rifiutate alla connessione. Prove e limiti in `docs/qa_lanterne_snapshot_2026-10-04.md` dentro `source.zip`.
+
+Corregge anche il throttle ENet che, dopo picchi degli ACK, poteva scartare tutti gli snapshot ordinari pur con ping stabile. Il traffico voluminoso mantiene il controllo della congestione. I campi di fade degli effetti visivi vengono inizializzati e azzerati per evitare checkpoint non validi.
 
 ## Avvio senza PowerShell
 
@@ -50,9 +54,9 @@ Inventario e progressione sono condivisi. Olio e attivazione della lanterna sono
 ## Limiti ancora aperti
 
 - Campagna completa, puzzle, inseguimenti, finali e Hard da verificare su due PC. Le prove coprono integrazioni e alcuni livelli, non un'intera partita.
-- Prediction locale limitata al movimento orizzontale, con collisioni e correzione dell'host. Salti, crouch e oggetti fisici restano autorevoli; reti lente possono ancora causare correzioni visibili.
+- Prediction locale limitata al movimento orizzontale e a 500 ms di copertura dei gap, con collisioni e correzione dell'host. Gli input locali restano immediati. Salti, crouch e oggetti fisici restano autorevoli; reti lente possono ancora causare correzioni visibili.
 - Migrazione provata tra processi locali; crash del PC, riapertura del gioco, partizioni prolungate e WAN richiedono ulteriori prove.
-- Con 100 ms simulati e perdita periodica del 5%, una regressione ha rilevato una caduta durante il cambio livello: il recupero ricostruisce il mondo, ma il client non osserva l'intera sequenza di morte/ripresa. Il limite dei datagrammi risolve il caso di perdita per dimensione verificato, ma non certifica la stabilità con forte perdita di pacchetti.
+- La regressione con 100 ms nominali e perdita periodica del 5%, che prima cadeva durante il cambio livello, passa con il nuovo controllo delle code. Questo test locale non certifica tutte le reti: perdita prolungata e ritrasmissioni possono ancora produrre intervalli e correzioni visibili. Un ping stabile non garantisce un intervallo massimo tra gli stati.
 - Alcuni effetti script, creazione/trasformazione delle luci e tipi di entità fuori dal roster richiedono copertura. Audio e particelle replicano stato e ciclo di vita, non ogni campione sonoro o il seme casuale degli emettitori.
 
 Gli errori sono nel `hpl.log` della cartella del profilo. Se non si collega, controllare IP, porta, firewall, build e dati. La console sviluppatore conserva `net_status` e `net_ping`, ma non serve per iniziare una partita.

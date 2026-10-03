@@ -7,6 +7,8 @@
 #include "LuxInputHandler.h"
 #include "LuxPlayerState.h"
 #include "LuxPlayerHelpers.h"
+#include "LuxPlayerHands.h"
+#include "LuxHandObject.h"
 #include "LuxPlayerAvatar.h"
 #include "LuxProp.h"
 #include "LuxProp_Lamp.h"
@@ -228,6 +230,11 @@ void cLuxNetwork::Update(float timeStep) {
         if(replicationEnd-mReplicationStatsAt >= std::chrono::seconds(5)) {
             NetLog("[NET/PERF] Replication role=" + std::string(IsClientReplica() ? "client" : "host") +
                 " average_us=" + std::to_string(mReplicationTotalUs/mReplicationSamples) + " max_us=" + std::to_string(mReplicationMaxUs));
+            if(IsClientReplica() && mSnapshotGapSamples) {
+                NetLog("[NET/STATS] Player state intervals average_ms=" + std::to_string(mSnapshotGapTotalMs/mSnapshotGapSamples) +
+                    " max_ms=" + std::to_string(mSnapshotGapMaxMs) + " samples=" + std::to_string(mSnapshotGapSamples));
+                mSnapshotGapTotalMs = mSnapshotGapMaxMs = 0; mSnapshotGapSamples = 0;
+            }
             mReplicationStatsAt = replicationEnd; mReplicationTotalUs = mReplicationMaxUs = mReplicationSamples = 0;
         }
     }
@@ -428,6 +435,8 @@ void cLuxNetwork::Reset() {
     mMediaBytes.clear(); mMediaStates.clear(); mReplicaMediaIDs.clear(); mMusicFadeTimes.clear(); mMediaBaselineApplied = false;
     for(auto& bytes : mGlobalAudioBytes) bytes.clear();
     mClientDead = false; mHasClientLife = false; mHasHostLife = false;
+    mSnapshotAccumulator = mSnapshotBackupAccumulator = mWorldReplicationAccumulator = 0;
+    mSnapshotGapTotalMs = mSnapshotGapMaxMs = 0; mSnapshotGapSamples = 0;
 }
 void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
     if(!mSession.Connected()) { mPrediction.Clear(); return; }
@@ -473,6 +482,9 @@ void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
     mSession.SendInput(input);
 }
 void cLuxNetwork::OnExit() {
+    if(IsClientReplica() && mSnapshotGapSamples)
+        NetLog("[NET/STATS] Player state intervals average_ms=" + std::to_string(mSnapshotGapTotalMs/mSnapshotGapSamples) +
+            " max_ms=" + std::to_string(mSnapshotGapMaxMs) + " samples=" + std::to_string(mSnapshotGapSamples) + " final_window=1");
     mSession.Stop();
     gpBase->mpEngine->SetWaitIfAppOutOfFocus(mOriginalFocusWait);
 }
@@ -529,6 +541,10 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
             action.action == online::PlayerAction::Lantern ? eLuxPlayerAction_Lantern :
             action.action == online::PlayerAction::Ignite ? eLuxPlayerAction_Ignite : eLuxPlayerAction_Attack;
         player->DoAction(type, action.pressed);
+        if(action.action == online::PlayerAction::Lantern && action.pressed)
+            NetLog("[NET/LANTERN] Remote intent applied: active=" + std::to_string(player->GetHelperLantern()->IsActive()) +
+                " oil=" + std::to_string(player->GetLampOil()) + " item=" +
+                std::to_string(gpBase->mpInventory->PlayerHasItemOfType(player,eLuxItemType_Lantern)));
         if(action.action == online::PlayerAction::Interact) mRemoteInteractHeld = action.pressed;
     }
     if(!active && mRemoteInteractHeld) { player->DoAction(eLuxPlayerAction_Interact, false); mRemoteInteractHeld = false; }
@@ -774,6 +790,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             (snapshot.sequence - mReceivedSequence != 0 && snapshot.sequence - mReceivedSequence < 0x80000000u))) {
             if(mLastSnapshotAt.time_since_epoch().count()) {
                 const auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - mLastSnapshotAt).count();
+                mSnapshotGapTotalMs += gap; mSnapshotGapMaxMs = std::max(mSnapshotGapMaxMs,int64_t(gap)); ++mSnapshotGapSamples;
                 if(gap > 250) NetLog("[NET/DIAG] Authoritative snapshot gap=" + std::to_string(gap) +
                     " ms epoch=" + std::to_string(mEpoch) + " rtt_ms=" + std::to_string(mSession.Ping()));
             }
@@ -827,7 +844,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         if(mClientDead) local = mClientLife.players[1];
         auto* body = gpBase->mpPlayer->GetCharacterBody();
         if(body && mBaselineApplied) {
-            auto predicted = mPrediction.Reconcile(local,mSnapshots.back().state.acknowledgedInput,[&](online::PredictedPosition from, online::PredictedPosition to) {
+            auto predicted = mPrediction.ReconcileSmoothed(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,[&](online::PredictedPosition from, online::PredictedPosition to) {
                 const float y = local.y/1000.0f + body->GetCurrentShape()->GetSize().y/2;
                 auto blocked = [&](float x,float z) {
                     cVector3f push;
@@ -841,12 +858,27 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                 return result;
             });
             local.x = int32_t(predicted.x*1000); local.z = int32_t(predicted.z*1000);
+            if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_PREDICTION") && !mPredictionSmoothTestObserved && mPrediction.CorrectionDistance() > 0.002f) {
+                mPredictionSmoothTestObserved = true; NetLog("[NET/TEST] Small authoritative movement correction smoothed with collision checks");
+            }
             if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_PREDICTION") && !mPredictionTestObserved && mPrediction.Pending() &&
                 (std::abs(local.x-mSnapshots.back().state.players[1].x) + std::abs(local.z-mSnapshots.back().state.players[1].z) > 5)) {
                 mPredictionTestObserved = true; NetLog("[NET/TEST] Local movement prediction applied before host acknowledgement with world collision checks");
             }
         }
+        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA") && !mTestLanternDisabled) {
+            // Reproduce stale local save permissions. Only the host may veto use.
+            gpBase->mpPlayer->GetHelperLantern()->SetDisabled(true);
+            gpBase->mpPlayer2->GetHelperLantern()->SetDisabled(true);
+            mTestLanternDisabled = true;
+            NetLog("[NET/TEST] Injected stale local lantern permissions on client");
+        }
         ApplyReplica(gpBase->mpPlayer, local, true);
+        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT") && !mTestSnapshotBackupLogged &&
+            mSession.SnapshotBackupsReceived() >= 15) {
+            mTestSnapshotBackupLogged = true;
+            NetLog("[NET/TEST] Reliable snapshot backups applied without life reset");
+        }
         ApplyReplica(gpBase->mpPlayer2, interpolated.players[0], false);
         if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) {
             const float elapsed = std::chrono::duration<float>(now - mSmokeStart).count();
@@ -867,6 +899,15 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             if(!mTestLanternLocalLogged && lit(gpBase->mpPlayer) && lit(gpBase->mpPlayer2) &&
                 gpBase->mpPlayer2->GetLampOil() - gpBase->mpPlayer->GetLampOil() > 10) {
                 mTestLanternLocalLogged = true; NetLog("[NET/TEST] Both lanterns emit light with independent oil on client");
+            }
+            auto* hands = gpBase->mpPlayer->GetHands();
+            auto* held = hands ? hands->GetCurrentHandObject() : NULL;
+            auto* handMesh = hands ? hands->GetHandsEntity() : NULL;
+            if(!mTestLanternHandsLogged && mClientMoved && lit(gpBase->mpPlayer) && handMesh && held &&
+                held->GetName() == "lantern" && held->GetMeshEntity() && held->GetMeshEntity()->IsActive() &&
+                (handMesh->GetWorldPosition() - gpBase->mpPlayer->GetCamera()->GetPosition()).Length() < 0.25f) {
+                mTestLanternHandsLogged = true;
+                NetLog("[NET/TEST] Client held lantern follows moving camera with stale local permissions");
             }
             if(!mTestLanternIndependentLogged && mTestLanternLocalLogged && elapsed > 12 && elapsed < 18 &&
                 !gpBase->mpPlayer2->GetHelperLantern()->IsActive() && lit(gpBase->mpPlayer)) {
@@ -892,7 +933,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         mSendingCheckpoint.bytes.clear(); mLastCheckpointEpoch = 0;
         mEntityBytes.clear(); mEntityStates.clear();
         mBaselineSent = false;
-        mHasHostLife = false;
+        mHasHostLife = false; mSnapshotAccumulator = mSnapshotBackupAccumulator = mWorldReplicationAccumulator = 0;
         mHasLookSequence = false;
         mInventoryBytes.clear();
         mJournalBytes.clear();
@@ -996,7 +1037,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             NetLog("[NET/TEST] Both players revived at host checkpoint");
         }
     }
-    mSnapshotAccumulator += timeStep;
+    mSnapshotAccumulator += timeStep; mSnapshotBackupAccumulator += timeStep; mWorldReplicationAccumulator += timeStep;
     online::Snapshot snapshot; snapshot.epoch = mEpoch; snapshot.sequence = ++mSnapshotSequence;
     snapshot.acknowledgedInput = mHasLookSequence ? mAppliedLookSequence : 0;
     cLuxPlayer* players[] = {gpBase->mpPlayer, gpBase->mpPlayer2};
@@ -1035,19 +1076,34 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
     if(!mHasHostLife || ((snapshot.players[0].flags ^ mHostLife.players[0].flags) & 12) ||
         ((snapshot.players[1].flags ^ mHostLife.players[1].flags) & 12)) {
         if(!mSession.SendLife(snapshot)) { NetLog("[NET/STATE] Cannot send life transition; closing session"); mSession.Stop(); return; }
-        mHostLife = snapshot; mHasHostLife = true;
     }
-    if(mSnapshotAccumulator < 1.0f / 20.0f) return;
-    mSnapshotAccumulator = std::fmod(mSnapshotAccumulator, 1.0f / 20.0f);
-    // Rebuild media once per replication tick, rather than once per engine frame.
+    // Keep fallback intervals short without increasing world/media scan frequency.
+    if(!mHasHostLife || mSnapshotBackupAccumulator >= 0.1f ||
+        ((snapshot.players[0].flags ^ mHostLife.players[0].flags) & 2) ||
+        ((snapshot.players[1].flags ^ mHostLife.players[1].flags) & 2)) {
+        if(!mSession.SendSnapshotBackup(snapshot)) { NetLog("[NET/STATE] Cannot send pose backup; closing session"); mSession.Stop(); return; }
+        mSnapshotBackupAccumulator = 0;
+    }
+    mHostLife = snapshot; mHasHostLife = true;
+    if(mSnapshotAccumulator >= 1.0f / 60.0f) {
+        mSnapshotAccumulator = std::fmod(mSnapshotAccumulator, 1.0f / 60.0f);
+        // QA fault injection suppresses only ordinary poses, retaining reliable data.
+        const float testElapsed = mSmokeSeconds ? std::chrono::duration<float>(now - mSmokeStart).count() : 0;
+        const bool blackout = mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT") && testElapsed >= 5 && testElapsed < 8;
+        if(blackout && !mTestSnapshotBackupLogged) {
+            mTestSnapshotBackupLogged = true; NetLog("[NET/TEST] Ordinary snapshots suppressed for three seconds");
+        }
+        const bool snapshotSent = !blackout && mSession.SendSnapshot(snapshot);
+        const bool dead = (snapshot.players[1].flags & 8) != 0;
+        if(mSmokeSeconds && snapshotSent && (!mTestHasLifeSnapshot || mTestLastSentDead != dead)) {
+            mTestHasLifeSnapshot = true; mTestLastSentDead = dead;
+            NetLog("[NET/TEST] Sent remote life snapshot dead=" + std::to_string(dead ? 1 : 0) + " sequence=" + std::to_string(snapshot.sequence));
+        }
+    }
+    if(mWorldReplicationAccumulator < 1.0f / 20.0f) return;
+    mWorldReplicationAccumulator = std::fmod(mWorldReplicationAccumulator, 1.0f / 20.0f);
     const bool mediaReady = ReplicateMedia(map);
     if(!mSession.Connected()) return;
-    const bool snapshotSent = mSession.SendSnapshot(snapshot);
-    const bool dead = (snapshot.players[1].flags & 8) != 0;
-    if(mSmokeSeconds && snapshotSent && (!mTestHasLifeSnapshot || mTestLastSentDead != dead)) {
-        mTestHasLifeSnapshot = true; mTestLastSentDead = dead;
-        NetLog("[NET/TEST] Sent remote life snapshot dead=" + std::to_string(dead ? 1 : 0) + " sequence=" + std::to_string(snapshot.sequence));
-    }
     if(mediaReady) ReplicateWorld(map);
     ReplicateLights(map);
     for(unsigned count = 0; count < 64 && !mPendingPresentation.empty(); ++count) {
@@ -1252,14 +1308,14 @@ bool cLuxNetwork::ReplicateMedia(cLuxMap* map) {
             cMusicEntry* song = gpBase->mpEngine->GetSound()->GetMusicHandler()->GetCurrentSong();
             if(song && song->mpStream) wire.values[2] = int32_t(std::max(0.0, std::min(86400.0, song->mpStream->GetElapsedTime())) * 1000);
         }
-        if(!mSession.SendMedia(wire)) { NetLog("[NET/MEDIA] Cannot send media; closing session"); mSession.Stop(); return false; }
+        if(!mSession.SendMedia(wire)) { complete = false; continue; } // retry after transport backpressure drains
         mMediaBytes[pair.first] = std::move(bytes); mMediaStates[pair.first] = pair.second; ++sent;
     }
     for(auto it = mMediaStates.begin(); it != mMediaStates.end();) {
         if(current.count(it->first)) { ++it; continue; }
         if(sent >= 64) { complete = false; ++it; continue; }
         auto removed = it->second; removed.flags = 128;
-        if(!mSession.SendMedia(removed)) { mSession.Stop(); return false; }
+        if(!mSession.SendMedia(removed)) { complete = false; ++it; continue; }
         mMediaBytes.erase(it->first); it = mMediaStates.erase(it); ++sent;
     }
     auto* handler = gpBase->mpEngine->GetSound()->GetSoundHandler();
@@ -1359,6 +1415,19 @@ void cLuxNetwork::ApplyMedia(cLuxMap* map, const online::MediaState& s) {
 void cLuxNetwork::UpdateMediaTest(cLuxMap* map, float elapsed) {
     cWorld* world = map->GetWorld();
     if(!mTestMediaSpawned && mBaselineSent && elapsed > 3) {
+        // Reset must clear even a non-finite fade speed before checkpoint capture.
+        auto* effects = gpBase->mpEffectHandler;
+        effects->GetImageTrail()->FadeTo(0, std::numeric_limits<float>::quiet_NaN());
+        effects->GetSepiaColor()->FadeTo(0, std::numeric_limits<float>::quiet_NaN());
+        effects->GetRadialBlur()->FadeTo(0, std::numeric_limits<float>::quiet_NaN());
+        effects->GetImageTrail()->Reset(); effects->GetImageTrail()->SetActive(false);
+        effects->GetSepiaColor()->Reset(); effects->GetSepiaColor()->SetActive(false);
+        effects->GetRadialBlur()->Reset(); effects->GetRadialBlur()->SetActive(false);
+        cLuxEffectHandler_SaveData savedEffects; savedEffects.FromEffectHandler(effects);
+        if(savedEffects.mfImageTrail_FadeSpeed != 0 || savedEffects.mfSepiaColor_FadeSpeed != 0 || savedEffects.mfRadialBlur_FadeSpeed != 0) {
+            NetLog("[NET/TEST] Effect reset left invalid checkpoint fade speeds FAILED"); mSession.Stop(); return;
+        }
+        NetLog("[NET/TEST] Effect reset clears non-finite checkpoint fade speeds");
         auto* sound = world->CreateSoundEntity("online_media_fixture_sound", "ambience_wind_eerie.snt", false);
         auto* ps = world->CreateParticleSystem("online_media_fixture_particle", "ps_dust_falling.ps", cVector3f(1), false);
         if(!sound || !ps) { NetLog("[NET/TEST] Media fixture creation FAILED"); mSession.Stop(); return; }

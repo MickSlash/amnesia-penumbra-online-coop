@@ -19,10 +19,10 @@ Entrance Hall e Old Archives, non una partita dall'inizio ai titoli di coda.
 
 Implementati:
 
-- Snapshot a 20 Hz di posizione, orientamento, altezza occhi, salute, sanità,
+- Snapshot a 60 Hz di posizione, orientamento, altezza occhi, salute, sanità,
   olio, acciarini, lanterna, crouch, morte e stato attivo dei due giocatori.
   Buffer client da 100 ms, interpolazione e correzione dei teletrasporti.
-  Orientamento della camera locale immediato; prediction orizzontale limitata a 250 ms, con replay degli input non confermati e collisioni Newton.
+  Orientamento della camera locale immediato; prediction orizzontale limitata a 500 ms, con replay degli input non confermati e collisioni Newton.
 - Camera canonica con roll, FOV, moltiplicatore aspect, offset della testa e
   sensibilità script. LookAt e interazioni che consumano il mouse mantengono la
   visuale canonica. Il normale orientamento non applica due volte sensibilità/sway.
@@ -64,7 +64,7 @@ non esegue una seconda copia di AngelScript. Gli eventi di presentazione coprono
 solo i tipi elencati: questo non implica che ogni funzione script della campagna
 abbia già una replica. Una disconnessione conserva il mondo e P2, mette la campagna in pausa e avvia il recupero. Il client riprova lo stesso endpoint con identità persistente. Un checkpoint completo e validato consente di trasferire autorità e invertire i giocatori; il nuovo host aspetta il partner.
 
-## Protocollo versione 5
+## Protocollo versione 6
 
 ENet 1.3.18 incluso da sorgenti, licenza MIT conservata; mod GPLv3. Header AO,
 versione uint16 big-endian e tipo uint8; interi espliciti, nessuna struttura C++
@@ -72,14 +72,39 @@ trasmessa in memoria. Quattro canali:
 
 | Canale | Affidabilità | Contenuto |
 | --- | --- | --- |
-| 0 | Affidabile e ordinato | Hello/Welcome, Map/MapReady, Action, Peer lobby, CheckpointAck |
-| 1 | Ordinato, non affidabile | PlayerInput a 30 Hz (30 byte), Snapshot a 20 Hz (123 byte) |
+| 0 | Affidabile e ordinato | Hello/Welcome, Map/MapReady, Action, Peer lobby, CheckpointAck, Snapshot di riserva a 10 Hz e al cambio lanterna |
+| 1 | Ordinato, non affidabile | PlayerInput a 30 Hz (30 byte), Snapshot a 60 Hz (123 byte) |
 | 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (123 byte), Media (115–627 byte), Journal |
 | 3 | Affidabile e ordinato | Checkpoint compresso, frammenti da 1 KiB, massimo un invio per tick a 60 Hz |
 
 Ogni stato gameplay include un'epoch di mappa. Sequenze obsolete o duplicate
 sono ignorate con aritmetica che supporta il wraparound. MapReady abilita snapshot
 e intenti; WorldReady e applicazione della baseline abilitano l'input client.
+
+Gli snapshot di riserva hanno lo stesso codec da 123 byte e lo stesso spazio di
+sequenza degli snapshot ordinari. Il client accetta solo lo stato più recente,
+indipendentemente dal canale: un backup ritardato non sovrascrive una posa nuova.
+Il canale 0 li separa dalle code affidabili di entità/media sul canale 2. Entità,
+audio e luci mantengono una frequenza separata di 20 Hz. La coda ENet di ricezione
+ha un limite di 4 MiB, con singolo pacchetto applicativo limitato a 64 KiB:
+baseline e frammenti fuori ordine possono superare 256 KiB e necessitano spazio
+per la ritrasmissione mancante che consente di svuotare la coda.
+Non entrano nella coda Life e non cancellano prediction o interpolazione.
+Il protocollo 6 evita connessioni con client precedenti che rifiutavano Snapshot
+sul canale 0. Life conserva la semantica di morte/ripresa e la coda da 64 elementi.
+
+Entità, media, presentazione e checkpoint vengono rinviati se i byte affidabili
+in coda/in volo, incluso il nuovo messaggio, superano 32 KiB o se un pacchetto
+attende un ACK da oltre 250 ms oppure è in ritrasmissione. I chiamanti conservano
+lo stato da inviare e riprovano; i delta del mondo/media si aggiornano all'ultimo
+stato disponibile. Gli snapshot di riserva, Life e controllo restano inviabili.
+`bulk_paused` mostra questa pressione nei log. Inventario e journal conservano
+i propri limiti e la consegna affidabile della baseline completa.
+
+La sessione configura il throttle ENet con decelerazione RTT pari a zero: picchi
+degli ACK durante checkpoint/caricamenti non devono ridurre a zero l'invio di
+input e snapshot non affidabili. I limiti di banda ENet restano rispettati;
+frequenze fisse e `BulkReady` regolano il traffico applicativo voluminoso.
 Entità iniziali assenti dal roster host vengono rimosse dal client.
 Un'entità del roster che non può essere applicata chiude la replica, senza
 dichiarare completata una baseline incompleta. Life ha al massimo 64 elementi;
@@ -150,7 +175,7 @@ Prima di dichiarare un MVP dell'intera campagna servono:
    suoni diretti fuori dagli hook coperti, trasformazioni/creazione di luci e tipi di entità
    non compresi nel roster attuale (per esempio rope/commentary).
 3. Prove su due PC e WAN, riavvio dopo crash, partizioni prolungate e progressi recuperati da checkpoint; la migrazione può perdere lo stato successivo al checkpoint ricevuto.
-4. Misure di banda e fluidità, prediction verticale e interpolazione degli oggetti fisici se necessarie. Il client prevede solo movimento orizzontale, fino a 250 ms.
+4. Misure di banda e fluidità su due PC, prediction verticale e interpolazione degli oggetti fisici se necessarie. Il client prevede solo movimento orizzontale, fino a 500 ms.
 5. Verifica manuale di grab, porte, leve, combinazioni, voci/documenti e nemici, oltre ai casi automatizzati. NAT traversal, relay, matchmaking e discovery non sono inclusi.
 
 Non commettere binari né dati proprietari. Build e configurazioni generate sono
@@ -173,7 +198,7 @@ durante la caccia. Gli attacchi di shape possono danneggiare entrambi i corpi se
 sono nell'area del colpo. Oscurità, immobilità, accovacciamento e lanterna
 modificano il raggio di rilevamento separatamente per ciascun giocatore.
 
-## Journal, prediction e recupero nel protocollo 5
+## Journal, prediction e recupero
 
 Journal trasferisce fino a 512 voci e 60000 byte con revisione e map epoch. Note,
 diari ordinati per gruppo e obiettivi attivi/completati provengono dalla collezione
@@ -183,10 +208,24 @@ baseline completa, indipendente dagli eventi recenti di presentazione.
 
 Gli snapshot includono velocità e parametri del CharacterBody. La prediction del
 giocatore locale rimuove gli input confermati dal tick effettivamente applicato
-sull'host e ripete quelli pendenti: massimo 32 comandi e 250 ms. Verifica la shape
+sull'host e ripete quelli pendenti: massimo 32 comandi e 500 ms. Questo è un limite
+di copertura dei gap, non un buffer che ritarda gli input. Verifica la shape
 Newton contro il mondo, consente slide orizzontali e disabilita il replay durante
 salti/crouch, morte e look controllato dagli script o dagli oggetti. Il partner
 rimane interpolato con buffer di 100 ms. Non è rollback dell'intera fisica.
+
+Le piccole correzioni orizzontali della prediction locale si riassorbono con
+decadimento esponenziale di 80 ms; gli input nuovi restano immediati. La posizione
+visualizzata viene verificata contro le collisioni. Scarti oltre 25 cm, cambi
+verticali oltre 25 cm, morte, crouch e controllo script/oggetti cancellano questa
+correzione. Le transizioni Life e i cambi mappa cancellano anche la prediction.
+`Player state intervals` registra media e massimo degli arrivi effettivamente
+applicati, per finestre di circa cinque secondi: RTT e frequenza degli arrivi
+sono misure distinte.
+
+ImageTrail, Sepia e RadialBlur inizializzano e azzerano la velocità di fade anche
+prima del primo effetto. I checkpoint non serializzano così valori indeterminati
+che il validatore potrebbe correttamente rifiutare come non finiti.
 
 Hello/Welcome e Peer scambiano identità di ripresa, porta e stato Pronto. La
 configurazione conserva l'identità locale; la sessione ammette il precedente

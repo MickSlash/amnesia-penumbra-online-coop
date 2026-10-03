@@ -7,6 +7,7 @@ param(
     [switch]$Campaign,
     [switch]$Media,
     [switch]$Prediction,
+    [switch]$SnapshotBlackout,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
@@ -33,7 +34,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -62,6 +63,7 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_ENEMY', $(if ($Enemy) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_MEDIA', $(if ($Media) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_RECOVERY', $null)
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT', $(if ($SnapshotBlackout) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_PREDICTION', $(if ($Prediction -and $role -eq 'client') { '1' } else { $null }))
         $style = if ($Visual) { 'Normal' } else { 'Hidden' }
         $processes += Start-Process -FilePath $exePath -WorkingDirectory $gamePath -ArgumentList $initPath -WindowStyle $style -PassThru
@@ -85,9 +87,15 @@ try {
             throw "$role did not finish a handshake and clean smoke exit: $($profiles[$role])"
         }
         Write-Output "PASS: $role game handshake and clean exit ($($profiles[$role]))"
+        if($SnapshotBlackout) {
+            $proof = if($role -eq 'host') { 'Ordinary snapshots suppressed for three seconds' } else { 'Reliable snapshot backups applied without life reset' }
+            if(!$log.Contains($proof)) { throw "Missing $role snapshot blackout proof: $proof" }
+            if($role -eq 'client' -and $log -match 'Authoritative snapshot gap=([7-9][0-9]{2}|[1-9][0-9]{3,}) ms') { throw 'Snapshot backup allowed a gap above 700 ms' }
+            Write-Output "PASS: $role ordinary snapshot blackout recovery"
+        }
         if ($Media) {
             $mediaMarkers = if ($role -eq 'host') {
-                @('Saved sound/particle and music fixtures created on host', 'Host save/load retained sound and particle',
+                @('Effect reset clears non-finite checkpoint fade speeds', 'Saved sound/particle and music fixtures created on host', 'Host save/load retained sound and particle',
                   'Media properties changed on host', 'Media fixtures removed on host', 'Host validated remote lantern with independent oil')
             } else {
                 @('Media created on client kind=1', 'Media created on client kind=2',
@@ -97,7 +105,8 @@ try {
                   'Music state applied on client', 'Music stop applied on client', 'GUI sound event applied on client',
                   'Global sound volume fade applied on client', 'Global sound speed fade applied on client', 'Screen shake applied on client',
                   'Remote host lantern emits light on client', 'Both lanterns emit light with independent oil on client',
-                  'Independent lantern toggles applied on client')
+                  'Independent lantern toggles applied on client', 'Injected stale local lantern permissions on client',
+                  'Client held lantern follows moving camera with stale local permissions')
             }
             foreach ($marker in $mediaMarkers) { if (!$log.Contains($marker)) { throw "Missing $role media proof: $marker" } }
             if ($log.Contains('FAILED') -or $log.Contains('closing session')) { throw "$role media integration failed" }
@@ -120,6 +129,7 @@ try {
         }
         if ($Replication) {
             if($Prediction -and $role -eq 'client' -and !$log.Contains('Local movement prediction applied before host acknowledgement with world collision checks')) { throw 'Native prediction did not exercise pending input and collision checks' }
+            if($Prediction -and $role -eq 'client' -and !$log.Contains('Small authoritative movement correction smoothed with collision checks')) { throw 'Native movement smoothing was not exercised' }
             $markers = if ($role -eq 'host') { @('Announced epoch=', 'Remote Player 2 moved under network input', 'Complete host entity baseline sent', 'Host validated remote pickup; exactly one tinderbox awarded') } else { @('Replica loaded epoch=', 'First authoritative player snapshot applied', 'Created host avatar in replica world', 'Complete host entity baseline applied', 'Client camera/body moved from authoritative snapshots', 'Host pickup destruction replicated to client') }
             foreach ($marker in $markers) { if (!$log.Contains($marker)) { throw "Missing $role replication proof: $marker" } }
             $inventoryMarker = if ($role -eq 'host') { 'Host validated remote inventory use; one potion consumed' } else { 'Shared host inventory applied' }

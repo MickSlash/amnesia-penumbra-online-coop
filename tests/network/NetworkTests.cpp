@@ -92,6 +92,7 @@ static void InputLifetimeTest() {
     MapState loaded; Check(client.ReadMap(loaded) && loaded.epoch == 7, "reliable map received");
     Snapshot snapshot; snapshot.epoch = 7; snapshot.sequence = 1;
     Check(!host.SendSnapshot(snapshot), "snapshots wait for client readiness");
+    Check(!host.SendSnapshotBackup(snapshot), "pose backups wait for client readiness");
     Check(client.SendMapReady(7), "client map readiness"); pump(20);
     Check(host.IsMapReady(7) && !host.IsMapReady(6), "epoch readiness exact match");
     Check(host.SendSnapshot(snapshot), "host snapshot"); pump(20);
@@ -111,6 +112,21 @@ static void InputLifetimeTest() {
     Check(client.ReadLife(replica) && replica.sequence == 0xffffffffu && (replica.players[1].flags & 8), "batched death retained");
     Check(client.ReadLife(replica) && replica.sequence == 0 && replica.players[1].x == 9000 && !(replica.players[1].flags & 8), "batched checkpoint retained across sequence wrap");
     Check(!client.ReadLife(replica) && !client.SendLife(life), "duplicate life ignored and client cannot originate life");
+    snapshot.sequence = 3; snapshot.players[1].x = 9500; snapshot.players[1].flags = 6;
+    Check(host.SendSnapshotBackup(snapshot) && !client.SendSnapshotBackup(snapshot), "only host originates reliable pose backup"); pump(20);
+    Check(client.ReadSnapshot(replica) && replica.sequence == 3 && replica.players[1].x == 9500 &&
+        (replica.players[1].flags & 2) && client.SnapshotBackupsReceived() == 1, "movement and lantern recovered without ordinary snapshot");
+    Check(!client.ReadLife(replica), "pose backup never creates a life discontinuity");
+    snapshot.sequence = 2; snapshot.players[1].x = 9100;
+    Check(host.SendSnapshot(snapshot), "late ordinary snapshot sent"); pump(20);
+    Check(client.ReadSnapshot(replica) && replica.sequence == 3, "late ordinary snapshot cannot rewind reliable backup");
+    snapshot.sequence = 4; snapshot.players[1].x = 9700;
+    host.SendSnapshot(snapshot); pump(20);
+    snapshot.sequence = 3; host.SendSnapshotBackup(snapshot); pump(20);
+    Check(client.ReadSnapshot(replica) && replica.sequence == 4 && client.SnapshotBackupsReceived() == 1 &&
+        !client.ReadLife(replica), "late reliable backup cannot rewind newer ordinary pose");
+    snapshot.epoch = 6; Check(!host.SendSnapshotBackup(snapshot), "old map backup cannot be sent");
+    snapshot.epoch = 7;
     input.sequence = 1; input.epoch = 6; client.SendInput(input); pump(20);
     Check(!host.ReadInput(received), "previous-map input rejected");
     input.epoch = 7; client.SendInput(input); pump(20);
@@ -162,6 +178,48 @@ static void InputLifetimeTest() {
     client.Stop(); pump(20);
     Check(!host.Connected() && !host.ReadInput(received), "disconnect clears input");
     std::cout << "PASS: sequence wrap, stale timeout, snapshots, map readiness and epoch isolation\n";
+}
+static void BulkFlowControlTest() {
+    Session host(Log), client(Log);
+    Check(host.StartHost(27044) && client.StartClient("127.0.0.1",27044), "bulk flow startup");
+    auto pump = [&]() { for(int i=0; i<200; ++i) { client.Poll(); host.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    pump(); MapState map; map.epoch=1; map.fingerprint=1; map.file="maps/test.map";
+    Check(host.SendMap(map), "bulk map"); pump(); Check(client.SendMapReady(1), "bulk readiness"); pump();
+    EntityState entity; entity.epoch=1; entity.id=1; entity.name="box"; entity.file="entities/box.ent";
+    entity.transform[0]=entity.transform[5]=entity.transform[10]=10000; entity.bodies.assign(32,entity.transform);
+    unsigned sent=0;
+    while(sent<200 && host.SendEntity(entity)) ++sent;
+    Check(sent>0 && sent<200 && host.Connected(), "bulk traffic defers at bounded outstanding budget without disconnect");
+    Snapshot pose; pose.epoch=1; pose.sequence=1; pose.players[1].flags=6;
+    Check(host.SendSnapshotBackup(pose), "player control backup remains sendable during bulk backpressure");
+    pump(); Snapshot read; Check(client.ReadSnapshot(read) && read.sequence==1 && (read.players[1].flags&2), "control state delivered during bulk pause");
+    unsigned received=0; while(client.ReadEntity(entity)) ++received;
+    Check(received==sent && !client.ReadLife(read), "backpressure retains accepted bulk data and does not reset life");
+    Check(host.SendEntity(entity), "deferred bulk resumes after acknowledgement"); pump();
+    Check(client.ReadEntity(entity) && host.Connected() && client.Connected(), "bulk retry delivered with live session");
+    std::cout << "PASS: bounded bulk backlog, control reservation and retry after drain\n";
+}
+static void PacketThrottleTest() {
+    Check(enet_initialize()==0, "throttle test initialization");
+    ENetAddress address = {}; address.host=ENET_HOST_ANY; address.port=27045;
+    ENetHost* server=enet_host_create(&address,1,4,0,0);
+    Check(server!=nullptr, "throttle test server");
+    Session client(Log); Check(client.StartClient("127.0.0.1",27045), "throttle test client");
+    ENetPeer* connected=nullptr;
+    for(int i=0;i<300;++i) {
+        client.Poll(); ENetEvent event;
+        while(enet_host_service(server,&event,0)>0) {
+            if(event.type==ENET_EVENT_TYPE_CONNECT) connected=event.peer;
+            if(event.type==ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(event.packet);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Check(connected && connected->packetThrottleDeceleration==0, "session negotiates pose-preserving throttle policy");
+    connected->lastRoundTripTime=100; connected->lastRoundTripTimeVariance=10;
+    for(int i=0;i<64;++i) enet_peer_throttle(connected,1000);
+    Check(connected->packetThrottle==ENET_PEER_PACKET_THROTTLE_SCALE, "ACK RTT spikes cannot suppress all player input and snapshots");
+    client.Stop(); enet_host_destroy(server); enet_deinitialize();
+    std::cout << "PASS: negotiated throttle survives repeated ACK RTT spikes\n";
 }
 static void LifeQueueLimitTest() {
     Session host(Log), client(Log);
@@ -218,9 +276,34 @@ static void RecoveryTests() {
     Check(position.z < -0.1f && position.z > -0.31f, "local input predicts before authoritative acknowledgement");
     position = prediction.Reconcile(state,1,free); Check(position.z == 0 && prediction.Pending() == 0, "acknowledged commands removed");
     for(int i = 0; i < 120; ++i) prediction.Push(input,1.0f/60);
-    position = prediction.Reconcile(state,0,free); Check(prediction.Pending() == 32 && position.z > -0.76f, "prediction horizon and memory bounded during loss");
+    position = prediction.Reconcile(state,0,free); Check(prediction.Pending() == 32 && position.z > -1.51f && position.z < -0.76f, "prediction covers brief gaps but horizon and memory stay bounded");
     position = prediction.Reconcile(state,0,[](PredictedPosition from,PredictedPosition) { return from; }); Check(position.z == 0, "blocked movement cannot predict through wall");
     state.flags |= 32; position = prediction.Reconcile(state,0,free); Check(position.z == 0 && prediction.Pending() == 0, "interactions suppress prediction");
+    MovementPrediction smooth; PlayerState corrected;
+    corrected.forwardMax=corrected.sideMax=3000; corrected.acceleration=corrected.deceleration=30000;
+    smooth.ReconcileSmoothed(corrected,0,1,1.0f/60,free);
+    corrected.x=40;
+    position=smooth.ReconcileSmoothed(corrected,0,2,1.0f/60,free);
+    Check(position.x>0 && position.x<0.04f && smooth.CorrectionDistance()>0, "small authoritative correction eases instead of snapping");
+    for(int i=0;i<60;++i) position=smooth.ReconcileSmoothed(corrected,0,2,1.0f/60,free);
+    Check(std::fabs(position.x-0.04f)<0.001f, "correction converges without permanent drift");
+    smooth.Push(input,1.0f/60); position=smooth.ReconcileSmoothed(corrected,0,2,1.0f/60,free);
+    Check(position.z<-0.007f, "new local input remains immediate during correction smoothing");
+    corrected.x=2000; position=smooth.ReconcileSmoothed(corrected,1,3,1.0f/60,free);
+    Check(position.x==2 && smooth.CorrectionDistance()==0, "teleport is never eased through geometry");
+    smooth.Clear(); corrected.x=0; smooth.ReconcileSmoothed(corrected,1,4,1.0f/60,free); corrected.x=40;
+    position=smooth.ReconcileSmoothed(corrected,1,5,1.0f/60,[](PredictedPosition from,PredictedPosition) { return from; });
+    Check(position.x==0.04f && smooth.CorrectionDistance()==0, "visual correction cannot cross a blocking collision");
+    smooth.Push(input,1.0f/60); corrected.flags|=8;
+    smooth.ReconcileSmoothed(corrected,1,6,1.0f/60,free);
+    Check(!smooth.Pending() && smooth.CorrectionDistance()==0, "death clears prediction and visual correction");
+    MovementPrediction briefLoss; PlayerState moving; moving.forwardSpeed=moving.forwardMax=3000; moving.acceleration=moving.deceleration=30000;
+    float previousZ=0;
+    for(unsigned i=0;i<25;++i) {
+        input.sequence=i+1; briefLoss.Push(input,1.0f/60);
+        position=briefLoss.ReconcileSmoothed(moving,0,1,1.0f/60,free);
+        Check(position.z<previousZ, "local movement keeps advancing through 400 ms without new pose"); previousZ=position.z;
+    }
     Session host(Log), client(Log), stranger(Log);
     host.SetLobbyReady(false); client.SetLobbyReady(false);
     Check(host.StartHost(27047) && client.StartClient("127.0.0.1",27047), "recovery transport startup");
@@ -325,7 +408,7 @@ int main(int argc, char** argv) {
     story.values[0] = 1; story.values[1] = 350;
     auto fadeBytes = EncodePresentation(story);
     Check(DecodePresentation(fadeBytes.data(), fadeBytes.size(), storyRead) && storyRead.values[1] == 350, "fade roundtrip");
-    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); LifeQueueLimitTest(); RecoveryTests(); return 0; }
+    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); BulkFlowControlTest(); PacketThrottleTest(); LifeQueueLimitTest(); RecoveryTests(); return 0; }
     const bool host = std::string(argv[1]) == "host";
     const bool badVersion = std::string(argv[1]) == "bad-version";
     const bool malformed = std::string(argv[1]) == "malformed";
