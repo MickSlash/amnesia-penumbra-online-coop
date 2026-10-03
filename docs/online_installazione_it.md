@@ -2,6 +2,8 @@
 
 Build sperimentale Windows x64, protocollo 5, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono in `docs/qa_recovery_2026-10-03.md` dentro `source.zip`.
 
+Questa build corregge anche la camminata continua del client dopo il rilascio dei tasti: aggiornare **entrambi**, incluso l'host. La prova dell'arresto avanti/laterale è documentata in `docs/qa_movimento_2026-10-03.md` dentro `source.zip`.
+
 ## Avvio senza PowerShell
 
 1. Estrarre **tutto lo ZIP** in una cartella propria. Conservare `AmnesiaCoop.exe`, `bin` e gli altri file insieme.

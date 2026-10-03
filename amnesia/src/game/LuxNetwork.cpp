@@ -328,8 +328,8 @@ bool cLuxNetwork::UpdateQADrive(float timeStep) {
     input.pitch = int16_t(std::max(-1.571f, std::min(1.571f, player->GetCamera()->GetPitch())) * 1000);
     if(IsClientReplica()) SendLocalInput(input, timeStep);
     else if(active) {
-        player->Move(eCharDir_Forward, input.forward / 1000.0f);
-        player->Move(eCharDir_Right, input.strafe / 1000.0f);
+        if(input.forward) player->Move(eCharDir_Forward, input.forward / 1000.0f);
+        if(input.strafe) player->Move(eCharDir_Right, input.strafe / 1000.0f);
     }
     bool held = active && mQADriveInteract;
     if(held != mQADrivePreviousInteract) {
@@ -365,6 +365,12 @@ bool cLuxNetwork::UpdateQADrive(float timeStep) {
                 std::fprintf(peer, "%.4f %.4f %.4f %.4f %.4f %.4f %d\n", feet.x, feet.y, feet.z,
                     p->GetCamera()->GetYaw(), p->GetCamera()->GetPitch(), p->GetLookSpeedMul(), int(p->GetCurrentState()));
                 std::fclose(peer);
+            }
+            FILE* motion = std::fopen((mQADriveFile + ".peer.motion").c_str(), "wb");
+            if(motion) {
+                auto* body = gpBase->mpPlayer2->GetCharacterBody();
+                std::fprintf(motion, "%.5f %.5f\n", body->GetMoveSpeed(eCharDir_Forward), body->GetMoveSpeed(eCharDir_Right));
+                std::fclose(motion);
             }
         }
     }
@@ -476,8 +482,10 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
             mObservedRemoteMovement = true;
             NetLog("[NET/TEST] Remote Player 2 moved under network input");
         }
-        player->Move(eCharDir_Forward, input.forward / 1000.0f);
-        player->Move(eCharDir_Right, input.strafe / 1000.0f);
+        // Move(0) still marks the HPL body as moving and suppresses friction.
+        // An idle axis must receive no Move call, as in the local input path.
+        if(input.forward) player->Move(eCharDir_Forward, input.forward / 1000.0f);
+        if(input.strafe) player->Move(eCharDir_Right, input.strafe / 1000.0f);
         const bool freshLook = !mHasLookSequence || input.sequence != mAppliedLookSequence;
         player->ApplyNetworkLookAngles(input.yaw / 1000.0f, input.pitch / 1000.0f,
             freshLook ? input.lookYaw / 10000.0f : 0, freshLook ? input.lookPitch / 10000.0f : 0);
