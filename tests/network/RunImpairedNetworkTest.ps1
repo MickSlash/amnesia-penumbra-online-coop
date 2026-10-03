@@ -5,10 +5,13 @@ param(
     [ValidateRange(0,500)][int]$OneWayDelayMs = 50,
     [ValidateRange(2,1000)][int]$DropEvery = 20,
     [switch]$Media,
-    [switch]$Prediction
+    [switch]$Prediction,
+    [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
+    [switch]$MapOnly
 )
 $ErrorActionPreference = 'Stop'
 $run = Join-Path (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path 'build/impaired-network'
+$gameLogs = Join-Path "$PSScriptRoot/../../build" $(if($MapOnly) { "visual-qa/$($StartMap.Replace('.map',''))" } else { 'player-replication' })
 New-Item -ItemType Directory -Force -Path $run | Out-Null
 $relaySource = @'
 using System;
@@ -79,18 +82,18 @@ $relay = Start-Process -FilePath $shellPath -WindowStyle Hidden -PassThru -Argum
 try {
     Start-Sleep -Seconds 2
     if($relay.HasExited) { throw 'UDP relay failed to start; inspect build/impaired-network/relay.err' }
-    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Port ($Port+1) -ClientPort $Port -Campaign -Media:$Media -Prediction:$Prediction
+    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly) -Media:$Media -Prediction:$Prediction -StartMap $StartMap -MapOnly:$MapOnly
     if (!$relay.WaitForExit(15000)) { throw 'UDP relay did not exit on its timer' }
     $relay.Refresh()
     if($relay.ExitCode -ne 0) { throw 'UDP relay failed; inspect relay.err' }
-    Copy-Item -LiteralPath "$PSScriptRoot/../../build/player-replication/host.log" -Destination "$run/host.log"
-    Copy-Item -LiteralPath "$PSScriptRoot/../../build/player-replication/client.log" -Destination "$run/client.log"
+    Copy-Item -LiteralPath "$gameLogs/host.log" -Destination "$run/host.log"
+    Copy-Item -LiteralPath "$gameLogs/client.log" -Destination "$run/client.log"
     Get-Content -LiteralPath "$run/relay.log"
     Write-Output 'PASS: campaign integration through delayed/lossy localhost UDP relay'
 } finally {
     if(!$relay.HasExited) { Stop-Process -Id $relay.Id }
     foreach($role in @('host','client')) {
-        $log = Join-Path "$PSScriptRoot/../../build/player-replication" "$role.log"
+        $log = Join-Path $gameLogs "$role.log"
         if(Test-Path -LiteralPath $log) { Copy-Item -LiteralPath $log -Destination (Join-Path $run "$role.log") }
     }
 }
