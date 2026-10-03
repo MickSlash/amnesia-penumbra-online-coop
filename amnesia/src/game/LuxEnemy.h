@@ -378,6 +378,10 @@ public:
 	iLuxEnemy(const tString &asName, int alID, cLuxMap *apMap, eLuxEnemyType aEnemyType);
 	virtual ~iLuxEnemy();
 
+    // Smoke-test probe: real Newton occlusion and the two-player target selector.
+    // The caller must keep the enemy disabled; all temporary bodies are removed.
+    bool TestCoopVisibility();
+
 	//////////////////////
 	//General
 	void SetupAfterLoad(cWorld *apWorld);

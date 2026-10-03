@@ -32,6 +32,7 @@ public:
     void SendInventoryAction(online::PlayerAction action, const std::string& item, const std::string& secondItem = "");
     void OnMapEnter(cLuxMap* map);
     void QueuePresentation(online::Presentation event);
+    void MusicChanged(int priority, float fadeTime);
 private:
     online::Session mSession;
     uint8_t mPreviousButtons = 0;
@@ -98,4 +99,18 @@ private:
     bool mLoggedLighting = false;
     void ApplyPresentation(cLuxMap* map, const online::Presentation& event);
     void ReplicateLights(cLuxMap* map);
+    using MediaKey = std::pair<uint8_t, uint32_t>;
+    std::map<MediaKey, std::vector<uint8_t>> mMediaBytes;
+    std::map<MediaKey, online::MediaState> mMediaStates;
+    std::map<MediaKey, int> mReplicaMediaIDs;
+    std::map<int, float> mMusicFadeTimes;
+    bool mMediaBaselineApplied = false;
+    std::array<std::vector<uint8_t>, 2> mGlobalAudioBytes;
+    bool mTestMediaSpawned = false, mTestMediaChanged = false, mTestMediaRemoved = false;
+    bool mTestMediaRestoreLogged = false, mTestLanternRemoteLogged = false, mTestLanternLocalLogged = false;
+    bool mTestLanternRequested = false, mTestLanternIndependentLogged = false;
+    void UpdateMediaTest(cLuxMap* map, float elapsed);
+    int mNextMediaID = 1000000000; // give unsaved runtime objects stable engine IDs
+    bool ReplicateMedia(cLuxMap* map);
+    void ApplyMedia(cLuxMap* map, const online::MediaState& state);
 };

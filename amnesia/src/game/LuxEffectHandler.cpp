@@ -259,6 +259,11 @@ void cLuxEffect_EmotionFlash::LoadFonts()
 
 void cLuxEffect_EmotionFlash::Start(const tString &asTextCat, const tString &asTextEntry, const tString &asSound)
 {
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::Emotion;
+        event.text[0] = asTextCat; event.text[1] = asTextEntry; event.text[2] = asSound;
+        gpBase->mpNetwork->QueuePresentation(event);
+    }
 	mbActive = true;
 
 	mlStep = 0;
@@ -653,6 +658,12 @@ cLuxEffect_ShakeScreen::~cLuxEffect_ShakeScreen()
 void cLuxEffect_ShakeScreen::Start(float afAmount, float afTime,float afFadeInTime,float afFadeOutTime,
 								   int alCoopTargetPlayer)
 {
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::Shake;
+        event.target = alCoopTargetPlayer < 0 ? 0 : uint8_t(alCoopTargetPlayer + 1);
+        event.values = {{int32_t(afAmount * 1000), int32_t(afTime * 1000), int32_t(afFadeInTime * 1000), int32_t(afFadeOutTime * 1000), 0, 0}};
+        gpBase->mpNetwork->QueuePresentation(event);
+    }
 	cLuxEffect_ShakeScreen_Shake shake;
 	shake.mlCoopTargetPlayer = alCoopTargetPlayer;
 	shake.mfSize = afAmount;

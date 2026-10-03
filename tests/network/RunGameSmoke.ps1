@@ -5,12 +5,14 @@ param(
     [int]$ClientPort = 0,
     [switch]$Replication,
     [switch]$Campaign,
+    [switch]$Media,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
     [switch]$Enemy
 )
 $ErrorActionPreference = 'Stop'
+if ($Media) { $Campaign = $true }
 if ($Campaign) { $Replication = $true }
 if ($Enemy) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
@@ -30,7 +32,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_DRIVE_FILE')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -57,6 +59,7 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_PICKUP', $(if ($Replication -and $role -eq 'host') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_CAMPAIGN', $(if ($Campaign -and $role -eq 'host') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_ENEMY', $(if ($Enemy) { '1' } else { $null }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_MEDIA', $(if ($Media) { '1' } else { $null }))
         $style = if ($Visual) { 'Normal' } else { 'Hidden' }
         $processes += Start-Process -FilePath $exePath -WorkingDirectory $gamePath -ArgumentList $initPath -WindowStyle $style -PassThru
     }
@@ -79,6 +82,24 @@ try {
             throw "$role did not finish a handshake and clean smoke exit: $($profiles[$role])"
         }
         Write-Output "PASS: $role game handshake and clean exit ($($profiles[$role]))"
+        if ($Media) {
+            $mediaMarkers = if ($role -eq 'host') {
+                @('Saved sound/particle and music fixtures created on host', 'Host save/load retained sound and particle',
+                  'Media properties changed on host', 'Media fixtures removed on host', 'Host validated remote lantern with independent oil')
+            } else {
+                @('Media created on client kind=1', 'Media created on client kind=2',
+                  'Saved media baseline restored on client kind=1', 'Saved media baseline restored on client kind=2',
+                  'Media property delta applied on client kind=1', 'Media property delta applied on client kind=2',
+                  'Media removal applied on client kind=1', 'Media removal applied on client kind=2',
+                  'Music state applied on client', 'Music stop applied on client', 'GUI sound event applied on client',
+                  'Global sound volume fade applied on client', 'Global sound speed fade applied on client', 'Screen shake applied on client',
+                  'Remote host lantern emits light on client', 'Both lanterns emit light with independent oil on client',
+                  'Independent lantern toggles applied on client')
+            }
+            foreach ($marker in $mediaMarkers) { if (!$log.Contains($marker)) { throw "Missing $role media proof: $marker" } }
+            if ($log.Contains('FAILED') -or $log.Contains('closing session')) { throw "$role media integration failed" }
+            Write-Output "PASS: $role sound/particle lifecycle, music, effects, saved media and independent lanterns"
+        }
         if ($MapOnly) {
             if ($log.Contains('Spawned remote pickup fixture') -or $log.Contains('Requested authoritative campaign level transition')) { throw 'Map-only run unexpectedly enabled scripted test fixtures' }
             $markers = if ($role -eq 'host') { @('Complete host entity baseline sent') } else { @('Complete host entity baseline applied','First authoritative player snapshot applied') }
@@ -86,7 +107,7 @@ try {
             if ($log.Contains('Rejected:') -or $log.Contains('closing session') -or $log.Contains('readiness timed out')) { throw "$role map synchronization failed" }
             Write-Output "PASS: $role baseline and player replication on $StartMap"
             if($Enemy) {
-                $enemyMarkers = if($role -eq 'host') { @('Spawned authoritative enemy fixture','Host enemy moved under authoritative AI','Host enemy caused player damage') } else { @('Authoritative enemy created on client','Authoritative enemy movement applied on client','Host enemy damage applied on client') }
+                $enemyMarkers = if($role -eq 'host') { @('Spawned authoritative enemy fixture','Enemy occlusion and switching between both players verified','Host enemy moved under authoritative AI','Host enemy caused player damage') } else { @('Authoritative enemy created on client','Authoritative enemy movement applied on client','Host enemy damage applied on client') }
                 foreach($marker in $enemyMarkers) { if(!$log.Contains($marker)) { throw "Missing $role enemy proof: $marker" } }
                 Write-Output "PASS: $role enemy motion and damage replication"
             }

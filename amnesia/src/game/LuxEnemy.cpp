@@ -2475,6 +2475,46 @@ float iLuxEnemy::CalcPlayerSeeRange(cLuxPlayer *apPlayer)
 
 //-----------------------------------------------------------------------
 
+bool iLuxEnemy::TestCoopVisibility()
+{
+    if(!mbDisabled || !gpBase->mpPlayer2 || !gpBase->mpPlayer2->GetCharacterBody()) return false;
+    auto* p1 = gpBase->mpPlayer; auto* p2 = gpBase->mpPlayer2;
+    auto* b1 = p1->GetCharacterBody(); auto* b2 = p2->GetCharacterBody();
+    const cVector3f pos1 = b1->GetPosition(), pos2 = b2->GetPosition(), enemyPos = mpCharBody->GetPosition();
+    const float oldRange = mfSightRange, oldDarkRange = mfDarknessSightRange, oldFOV = mfFOV, oldTimer = mfRetargetCount;
+    auto* oldTarget = mpTargetPlayer; const cVector3f oldKnownPos = mvLastKnownPlayerPos;
+    // Isolate the probe above the map so its geometry cannot obscure the test.
+    // Range/FOV are widened to test occlusion and selection independently.
+    auto* physics = mpMap->GetWorld()->GetPhysicsWorld();
+    const cVector3f oldMin = physics->GetWorldSizeMin(), oldMax = physics->GetWorldSizeMax();
+    cVector3f probeMin = oldMin, probeMax = oldMax;
+    probeMin.x = std::min(probeMin.x, -5.0f); probeMin.z = std::min(probeMin.z, -6.0f);
+    probeMax.x = std::max(probeMax.x, 5.0f); probeMax.z = std::max(probeMax.z, 1.0f); probeMax.y = std::max(probeMax.y, 60.0f);
+    physics->SetWorldSize(probeMin, probeMax);
+    b1->SetPosition(cVector3f(-2, 51, -4)); b2->SetPosition(cVector3f(2, 51, -4));
+    mpCharBody->SetPosition(cVector3f(0, 51, 0)); mfSightRange = mfDarknessSightRange = 30; mfFOV = k2Pif;
+    auto makeWall = [&](float x) {
+        auto* wall = physics->CreateBody("online_visibility_probe", physics->CreateBoxShape(cVector3f(1.8f, 4, 1), NULL));
+        wall->SetMass(0); wall->SetCollide(true); wall->SetBlocksLight(true); wall->SetPosition(cVector3f(x, 51, -2));
+        return wall;
+    };
+    const bool visible = CanDetectPlayerNow(p1) && CanDetectPlayerNow(p2);
+    auto* left = makeWall(-1);
+    mfRetargetCount = 0; UpdateTargetPlayer(1);
+    const bool only2 = !CanDetectPlayerNow(p1) && CanDetectPlayerNow(p2) && GetTargetPlayer() == p2;
+    left->SetPosition(cVector3f(1, 51, -2)); mfRetargetCount = 0; UpdateTargetPlayer(1);
+    const bool only1 = CanDetectPlayerNow(p1) && !CanDetectPlayerNow(p2) && GetTargetPlayer() == p1;
+    auto* right = makeWall(-1);
+    const bool hidden = !CanDetectPlayerNow(p1) && !CanDetectPlayerNow(p2);
+    physics->DestroyBody(left); physics->DestroyBody(right);
+    b1->SetPosition(pos1); b2->SetPosition(pos2); mpCharBody->SetPosition(enemyPos);
+    physics->SetWorldSize(oldMin, oldMax);
+    mfSightRange = oldRange; mfDarknessSightRange = oldDarkRange; mfFOV = oldFOV;
+    mfRetargetCount = oldTimer; mpTargetPlayer = oldTarget; mvLastKnownPlayerPos = oldKnownPos;
+    Log("[NET/TEST] Visibility probe: visible=%d onlyP2=%d onlyP1=%d bothHidden=%d\n", visible, only2, only1, hidden);
+    return visible && only2 && only1 && hidden;
+}
+
 bool iLuxEnemy::CanDetectPlayerNow(cLuxPlayer *apPlayer)
 {
 	if(apPlayer==NULL || apPlayer->GetCharacterBody()==NULL || apPlayer->IsDead()) return false;

@@ -73,7 +73,7 @@ bool ValidInventoryItem(const InventoryItem& item) {
         (item.image.empty() || (item.image[0] != '/' && item.image[0] != '\\'));
 }
 bool ValidPresentation(const Presentation& event) {
-    if(!event.epoch || uint8_t(event.kind) < 1 || uint8_t(event.kind) > 15 || event.target > 2) return false;
+    if(!event.epoch || uint8_t(event.kind) < 1 || uint8_t(event.kind) > 21 || event.target > 2) return false;
     for(unsigned i = 0; i < 4; ++i)
         if(event.text[i].size() > ((i == 0 && event.kind == PresentationKind::Message) ||
             (i == 1 && event.kind == PresentationKind::Hint) ? 4096u : 256u) || event.text[i].find('\0') != std::string::npos) return false;
@@ -84,6 +84,17 @@ bool ValidPresentation(const Presentation& event) {
         for(int32_t v : event.values) if(v < 0) return false;
     if(event.kind == PresentationKind::Hint && (event.text[0].empty() || event.values[0] < 0)) return false;
     if(event.kind == PresentationKind::FogProperties && (event.values[2] < 0 || event.values[3] < 0 || event.values[3] > 3)) return false;
+    if(event.kind == PresentationKind::GuiSound || event.kind == PresentationKind::SoundFade ||
+        event.kind == PresentationKind::GlobalVolume || event.kind == PresentationKind::GlobalSpeed || event.kind == PresentationKind::Shake) {
+        for(int32_t v : event.values) if(v < 0) return false;
+        if(event.kind == PresentationKind::SoundFade && (event.values[1] > 1 || event.values[2] > 1)) return false;
+    }
+    if(event.kind == PresentationKind::GuiSound || event.kind == PresentationKind::Emotion) {
+        const auto& path = event.text[event.kind == PresentationKind::Emotion ? 2 : 0];
+        if(path.find("..") != std::string::npos || path.find(':') != std::string::npos ||
+            (!path.empty() && (path[0] == '/' || path[0] == '\\'))) return false;
+        if(event.kind == PresentationKind::GuiSound && path.empty()) return false;
+    }
     if(event.kind == PresentationKind::Voice || event.kind == PresentationKind::Note || event.kind == PresentationKind::Diary) {
         for(unsigned i = event.kind == PresentationKind::Voice ? 0 : 1; i < 2; ++i) {
             const auto& path = event.text[i];
@@ -92,6 +103,40 @@ bool ValidPresentation(const Presentation& event) {
     }
     return true;
 }
+bool ValidMedia(const MediaState& s) {
+    if(!s.epoch || !s.id || uint8_t(s.kind) < 1 || uint8_t(s.kind) > 3 || s.name.size() > 256 ||
+        s.file.size() > 256 || s.name.find('\0') != std::string::npos || !ValidTransform(s.transform)) return false;
+    if(s.file.find("..") != std::string::npos || s.file.find(':') != std::string::npos ||
+        (!s.file.empty() && (s.file[0] == '/' || s.file[0] == '\\'))) return false;
+    for(unsigned char c : s.file) if(c < 32 || c > 126 || c == '\\') return false;
+    for(int32_t v : s.values) if(v < 0 || v > 100000000) return false;
+    const uint8_t mask = s.kind == MediaKind::Sound ? 127 : s.kind == MediaKind::Particle ? 63 : 15;
+    if(s.flags & ~(mask | 128)) return false;
+    if(s.flags & 128) return true;
+    if(s.file.empty()) return false;
+    if(s.kind == MediaKind::Particle && (!s.values[8] || !s.values[9] || !s.values[10])) return false;
+    if(s.kind == MediaKind::Music && (s.id > 32 || s.values[2] > 86400000)) return false;
+    return true;
+}
+}
+std::vector<uint8_t> EncodeMedia(const MediaState& s) {
+    if(!ValidMedia(s)) return {};
+    auto out = Header(Message::Media); U32(out, s.epoch); U32(out, s.id);
+    out.push_back(uint8_t(s.kind)); out.push_back(s.flags);
+    for(int32_t v : s.transform) U32(out, uint32_t(v));
+    for(int32_t v : s.values) U32(out, uint32_t(v));
+    String(out, s.name); String(out, s.file); return out;
+}
+bool DecodeMedia(const uint8_t* p, size_t n, MediaState& s) {
+    if(!ValidHeader(p, n) || p[4] != uint8_t(Message::Media) || n < 115 || n > 627) return false;
+    MediaState value; value.epoch = R32(p + 5); value.id = R32(p + 9);
+    value.kind = MediaKind(p[13]); value.flags = p[14];
+    for(unsigned i = 0; i < 12; ++i) value.transform[i] = Signed32(p + 15 + i * 4);
+    for(unsigned i = 0; i < 12; ++i) value.values[i] = Signed32(p + 63 + i * 4);
+    size_t cursor = 111;
+    if(!ReadString(p, n, cursor, value.name, 256) || !ReadString(p, n, cursor, value.file, 256) ||
+        cursor != n || !ValidMedia(value)) return false;
+    s = std::move(value); return true;
 }
 std::vector<uint8_t> EncodePresentation(const Presentation& event) {
     if(!ValidPresentation(event)) return {};
@@ -279,7 +324,7 @@ void Session::Stop() {
     host_ = nullptr; peer_ = nullptr; initialized_ = ready_ = hasInput_ = false; role_ = Role::Offline;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; map_ = MapState();
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
-    presentation_.clear(); life_.clear(); hasLife_ = false;
+    presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
 }
 bool Session::Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reliable) {
     if (!peer_ || bytes.empty()) return false;
@@ -294,7 +339,7 @@ void Session::Reject(const char* why) {
     peer_ = nullptr; ready_ = hasInput_ = false;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
-    presentation_.clear(); life_.clear(); hasLife_ = false;
+    presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
 }
 void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
     if (!ValidHeader(p, n)) { Reject("malformed packet or incompatible protocol"); return; }
@@ -316,6 +361,13 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         if(life_.size() >= 64) { Reject("life transition queue exceeded"); return; }
         life_.push_back(state); hasLife_ = true; lastLife_ = state.sequence;
         return;
+    }
+    if(ready_ && role_ == Role::Client && channel == 2 && p[4] == uint8_t(Message::Media)) {
+        MediaState state;
+        if(!DecodeMedia(p, n, state)) { Reject("invalid media state"); return; }
+        if(!hasMap_ || state.epoch != map_.epoch) return;
+        if(media_.size() >= 1024) { Reject("media queue exceeded"); return; }
+        media_.push_back(std::move(state)); return;
     }
     if(ready_ && role_ == Role::Client && channel == 2 && p[4] == uint8_t(Message::Presentation)) {
         Presentation event;
@@ -374,7 +426,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         if (!DecodeMap(p, n, map)) { Reject("invalid map path or epoch"); return; }
         if (!hasMap_ || (map.epoch - map_.epoch != 0 && map.epoch - map_.epoch < 0x80000000u)) {
             map_ = map; hasMap_ = true; hasSnapshot_ = false; entities_.clear(); worldReadyEpoch_ = 0; hasInventory_ = false;
-            presentation_.clear(); life_.clear(); hasLife_ = false;
+            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
         }
         return;
     }
@@ -399,7 +451,7 @@ void Session::Poll() {
         if (e.type == ENET_EVENT_TYPE_CONNECT) {
             peer_ = e.peer; ready_ = hasInput_ = hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; started_ = enet_time_get();
             entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
-            presentation_.clear(); life_.clear(); hasLife_ = false;
+            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
             enet_peer_timeout(peer_, 8, 3000, 10000);
             if (role_ == Role::Host && e.data != ProtocolVersion) { Reject("incompatible connect version"); continue; }
             log_("[NET/CONNECTION] Peer connected");
@@ -411,7 +463,7 @@ void Session::Poll() {
             peer_ = nullptr; ready_ = hasInput_ = false; log_("[NET/CONNECTION] Peer disconnected or timed out");
             hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
             entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
-            presentation_.clear(); life_.clear(); hasLife_ = false;
+            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
         }
     }
     if (peer_ && !ready_ && uint32_t(enet_time_get() - started_) > 5000) Reject("handshake timeout");
@@ -453,9 +505,11 @@ bool Session::SendWorldReady(uint32_t epoch) {
     if(role_ != Role::Host || !IsMapReady(epoch)) return false;
     auto out = Header(Message::WorldReady); U32(out, epoch); return Send(out, 2, true);
 }
-bool Session::IsWorldReady(uint32_t epoch) const { return ready_ && epoch && worldReadyEpoch_ == epoch && entities_.empty(); }
+bool Session::IsWorldReady(uint32_t epoch) const { return ready_ && epoch && worldReadyEpoch_ == epoch && entities_.empty() && media_.empty(); }
 bool Session::SendInventory(const InventoryState& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeInventory(s), 2, true); }
 bool Session::ReadInventory(InventoryState& s) const { if(!ready_ || !hasInventory_) return false; s = inventory_; return true; }
 bool Session::SendPresentation(const Presentation& event) { return role_ == Role::Host && IsMapReady(event.epoch) && Send(EncodePresentation(event), 2, true); }
 bool Session::ReadPresentation(Presentation& event) { if(presentation_.empty()) return false; event = std::move(presentation_.front()); presentation_.pop_front(); return true; }
+bool Session::SendMedia(const MediaState& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeMedia(s), 2, true); }
+bool Session::ReadMedia(MediaState& s) { if(media_.empty()) return false; s = std::move(media_.front()); media_.pop_front(); return true; }
 }

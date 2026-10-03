@@ -1669,6 +1669,11 @@ void __stdcall cLuxScriptHandler::UnlockAchievement(string& asName)
 
 void __stdcall cLuxScriptHandler::PlayGuiSound(string& asSoundEntFile, float afVolume)
 {
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::GuiSound;
+        event.text[0] = asSoundEntFile; event.values[0] = int32_t(afVolume * 1000);
+        gpBase->mpNetwork->QueuePresentation(event);
+    }
 	tString sExt = cString::GetFileExt(asSoundEntFile);
 
 	//Sound entity!
@@ -2676,6 +2681,11 @@ void __stdcall cLuxScriptHandler::PlaySoundAtEntity(string& asSoundName, string&
 
 void __stdcall cLuxScriptHandler::FadeInSound(string& asSoundName, float afFadeTime, bool abPlayStart)
 {
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::SoundFade;
+        event.text[0] = asSoundName; event.values = {{int32_t(afFadeTime * 1000), 1, abPlayStart ? 1 : 0, 0, 0, 0}};
+        gpBase->mpNetwork->QueuePresentation(event);
+    }
 	cLuxMap *pMap = gpBase->mpMapHandler->GetCurrentMap();
 	if(pMap==NULL) return;
 
@@ -2698,6 +2708,11 @@ void __stdcall cLuxScriptHandler::FadeInSound(string& asSoundName, float afFadeT
 
 void __stdcall cLuxScriptHandler::StopSound(string& asSoundName, float afFadeTime)
 {
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::SoundFade;
+        event.text[0] = asSoundName; event.values[0] = int32_t(afFadeTime * 1000);
+        gpBase->mpNetwork->QueuePresentation(event);
+    }
 	cLuxMap *pMap = gpBase->mpMapHandler->GetCurrentMap();
 	if(pMap==NULL) return;
 
@@ -2799,6 +2814,7 @@ void __stdcall cLuxScriptHandler::StopMusic(float afFadeTime, int alPrio)
 
 void __stdcall cLuxScriptHandler::FadeGlobalSoundVolume(float afDestVolume, float afTime)
 {
+    QueueNetworkScreenEffect(online::PresentationKind::GlobalVolume, afDestVolume, afTime);
 	bool abDestroy = afDestVolume==1;
 	cSoundHandler *pSoundHandler = gpBase->mpEngine->GetSound()->GetSoundHandler();
 
@@ -2813,6 +2829,7 @@ void __stdcall cLuxScriptHandler::FadeGlobalSoundVolume(float afDestVolume, floa
 
 void __stdcall cLuxScriptHandler::FadeGlobalSoundSpeed(float afDestSpeed, float afTime)
 {
+    QueueNetworkScreenEffect(online::PresentationKind::GlobalSpeed, afDestSpeed, afTime);
 	bool abDestroy = afDestSpeed==1;
 	cSoundHandler *pSoundHandler = gpBase->mpEngine->GetSound()->GetSoundHandler();
 

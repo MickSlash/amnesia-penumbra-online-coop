@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory=$true)][string]$GameDirectory,
     [ValidateRange(1,65534)][int]$Port = 27036,
     [ValidateRange(0,500)][int]$OneWayDelayMs = 50,
-    [ValidateRange(2,1000)][int]$DropEvery = 20
+    [ValidateRange(2,1000)][int]$DropEvery = 20,
+    [switch]$Media
 )
 $ErrorActionPreference = 'Stop'
 $run = Join-Path (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path 'build/impaired-network'
@@ -77,7 +78,7 @@ $relay = Start-Process -FilePath $shellPath -WindowStyle Hidden -PassThru -Argum
 try {
     Start-Sleep -Seconds 2
     if($relay.HasExited) { throw 'UDP relay failed to start; inspect build/impaired-network/relay.err' }
-    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Port ($Port+1) -ClientPort $Port -Campaign
+    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Port ($Port+1) -ClientPort $Port -Campaign -Media:$Media
     if (!$relay.WaitForExit(15000)) { throw 'UDP relay did not exit on its timer' }
     $relay.Refresh()
     if($relay.ExitCode -ne 0) { throw 'UDP relay failed; inspect relay.err' }

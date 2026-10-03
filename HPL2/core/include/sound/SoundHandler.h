@@ -101,6 +101,10 @@ namespace hpl {
 
 		void FadeVolumeMulTo(float afDestMul, float afSpeed);
 		void FadeSpeedMulTo(float afDestMul, float afSpeed);
+        float GetVolumeMul() const { return mfVolumeMul; }
+        float GetVolumeFadeDest() const { return mfVolumeFadeDest; }
+        float GetVolumeFadeSpeed() const { return mfVolumeFadeSpeed; }
+        float GetSpeedMul() const { return mfSpeedMul; }
 		
 		void FadeOut(float afSpeed);
 		void FadeIn(float afVolumeMul,float afSpeed);

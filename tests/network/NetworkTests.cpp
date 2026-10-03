@@ -34,7 +34,36 @@ static void MalformedInputStressTest() {
     InventoryState inventory; inventory.epoch = 1; InventoryItem item; item.name = "key"; inventory.items.push_back(item);
     StressCodec(inventory, EncodeInventory, DecodeInventory);
     Presentation event; event.epoch = 1; event.text[0] = "Story"; StressCodec(event, EncodePresentation, DecodePresentation);
-    std::cout << "PASS: 70000 deterministic malformed-input codec stress cases\n";
+    MediaState media; media.epoch = 1; media.id = 1; media.name = "rain"; media.file = "rain.snt";
+    StressCodec(media, EncodeMedia, DecodeMedia);
+    std::cout << "PASS: 80000 deterministic malformed-input codec stress cases\n";
+}
+static void MediaCodecTest() {
+    MediaState s; s.epoch = 2; s.id = 42; s.name = "same_name"; s.file = "sounds/wind.snt";
+    s.flags = 59; s.transform[0] = s.transform[5] = s.transform[10] = 10000; s.transform[3] = -54321;
+    s.values[0] = 700; s.values[1] = 1000; s.values[2] = 20000; s.values[3] = 1000;
+    auto bytes = EncodeMedia(s); MediaState read;
+    Check(!bytes.empty() && DecodeMedia(bytes.data(), bytes.size(), read) && read.id == 42 &&
+        read.transform[3] == -54321 && read.values[2] == 20000, "media roundtrip");
+    for(size_t n = 0; n < bytes.size(); ++n) Check(!DecodeMedia(bytes.data(), n, read), "truncated media");
+    bytes.push_back(0); Check(!DecodeMedia(bytes.data(), bytes.size(), read), "media trailing bytes");
+    s.file = "../wind.snt"; Check(EncodeMedia(s).empty(), "media path traversal");
+    s.file = "C:/wind.snt"; Check(EncodeMedia(s).empty(), "media absolute path");
+    s.file = "wind.snt"; s.values[0] = -1; Check(EncodeMedia(s).empty(), "negative media volume"); s.values[0] = 700;
+    s.kind = MediaKind::Particle; s.flags = 63; s.file = "particles/dust.ps";
+    Check(EncodeMedia(s).empty(), "particle size must be positive");
+    s.values[8] = s.values[9] = s.values[10] = 1000;
+    bytes = EncodeMedia(s); Check(DecodeMedia(bytes.data(), bytes.size(), read), "particle properties roundtrip");
+    s.flags = 64; Check(EncodeMedia(s).empty(), "particle flags bounded");
+    s.kind = MediaKind::Music; s.id = 8; s.flags = 11; s.file = "music/theme.ogg"; s.values[2] = 45678;
+    bytes = EncodeMedia(s); Check(DecodeMedia(bytes.data(), bytes.size(), read) && read.values[2] == 45678, "music timeline roundtrip");
+    s.id = 33; Check(EncodeMedia(s).empty(), "music priority bounded"); s.id = 8;
+    s.values[2] = 86400001; Check(EncodeMedia(s).empty(), "music position bounded"); s.values[2] = 0;
+    s.flags = 128; s.file.clear(); bytes = EncodeMedia(s); Check(DecodeMedia(bytes.data(), bytes.size(), read), "media removal roundtrip");
+    Presentation event; event.epoch = 1; event.kind = PresentationKind::GuiSound; event.text[0] = "gui.snt"; event.values[0] = 500;
+    Check(!EncodePresentation(event).empty(), "gui audio event"); event.text[0] = "../gui.snt"; Check(EncodePresentation(event).empty(), "gui asset validation");
+    event.kind = PresentationKind::SoundFade; event.text[0] = "rain"; event.values[1] = 2; Check(EncodePresentation(event).empty(), "sound fade mode bounded");
+    std::cout << "PASS: media properties, lifecycle and asset validation\n";
 }
 static void InputLifetimeTest() {
     Session host(Log), client(Log);
@@ -87,10 +116,20 @@ static void InputLifetimeTest() {
     Check(host.ReadInput(received) && received.epoch == 7, "current-map input accepted");
     EntityState entity; entity.epoch = 7; entity.id = 45; entity.name = "box"; entity.file = "entities/box.ent";
     entity.transform[0] = entity.transform[5] = entity.transform[10] = 10000;
-    Check(host.SendEntity(entity) && host.SendWorldReady(7), "world baseline transport"); pump(20);
+    MediaState media; media.epoch = 7; media.id = 10; media.name = "same_name"; media.file = "wind.snt"; media.flags = 1;
+    Check(host.SendEntity(entity) && host.SendMedia(media) && host.SendWorldReady(7), "world and media baseline transport"); pump(20);
     Check(!client.IsWorldReady(7), "world readiness waits for application queue");
     EntityState replicaEntity; Check(client.ReadEntity(replicaEntity) && replicaEntity.id == 45, "world entity received");
-    Check(client.IsWorldReady(7), "world ready after baseline drain");
+    Check(!client.IsWorldReady(7), "world waits for media baseline application");
+    MediaState mediaRead; Check(client.ReadMedia(mediaRead) && mediaRead.id == 10, "media baseline received");
+    Check(client.IsWorldReady(7), "world ready after full baseline drain");
+    media.values[0] = 250; Check(host.SendMedia(media), "media delta transport");
+    media.id = 11; Check(host.SendMedia(media), "separate media IDs with duplicate name");
+    media.id = 10; media.flags = 128; Check(host.SendMedia(media), "media removal transport"); pump(20);
+    Check(client.ReadMedia(mediaRead) && mediaRead.id == 10 && mediaRead.values[0] == 250, "media update retained");
+    Check(client.ReadMedia(mediaRead) && mediaRead.id == 11, "same-name second sound retained");
+    Check(client.ReadMedia(mediaRead) && mediaRead.id == 10 && mediaRead.flags == 128, "ordered media destruction");
+    Check(!client.SendMedia(media), "client cannot originate media");
     InventoryState inventory; inventory.epoch = 7; inventory.revision = 1;
     InventoryItem item; item.name = "key"; item.image = "graphics/item/key.tga"; inventory.items.push_back(item);
     Check(host.SendInventory(inventory), "shared inventory transport"); pump(20);
@@ -110,7 +149,7 @@ static void InputLifetimeTest() {
     Presentation storyRead;
     Check(client.ReadPresentation(storyRead) && storyRead.text[0] == story.text[0] && storyRead.values[0] == -1234, "client ordered story event");
     Check(!client.SendPresentation(story), "client cannot originate host story events");
-    host.SendPresentation(story); life.sequence = 1; host.SendLife(life); pump(20);
+    host.SendPresentation(story); life.sequence = 1; host.SendLife(life); host.SendMedia(media); pump(20);
     map.epoch = 8; host.SendMap(map); pump(20);
     Check(!host.ReadInput(received) && !client.ReadSnapshot(replica), "transition clears previous-map state");
     Check(!client.SendMapReady(7), "old readiness cannot unlock new map");
@@ -118,6 +157,7 @@ static void InputLifetimeTest() {
     Check(!client.ReadInventory(inventoryReplica), "new map clears old inventory revision");
     Check(!client.ReadPresentation(storyRead), "new map clears old story events");
     Check(!client.ReadLife(replica), "new map clears old life events");
+    Check(!client.ReadMedia(mediaRead), "new map clears old media events");
     client.Stop(); pump(20);
     Check(!host.Connected() && !host.ReadInput(received), "disconnect clears input");
     std::cout << "PASS: sequence wrap, stale timeout, snapshots, map readiness and epoch isolation\n";
@@ -144,6 +184,7 @@ static void LifeQueueLimitTest() {
     std::cout << "PASS: bounded life queue, overflow rejection and reconnect reset\n";
 }
 int main(int argc, char** argv) {
+    MediaCodecTest();
     PlayerInput input; input.sequence = 0x12345678; input.tick = 42;
     input.forward = -1000; input.strafe = 500; input.yaw = -3141; input.pitch = 1570; input.buttons = 15;
     input.lookYaw = -1234; input.lookPitch = 31420;

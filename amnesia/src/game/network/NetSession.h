@@ -9,12 +9,13 @@
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 3;
+constexpr uint16_t ProtocolVersion = 4;
 constexpr uint16_t DefaultPort = 27020;
 enum class Role { Offline, Host, Client };
-enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12 };
+enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13 };
 enum class PresentationKind : uint8_t { Note = 1, Diary = 2, Voice = 3, Message = 4, Light = 5, StopVoice = 6,
-    Hint = 7, Fade = 8, ImageTrail = 9, Sepia = 10, RadialBlur = 11, BlurStart = 12, Flash = 13, FogColor = 14, FogProperties = 15 };
+    Hint = 7, Fade = 8, ImageTrail = 9, Sepia = 10, RadialBlur = 11, BlurStart = 12, Flash = 13, FogColor = 14, FogProperties = 15,
+    GuiSound = 16, SoundFade = 17, GlobalVolume = 18, GlobalSpeed = 19, Emotion = 20, Shake = 21 };
 struct Presentation {
     uint32_t epoch = 0;
     PresentationKind kind = PresentationKind::Message;
@@ -58,6 +59,17 @@ struct InventoryState { uint32_t epoch = 0, revision = 0; std::vector<InventoryI
 std::vector<uint8_t> EncodeInventory(const InventoryState& inventory);
 bool DecodeInventory(const uint8_t* data, size_t size, InventoryState& inventory);
 using Transform = std::array<int32_t, 12>; // row-major 3x4, translation *1000, rotation *10000
+enum class MediaKind : uint8_t { Sound = 1, Particle = 2, Music = 3 };
+struct MediaState {
+    uint32_t epoch = 0, id = 0;
+    MediaKind kind = MediaKind::Sound;
+    uint8_t flags = 0; // kind-specific properties; bit 7 = removed
+    std::string name, file;
+    Transform transform = {};
+    std::array<int32_t, 12> values = {};
+};
+std::vector<uint8_t> EncodeMedia(const MediaState& state);
+bool DecodeMedia(const uint8_t* data, size_t size, MediaState& state);
 struct Animation { uint16_t index = 0, weight = 0; uint32_t time = 0; };
 struct EntityState {
     uint32_t epoch = 0, id = 0;
@@ -111,6 +123,8 @@ public:
     bool ReadInventory(InventoryState& inventory) const;
     bool SendPresentation(const Presentation& event);
     bool ReadPresentation(Presentation& event);
+    bool SendMedia(const MediaState& state);
+    bool ReadMedia(MediaState& state);
     bool Connected() const { return ready_; }
     Role GetRole() const { return role_; }
     uint32_t Ping() const;
@@ -138,6 +152,7 @@ private:
     InventoryState inventory_;
     bool hasInventory_ = false;
     std::deque<Presentation> presentation_;
+    std::deque<MediaState> media_;
     std::deque<Snapshot> life_;
     bool hasLife_ = false;
     uint32_t lastLife_ = 0;

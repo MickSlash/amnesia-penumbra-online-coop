@@ -17,6 +17,12 @@
 #include "LuxJournal.h"
 #include "LuxMessageHandler.h"
 #include "LuxHintHandler.h"
+#include "LuxMusicHandler.h"
+#include "LuxHelpFuncs.h"
+#include "resources/SoundEntityManager.h"
+#include "sound/SoundEntityData.h"
+#include "sound/SoundChannel.h"
+#include "scene/Node3D.h"
 #include <cstdio>
 #include "impl/ImGuiConsole.h"
 #include <cstdlib>
@@ -26,6 +32,15 @@ namespace {
 bool TestFlag(const char* name) {
     const char* value = std::getenv(name);
     return value && std::string(value) == "1";
+}
+std::string MediaAssetName(std::string file) {
+    std::replace(file.begin(), file.end(), '\\', '/');
+    // Original .ent files can retain the author's E:/Projects/... pathname.
+    // HPL already loaded these through its filename fallback. Transmit that
+    // logical resource name rather than an unusable or absolute wire path.
+    if(file.find(':') != std::string::npos || file.find("..") != std::string::npos || (!file.empty() && file[0] == '/'))
+        file = cString::GetFileName(file);
+    return file;
 }
 bool Port(const std::string& text, uint16_t& value) {
     if (text.empty() || text.size() > 5) return false;
@@ -51,6 +66,15 @@ cMatrixf UnpackTransform(const online::Transform& values) {
     for(int r = 0; r < 3; ++r) for(int c = 0; c < 4; ++c)
         result.m[r][c] = values[r * 4 + c] / (c == 3 ? 1000.0f : 10000.0f);
     return result;
+}
+void EnsureMediaIDs(cWorld* world, int& next) {
+    auto sounds = world->GetSoundEntityIterator();
+    auto particles = world->GetParticleSystemIterator();
+    while(sounds.HasNext()) next = std::max(next, sounds.Next()->GetUniqueID() + 1);
+    while(particles.HasNext()) next = std::max(next, particles.Next()->GetUniqueID() + 1);
+    sounds = world->GetSoundEntityIterator(); particles = world->GetParticleSystemIterator();
+    while(sounds.HasNext()) { auto* object = sounds.Next(); if(object->GetUniqueID() < 0) object->SetUniqueID(next++); }
+    while(particles.HasNext()) { auto* object = particles.Next(); if(object->GetUniqueID() < 0) object->SetUniqueID(next++); }
 }
 uint64_t MapFingerprint(const std::string& name) {
     uint64_t hash = 14695981039346656037ull;
@@ -105,7 +129,7 @@ void cLuxNetwork::OnStart() {
     cImGuiConsole::RegisterCommand("net_status", "net_status - role and handshake status",
         [this](const cImGuiConsole::tArgs&) {
             const char* role = mSession.GetRole() == online::Role::Host ? "host" : mSession.GetRole() == online::Role::Client ? "client" : "offline";
-            NetLog(std::string("[NET] role=") + role + " connected=" + (mSession.Connected() ? "yes" : "no") + " protocol=2; epoch=" + std::to_string(mEpoch));
+            NetLog(std::string("[NET] role=") + role + " connected=" + (mSession.Connected() ? "yes" : "no") + " protocol=" + std::to_string(online::ProtocolVersion) + "; epoch=" + std::to_string(mEpoch));
         });
     cImGuiConsole::RegisterCommand("net_ping", "net_ping - ENet round trip milliseconds",
         [this](const cImGuiConsole::tArgs&) { NetLog("[NET] RTT=" + std::to_string(mSession.Ping()) + " ms"); });
@@ -321,6 +345,8 @@ void cLuxNetwork::Reset() {
     mAppliedInventory = false; mInventoryBytes.clear();
     mPendingPresentation.clear(); mLightBytes.clear(); mLoggedLighting = false;
     for(auto& bytes : mFogBytes) bytes.clear();
+    mMediaBytes.clear(); mMediaStates.clear(); mReplicaMediaIDs.clear(); mMusicFadeTimes.clear(); mMediaBaselineApplied = false;
+    for(auto& bytes : mGlobalAudioBytes) bytes.clear();
     mClientDead = false; mHasClientLife = false; mHasHostLife = false;
 }
 void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
@@ -446,6 +472,9 @@ void cLuxNetwork::QueuePresentation(online::Presentation event) {
     if(mPendingPresentation.size() >= 512) { NetLog("[NET/STATE] Presentation queue exceeded; closing session"); mSession.Stop(); return; }
     mPendingPresentation.push_back(std::move(event));
 }
+void cLuxNetwork::MusicChanged(int priority, float fadeTime) {
+    if(mSession.GetRole() == online::Role::Host) mMusicFadeTimes[priority] = std::max(0.0f, fadeTime);
+}
 bool cLuxNetwork::WaitingForMap() const {
     return mSession.GetRole() == online::Role::Host && mSession.Connected() &&
         mMapAnnounced && !mSession.IsMapReady(mEpoch);
@@ -481,6 +510,9 @@ void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
         NetLog("[NET/MAP] Replica map load failed; closing session"); mSession.Stop(); return;
     }
     mEpoch = state.epoch;
+    mReplicaMediaIDs.clear(); mMediaStates.clear(); mMediaBaselineApplied = false;
+    gpBase->mpMusicHandler->Reset();
+    gpBase->mpEngine->GetSound()->GetMusicHandler()->Stop(1000);
     mSnapshots.clear(); mReceivedSnapshot = false;
     mHasClientLife = false; mClientDead = false;
     mPendingLookYaw = mPendingLookPitch = 0; mClientObjectLook = false;
@@ -563,6 +595,9 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                 }
             }
         }
+        online::MediaState media;
+        for(int count = 0; count < 128 && mSession.ReadMedia(media); ++count)
+            if(media.epoch == mEpoch) ApplyMedia(map, media);
         online::Presentation event;
         for(int count = 0; count < 128 && mSession.ReadPresentation(event); ++count)
             if(event.epoch == mEpoch && event.target != 1) ApplyPresentation(map, event);
@@ -571,6 +606,21 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             if(entity.epoch == mEpoch) ApplyWorldEntity(map, entity);
         if(!mSession.Connected()) return;
         if(!mBaselineApplied && mSession.IsWorldReady(mEpoch)) {
+            // Remove map-authored audio/particles absent from the host's roster.
+            cWorld* world = map->GetWorld();
+            std::map<int, bool> soundIDs, particleIDs;
+            for(const auto& pair : mReplicaMediaIDs) {
+                if(pair.first.first == uint8_t(online::MediaKind::Sound)) soundIDs[pair.second] = true;
+                if(pair.first.first == uint8_t(online::MediaKind::Particle)) particleIDs[pair.second] = true;
+            }
+            std::vector<cSoundEntity*> sounds; std::vector<cParticleSystem*> particles;
+            auto soundsIt = world->GetSoundEntityIterator();
+            while(soundsIt.HasNext()) { auto* sound = soundsIt.Next(); if(!soundIDs.count(sound->GetUniqueID())) sounds.push_back(sound); }
+            auto particlesIt = world->GetParticleSystemIterator();
+            while(particlesIt.HasNext()) { auto* ps = particlesIt.Next(); if(!particleIDs.count(ps->GetUniqueID())) particles.push_back(ps); }
+            for(auto* sound : sounds) world->DestroySoundEntity(sound);
+            for(auto* ps : particles) world->DestroyParticleSystem(ps);
+            mMediaBaselineApplied = true;
             // OnStart may remove original map entities on the host. The client
             // does not run that script, so reconcile the complete host roster.
             std::map<int, bool> roster;
@@ -640,6 +690,29 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         if(mClientDead) interpolated.players[1] = mClientLife.players[1];
         ApplyReplica(gpBase->mpPlayer, interpolated.players[1], true);
         ApplyReplica(gpBase->mpPlayer2, interpolated.players[0], false);
+        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) {
+            const float elapsed = std::chrono::duration<float>(now - mSmokeStart).count();
+            if(!mTestLanternRequested && elapsed > 5 && gpBase->mpPlayer->GetLampOil() > 20) {
+                SendLocalAction(online::PlayerAction::Lantern, true);
+                SendLocalAction(online::PlayerAction::Lantern, false);
+                mTestLanternRequested = true;
+            }
+            auto lit = [](cLuxPlayer* player) {
+                auto* lantern = player->GetHelperLantern(); auto* light = lantern->GetLight();
+                return lantern->IsActive() && light && light->GetDiffuseColor().r > 0.01f;
+            };
+            if(!mTestLanternRemoteLogged && lit(gpBase->mpPlayer2)) {
+                mTestLanternRemoteLogged = true; NetLog("[NET/TEST] Remote host lantern emits light on client");
+            }
+            if(!mTestLanternLocalLogged && lit(gpBase->mpPlayer) && lit(gpBase->mpPlayer2) &&
+                gpBase->mpPlayer2->GetLampOil() - gpBase->mpPlayer->GetLampOil() > 10) {
+                mTestLanternLocalLogged = true; NetLog("[NET/TEST] Both lanterns emit light with independent oil on client");
+            }
+            if(!mTestLanternIndependentLogged && mTestLanternLocalLogged && elapsed > 12 && elapsed < 18 &&
+                !gpBase->mpPlayer2->GetHelperLantern()->IsActive() && lit(gpBase->mpPlayer)) {
+                mTestLanternIndependentLogged = true; NetLog("[NET/TEST] Independent lantern toggles applied on client");
+            }
+        }
         if(mSmokeSeconds && !mClientMoved && gpBase->mpPlayer->GetCharacterBody()) {
             cVector3f delta = gpBase->mpPlayer->GetCharacterBody()->GetFeetPosition() - mReplicaInitialFeet;
             if(delta.x*delta.x + delta.z*delta.z > 0.01f) { mClientMoved = true; NetLog("[NET/TEST] Client camera/body moved from authoritative snapshots"); }
@@ -659,6 +732,8 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         mHasLookSequence = false;
         mInventoryBytes.clear();
         mLightBytes.clear();
+        mMediaBytes.clear(); mMediaStates.clear();
+        for(auto& bytes : mGlobalAudioBytes) bytes.clear();
         for(auto& bytes : mFogBytes) bytes.clear();
         NetLog("[NET/MAP] Announced epoch=" + std::to_string(mEpoch) + " file=" + state.file);
     }
@@ -670,6 +745,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         return;
     }
     if(!gpBase->mpPlayer2 || !gpBase->mpPlayer2->GetCharacterBody()) return;
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) UpdateMediaTest(map, std::chrono::duration<float>(now - mSmokeStart).count());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_ENEMY")) {
         if(!mTestEnemySpawned) {
             cLuxPlayer* player = gpBase->mpPlayer2;
@@ -679,6 +755,8 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             if(entity && entity->GetEntityType() == eLuxEntityType_Enemy) {
                 iLuxEnemy* enemy = static_cast<iLuxEnemy*>(entity);
                 enemy->SetActive(true); enemy->ChangeState(eLuxEnemyState_Wait); enemy->SetDisabled(true);
+                if(!enemy->TestCoopVisibility()) { NetLog("[NET/TEST] Enemy visibility probe FAILED"); mSession.Stop(); return; }
+                NetLog("[NET/TEST] Enemy occlusion and switching between both players verified");
                 mTestEnemyInitialPosition = enemy->GetCharacterBody()->GetPosition(); mTestEnemySpawned = true;
                 NetLog("[NET/TEST] Spawned authoritative enemy fixture");
             } else { NetLog("[NET/TEST] Enemy fixture creation FAILED"); mSession.Stop(); return; }
@@ -786,6 +864,8 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         if(!mSession.SendLife(snapshot)) { NetLog("[NET/STATE] Cannot send life transition; closing session"); mSession.Stop(); return; }
         mHostLife = snapshot; mHasHostLife = true;
     }
+    const bool mediaReady = ReplicateMedia(map);
+    if(!mSession.Connected()) return;
     if(mSnapshotAccumulator < 1.0f / 20.0f) return;
     mSnapshotAccumulator = std::fmod(mSnapshotAccumulator, 1.0f / 20.0f);
     const bool snapshotSent = mSession.SendSnapshot(snapshot);
@@ -794,7 +874,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         mTestHasLifeSnapshot = true; mTestLastSentDead = dead;
         NetLog("[NET/TEST] Sent remote life snapshot dead=" + std::to_string(dead ? 1 : 0) + " sequence=" + std::to_string(snapshot.sequence));
     }
-    ReplicateWorld(map);
+    if(mediaReady) ReplicateWorld(map);
     ReplicateLights(map);
     for(unsigned count = 0; count < 64 && !mPendingPresentation.empty(); ++count) {
         auto event = mPendingPresentation.front(); event.epoch = mEpoch;
@@ -923,6 +1003,221 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
     }
     if(!mLoggedWorldReplica) { mLoggedWorldReplica = true; NetLog("[NET/WORLD] Authoritative entity state applied"); }
 }
+bool cLuxNetwork::ReplicateMedia(cLuxMap* map) {
+    cWorld* world = map->GetWorld();
+    EnsureMediaIDs(world, mNextMediaID);
+    std::map<MediaKey, online::MediaState> current;
+    auto quantize = [](float v) { return int32_t(std::round(std::max(0.0f, std::min(100000.0f, v)) * 1000)); };
+    auto sounds = world->GetSoundEntityIterator();
+    while(sounds.HasNext()) {
+        cSoundEntity* sound = sounds.Next();
+        online::MediaState s; s.epoch = mEpoch; s.id = uint32_t(sound->GetUniqueID()) + 1; s.kind = online::MediaKind::Sound;
+        s.name = sound->GetName(); s.file = MediaAssetName(sound->GetData()->GetName());
+        s.transform = PackTransform(sound->GetWorldMatrix());
+        s.flags = (!sound->IsStopped() ? 1 : 0) | (sound->GetForcePlayAsGUISound() ? 2 : 0) |
+            (sound->GetRemoveWhenOver() ? 4 : 0) | (sound->IsSaved() ? 8 : 0) | (sound->IsActive() ? 16 : 0) |
+            (sound->GetData()->GetLoop() ? 32 : 0) | (sound->IsFadingOut() ? 64 : 0);
+        s.values[0] = quantize(sound->GetVolume()); s.values[1] = quantize(sound->GetMinDistance()); s.values[2] = quantize(sound->GetMaxDistance());
+        s.values[3] = s.values[4] = s.values[6] = 1000;
+        cSoundEntry* entry = sound->GetSoundEntry(eSoundEntityType_Main, true);
+        if(entry) {
+            s.values[3] = quantize(entry->GetVolumeMul()); s.values[4] = quantize(entry->GetVolumeFadeDest());
+            // HPL stores the fade slope with its direction; the wire carries
+            // its magnitude because the destination determines the sign.
+            s.values[5] = quantize(std::fabs(entry->GetVolumeFadeSpeed())); s.values[6] = quantize(entry->GetSpeedMul());
+        }
+        current[{uint8_t(s.kind), s.id}] = std::move(s);
+    }
+    auto particles = world->GetParticleSystemIterator();
+    while(particles.HasNext()) {
+        cParticleSystem* ps = particles.Next();
+        online::MediaState s; s.epoch = mEpoch; s.id = uint32_t(ps->GetUniqueID()) + 1; s.kind = online::MediaKind::Particle;
+        s.name = ps->GetName(); s.file = MediaAssetName(ps->GetDataName());
+        s.transform = PackTransform(ps->GetWorldMatrix());
+        s.flags = (ps->IsActive() ? 1 : 0) | (ps->IsVisible() ? 2 : 0) | (ps->GetFadeAtDistance() ? 4 : 0) |
+            (ps->IsSaved() ? 8 : 0) | (ps->IsDying() ? 16 : 0) | (ps->GetRemoveWhenDead() ? 32 : 0);
+        const cColor color = ps->GetColor();
+        s.values = {{quantize(color.r), quantize(color.g), quantize(color.b), quantize(color.a),
+            quantize(ps->GetMinFadeDistanceEnd()), quantize(ps->GetMinFadeDistanceStart()),
+            quantize(ps->GetMaxFadeDistanceStart()), quantize(ps->GetMaxFadeDistanceEnd()),
+            std::max(1, quantize(ps->GetDataSize().x)), std::max(1, quantize(ps->GetDataSize().y)), std::max(1, quantize(ps->GetDataSize().z)), 0}};
+        current[{uint8_t(s.kind), s.id}] = std::move(s);
+    }
+    for(int priority = 0; priority <= gpBase->mpMusicHandler->GetMaxPrio(); ++priority) {
+        cLuxMusic* music = gpBase->mpMusicHandler->GetMusic(priority);
+        online::MediaState s; s.epoch = mEpoch; s.id = priority + 1; s.kind = online::MediaKind::Music; s.file = MediaAssetName(music->msFile);
+        s.values[1] = quantize(mMusicFadeTimes.count(priority) ? mMusicFadeTimes[priority] : 1.0f);
+        std::replace(s.file.begin(), s.file.end(), '\\', '/');
+        if(s.file.empty()) s.flags = 128;
+        else {
+            s.flags = (music->mbLoop ? 1 : 0) | (music->mbResume ? 2 : 0) | (music->mbSpecialEffect ? 4 : 0) |
+                (gpBase->mpMusicHandler->GetCurrentMaxPrio() == priority ? 8 : 0);
+            const float mul = gpBase->mpMusicHandler->GetVolumeMul();
+            s.values[0] = quantize(mul > 0 ? music->mfVolume / mul : 0);
+        }
+        current[{uint8_t(s.kind), s.id}] = std::move(s);
+    }
+    if(current.size() > 2048) { NetLog("[NET/MEDIA] Media roster exceeded; closing session"); mSession.Stop(); return false; }
+    unsigned sent = 0; bool complete = true;
+    for(auto& pair : current) {
+        // Playback position is sent only when the music state changes, never
+        // used as a delta key that would seek the stream on every logic tick.
+        auto bytes = online::EncodeMedia(pair.second);
+        if(bytes.empty()) { NetLog("[NET/MEDIA] Unsupported media: " + pair.second.name + " file=" + pair.second.file); mSession.Stop(); return false; }
+        auto old = mMediaBytes.find(pair.first);
+        if(old != mMediaBytes.end() && old->second == bytes) continue;
+        if(sent >= 64) { complete = false; continue; }
+        auto wire = pair.second;
+        if(wire.kind == online::MediaKind::Music && (wire.flags & 8)) {
+            cMusicEntry* song = gpBase->mpEngine->GetSound()->GetMusicHandler()->GetCurrentSong();
+            if(song && song->mpStream) wire.values[2] = int32_t(std::max(0.0, std::min(86400.0, song->mpStream->GetElapsedTime())) * 1000);
+        }
+        if(!mSession.SendMedia(wire)) { NetLog("[NET/MEDIA] Cannot send media; closing session"); mSession.Stop(); return false; }
+        mMediaBytes[pair.first] = std::move(bytes); mMediaStates[pair.first] = pair.second; ++sent;
+    }
+    for(auto it = mMediaStates.begin(); it != mMediaStates.end();) {
+        if(current.count(it->first)) { ++it; continue; }
+        if(sent >= 64) { complete = false; ++it; continue; }
+        auto removed = it->second; removed.flags = 128;
+        if(!mSession.SendMedia(removed)) { mSession.Stop(); return false; }
+        mMediaBytes.erase(it->first); it = mMediaStates.erase(it); ++sent;
+    }
+    auto* handler = gpBase->mpEngine->GetSound()->GetSoundHandler();
+    for(int i = 0; i < 2; ++i) {
+        auto* settings = i == 0 ? handler->GetGlobalVolumeSettingsHandler() : handler->GetGlobalSpeedSettingsHandler();
+        online::Presentation event; event.epoch = mEpoch;
+        event.kind = i == 0 ? online::PresentationKind::GlobalVolume : online::PresentationKind::GlobalSpeed;
+        event.values[0] = quantize(settings->GetEntry(eLuxGlobalVolumeType_Script, true)->GetVal());
+        auto bytes = online::EncodePresentation(event);
+        if(bytes != mGlobalAudioBytes[i] && mSession.SendPresentation(event)) mGlobalAudioBytes[i] = std::move(bytes);
+    }
+    return complete;
+}
+void cLuxNetwork::ApplyMedia(cLuxMap* map, const online::MediaState& s) {
+    cWorld* world = map->GetWorld(); const MediaKey key(uint8_t(s.kind), s.id);
+    EnsureMediaIDs(world, mNextMediaID);
+    auto previous = mMediaStates.find(key);
+    if(s.kind == online::MediaKind::Music) {
+        const int priority = int(s.id) - 1;
+        if(priority > gpBase->mpMusicHandler->GetMaxPrio()) { NetLog("[NET/MEDIA] Unsupported music priority"); mSession.Stop(); return; }
+        if(s.flags & 128) gpBase->mpMusicHandler->Stop(s.values[1] / 1000.0f, priority);
+        else {
+            gpBase->mpMusicHandler->Play(s.file, (s.flags & 1) != 0, s.values[0] / 1000.0f,
+                s.values[1] / 1000.0f, priority, (s.flags & 2) != 0, (s.flags & 4) != 0);
+            if(s.flags & 8) {
+                cMusicEntry* song = gpBase->mpEngine->GetSound()->GetMusicHandler()->GetCurrentSong();
+                if(song && song->mpStream && song->msFileName == s.file) {
+                    double position = (s.values[2] + mSession.Ping() * 0.5) / 1000.0;
+                    const double length = song->mpStream->GetTotalTime();
+                    if(length > 0) position = (s.flags & 1) ? std::fmod(position, length) : std::min(position, length);
+                    song->mpStream->SetElapsedTime(position);
+                }
+            }
+        }
+        mMediaStates[key] = s;
+        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA") && s.id == 8) NetLog((s.flags & 128) ? "[NET/TEST] Music stop applied on client" : "[NET/TEST] Music state applied on client");
+        return;
+    }
+    auto mapped = mReplicaMediaIDs.find(key);
+    cSoundEntity* sound = s.kind == online::MediaKind::Sound && mapped != mReplicaMediaIDs.end() ? world->GetSoundEntityFromUniqueID(mapped->second) : NULL;
+    cParticleSystem* ps = s.kind == online::MediaKind::Particle && mapped != mReplicaMediaIDs.end() ? world->GetParticleSystemFromUniqueID(mapped->second) : NULL;
+    if(s.flags & 128) {
+        if(sound) world->DestroySoundEntity(sound);
+        if(ps) world->DestroyParticleSystem(ps);
+        mReplicaMediaIDs.erase(key); mMediaStates.erase(key);
+        if(mSmokeSeconds && s.name.find("online_media_fixture") == 0) NetLog("[NET/TEST] Media removal applied on client kind=" + std::to_string(uint8_t(s.kind)));
+        return;
+    }
+    // A finite emitter/one-shot may finish locally slightly earlier. Retain
+    // its ID until the host removes it instead of replaying it every update.
+    if(mapped != mReplicaMediaIDs.end() && !sound && !ps) return;
+    if(mapped == mReplicaMediaIDs.end()) {
+        auto claimed = [&](int id) { for(const auto& pair : mReplicaMediaIDs) if(pair.first.first == key.first && pair.second == id) return true; return false; };
+        if(s.kind == online::MediaKind::Sound) {
+            auto it = world->GetSoundEntityIterator();
+            while(it.HasNext()) { auto* candidate = it.Next(); if(candidate->GetName() == s.name && MediaAssetName(candidate->GetData()->GetName()) == s.file && !claimed(candidate->GetUniqueID())) { sound = candidate; break; } }
+            if(!sound) sound = world->CreateSoundEntity(s.name, s.file, (s.flags & 4) != 0);
+            if(sound) { if(sound->GetUniqueID() < 0) sound->SetUniqueID(mNextMediaID++); mReplicaMediaIDs[key] = sound->GetUniqueID(); }
+        } else {
+            auto it = world->GetParticleSystemIterator();
+            while(it.HasNext()) { auto* candidate = it.Next(); if(candidate->GetName() == s.name && MediaAssetName(candidate->GetDataName()) == s.file && !claimed(candidate->GetUniqueID())) { ps = candidate; break; } }
+            if(!ps) ps = world->CreateParticleSystem(s.name, s.file, cVector3f(s.values[8] / 1000.0f, s.values[9] / 1000.0f, s.values[10] / 1000.0f), (s.flags & 32) != 0);
+            if(ps) { if(ps->GetUniqueID() < 0) ps->SetUniqueID(mNextMediaID++); mReplicaMediaIDs[key] = ps->GetUniqueID(); }
+        }
+        if(!sound && !ps) { NetLog("[NET/MEDIA] Cannot create media: " + s.name + " file=" + s.file); mSession.Stop(); return; }
+        iEntity3D* object = sound ? static_cast<iEntity3D*>(sound) : static_cast<iEntity3D*>(ps);
+        if(object->GetEntityParent()) object->GetEntityParent()->RemoveChild(object);
+        if(object->GetParent()) object->GetParent()->RemoveEntity(object);
+        if(mSmokeSeconds && s.name.find("online_media_fixture") == 0) NetLog("[NET/TEST] Media created on client kind=" + std::to_string(uint8_t(s.kind)));
+    }
+    if(sound) {
+        sound->SetWorldMatrix(UnpackTransform(s.transform)); sound->SetActive((s.flags & 16) != 0);
+        sound->SetIsSaved((s.flags & 8) != 0); sound->SetForcePlayAsGUISound((s.flags & 2) != 0);
+        sound->SetVolume(s.values[0] / 1000.0f); sound->SetMinDistance(s.values[1] / 1000.0f); sound->SetMaxDistance(s.values[2] / 1000.0f);
+        if(!(s.flags & 1)) { if(!sound->IsStopped()) sound->Stop(false); }
+        else if(previous != mMediaStates.end() && !(previous->second.flags & 1)) sound->Play(false);
+        cSoundEntry* entry = sound->GetSoundEntry(eSoundEntityType_Main, true);
+        if(entry) {
+            entry->SetVolumeMul(s.values[3] / 1000.0f); entry->SetSpeedMul(s.values[6] / 1000.0f);
+            if(s.flags & 64) sound->FadeOut(std::max(0.001f, s.values[5] / 1000.0f));
+            else if(s.values[3] != s.values[4] && s.values[5] > 0) entry->FadeVolumeMulTo(s.values[4] / 1000.0f, s.values[5] / 1000.0f);
+        }
+    }
+    if(ps) {
+        ps->SetWorldMatrix(UnpackTransform(s.transform)); ps->SetActive((s.flags & 1) != 0); ps->SetVisible((s.flags & 2) != 0);
+        ps->SetIsSaved((s.flags & 8) != 0); ps->SetFadeAtDistance((s.flags & 4) != 0); ps->SetRemoveWhenDead((s.flags & 32) != 0);
+        ps->SetColor(cColor(s.values[0] / 1000.0f, s.values[1] / 1000.0f, s.values[2] / 1000.0f, s.values[3] / 1000.0f));
+        ps->SetMinFadeDistanceEnd(s.values[4] / 1000.0f); ps->SetMinFadeDistanceStart(s.values[5] / 1000.0f);
+        ps->SetMaxFadeDistanceStart(s.values[6] / 1000.0f); ps->SetMaxFadeDistanceEnd(s.values[7] / 1000.0f);
+        if((s.flags & 16) && !ps->IsDying()) ps->Kill();
+    }
+    mMediaStates[key] = s;
+    if(mSmokeSeconds && s.name.find("online_media_fixture") == 0) {
+        if(mEpoch >= 2) NetLog("[NET/TEST] Saved media baseline restored on client kind=" + std::to_string(uint8_t(s.kind)));
+        if(s.values[0] == 150) NetLog("[NET/TEST] Media property delta applied on client kind=" + std::to_string(uint8_t(s.kind)));
+    }
+}
+void cLuxNetwork::UpdateMediaTest(cLuxMap* map, float elapsed) {
+    cWorld* world = map->GetWorld();
+    if(!mTestMediaSpawned && mBaselineSent && elapsed > 3) {
+        auto* sound = world->CreateSoundEntity("online_media_fixture_sound", "ambience_wind_eerie.snt", false);
+        auto* ps = world->CreateParticleSystem("online_media_fixture_particle", "ps_dust_falling.ps", cVector3f(1), false);
+        if(!sound || !ps) { NetLog("[NET/TEST] Media fixture creation FAILED"); mSession.Stop(); return; }
+        const cVector3f position = gpBase->mpPlayer2->GetCamera()->GetPosition() + cVector3f(0, 1, 0);
+        sound->SetPosition(position); sound->SetIsSaved(true); sound->SetVolume(0.35f);
+        ps->SetPosition(position); ps->SetIsSaved(true); ps->SetColor(cColor(0.8f, 0.5f, 0.7f, 1));
+        gpBase->mpMusicHandler->Play("00_event_hallway.ogg", true, 0.2f, 0.25f, 7, true, false);
+        gpBase->mpInventory->AddItem("online_lantern_fixture", eLuxItemType_Lantern, "Lantern", "lantern.tga", 0, "", "");
+        gpBase->mpPlayer->SetLampOil(60); gpBase->mpPlayer2->SetLampOil(40);
+        gpBase->mpPlayer->GetHelperLantern()->SetActive(true, false);
+        mTestMediaSpawned = true; NetLog("[NET/TEST] Saved sound/particle and music fixtures created on host");
+    }
+    if(mTestMediaSpawned && !mTestMediaRestoreLogged && mEpoch >= 2) {
+        if(world->GetSoundEntity("online_media_fixture_sound") && world->GetParticleSystem("online_media_fixture_particle")) {
+            mTestMediaRestoreLogged = true; NetLog("[NET/TEST] Host save/load retained sound and particle");
+        }
+    }
+    if(mTestMediaSpawned && !mTestLanternLocalLogged && gpBase->mpPlayer2->GetHelperLantern()->IsActive() &&
+        gpBase->mpPlayer->GetHelperLantern()->IsActive() && gpBase->mpPlayer->GetLampOil() - gpBase->mpPlayer2->GetLampOil() > 10) {
+        mTestLanternLocalLogged = true; NetLog("[NET/TEST] Host validated remote lantern with independent oil");
+    }
+    if(mTestMediaSpawned && !mTestMediaChanged && elapsed > 12) {
+        auto* sound = world->GetSoundEntity("online_media_fixture_sound"); auto* ps = world->GetParticleSystem("online_media_fixture_particle");
+        if(!sound || !ps) { NetLog("[NET/TEST] Saved media missing after load FAILED"); mSession.Stop(); return; }
+        sound->SetVolume(0.15f); ps->SetColor(cColor(0.15f, 0.8f, 0.3f, 1)); ps->SetPosition(ps->GetWorldPosition() + cVector3f(0.5f, 0, 0));
+        gpBase->mpEffectHandler->GetScreenShake()->Start(0.05f, 0.5f, 0.1f, 0.1f, 1);
+        map->RunScript("PlayGuiSound(\"ui_use_health\", 0.2f); FadeGlobalSoundVolume(0.8f, 0.25f); FadeGlobalSoundSpeed(1.1f, 0.25f);");
+        gpBase->mpPlayer->GetHelperLantern()->SetActive(false, false);
+        mTestMediaChanged = true; NetLog("[NET/TEST] Media properties changed on host");
+    }
+    if(mTestMediaChanged && !mTestMediaRemoved && elapsed > 16) {
+        auto* sound = world->GetSoundEntity("online_media_fixture_sound"); auto* ps = world->GetParticleSystem("online_media_fixture_particle");
+        if(sound) world->DestroySoundEntity(sound); if(ps) world->DestroyParticleSystem(ps);
+        gpBase->mpMusicHandler->Stop(0.5f, 7);
+        map->RunScript("FadeGlobalSoundVolume(1.0f, 0.25f); FadeGlobalSoundSpeed(1.0f, 0.25f);");
+        mTestMediaRemoved = true; NetLog("[NET/TEST] Media fixtures removed on host");
+    }
+}
 void cLuxNetwork::ReplicateLights(cLuxMap* map) {
     cWorld* world = map->GetWorld();
     online::Presentation fog[2];
@@ -956,6 +1251,40 @@ void cLuxNetwork::ReplicateLights(cLuxMap* map) {
 }
 void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& event) {
     switch(event.kind) {
+    case online::PresentationKind::GuiSound:
+        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) NetLog("[NET/TEST] GUI sound event applied on client");
+        if(cString::GetFileExt(event.text[0]).empty() || cString::GetFileExt(event.text[0]) == "snt")
+            gpBase->mpHelpFuncs->PlayGuiSoundData(event.text[0], eSoundEntryType_Gui, event.values[0] / 1000.0f);
+        else gpBase->mpEngine->GetSound()->GetSoundHandler()->PlayGui(event.text[0], false, event.values[0] / 1000.0f);
+        break;
+    case online::PresentationKind::SoundFade: {
+        auto it = map->GetWorld()->GetSoundEntityIterator();
+        while(it.HasNext()) {
+            auto* sound = it.Next(); if(sound->GetName() != event.text[0]) continue;
+            const float time = event.values[0] / 1000.0f;
+            if(event.values[1]) { if(time > 0) sound->FadeIn(1.0f / time); else sound->Play(event.values[2] != 0); }
+            else { if(time > 0) sound->FadeOut(1.0f / time); else sound->Stop(true); }
+        }
+        break;
+    }
+    case online::PresentationKind::GlobalVolume:
+    case online::PresentationKind::GlobalSpeed: {
+        auto* handler = gpBase->mpEngine->GetSound()->GetSoundHandler();
+        auto* settings = event.kind == online::PresentationKind::GlobalVolume ? handler->GetGlobalVolumeSettingsHandler() : handler->GetGlobalSpeedSettingsHandler();
+        const float goal = event.values[0] / 1000.0f, time = event.values[1] / 1000.0f;
+        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA") && event.values[1] > 0)
+            NetLog(event.kind == online::PresentationKind::GlobalVolume ? "[NET/TEST] Global sound volume fade applied on client" : "[NET/TEST] Global sound speed fade applied on client");
+        const float speed = time > 0 ? std::fabs(goal - settings->GetEntry(eLuxGlobalVolumeType_Script, true)->GetVal()) / time : 1000;
+        if(event.kind == online::PresentationKind::GlobalVolume) handler->FadeGlobalVolume(goal, speed, eSoundEntryType_World, eLuxGlobalVolumeType_Script, goal == 1);
+        else handler->FadeGlobalSpeed(goal, speed, eSoundEntryType_World, eLuxGlobalVolumeType_Script, goal == 1);
+        break;
+    }
+    case online::PresentationKind::Emotion:
+        gpBase->mpEffectHandler->GetEmotionFlash()->Start(event.text[0], event.text[1], event.text[2]); break;
+    case online::PresentationKind::Shake:
+        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) NetLog("[NET/TEST] Screen shake applied on client");
+        gpBase->mpEffectHandler->GetScreenShake()->Start(event.values[0] / 1000.0f, event.values[1] / 1000.0f,
+            event.values[2] / 1000.0f, event.values[3] / 1000.0f, 0); break;
     case online::PresentationKind::Hint:
         gpBase->mpHintHandler->Add(event.text[0], cString::UTF8ToWChar(event.text[1]), event.values[0] / 1000.0f);
         if(mSmokeSeconds) NetLog("[NET/TEST] Host hint applied on client: " + event.text[0]);

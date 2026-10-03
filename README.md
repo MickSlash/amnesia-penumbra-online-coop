@@ -6,9 +6,12 @@ Branch `feature/online-coop`: two players, one authoritative host, fullscreen
 client, replicated players/world, validated interactions, shared inventory,
 map transitions, host saves and shared death/checkpoints. New story messages,
 voices and documents have presentation hooks; existing lights replicate state.
+World sounds, music and particles now replicate their lifecycle and properties.
 **The complete original campaign is not yet validated.** See the
 [implementation status and remaining gaps](docs/network_architecture.md). The historical [QA report](docs/qa_2026-10-02.md) records intermittent death-state delivery and differences in cutscene, fog and HUD presentation. The [current fixes and regression report](docs/qa_fixes_2026-10-03.md) documents reliable life events, canonical interaction input, camera effects, fog and hints.
 The [Rainy Hall traversal report](docs/qa_2026-10-03.md) records reaching Old Archives through the original exit using normal movement and client interactions on two local processes.
+See the [audio, particles and lantern QA report](docs/qa_audio_2026-10-03.md) and
+the [Italian installation and LAN/VPN guide](docs/online_installazione_it.md).
 
 ### Build Windows x64
 
@@ -52,13 +55,20 @@ to be reachable; no relay, NAT traversal or lobby is included.
 
 Developer console commands remain `net_host`, `net_join`, `net_status`, `net_ping`
 and `net_disconnect`. Startup accepts `AMNESIA_NET_ROLE`, `AMNESIA_NET_PORT` and
-`AMNESIA_NET_ADDRESS`. Protocol version 3 rejects incompatible builds; update both peers together.
+`AMNESIA_NET_ADDRESS`. Protocol version 4 rejects incompatible builds; update both peers together.
+
+After building, `./tools/PackageOnlineCoop.ps1` creates a local portable ZIP with
+the executable, installed x64 OpenAL runtime, launcher, Italian instructions,
+hash manifest and corresponding tracked source. It contains no game assets.
+Hamachi/Radmin clients use the host's virtual IPv4 in `-Address`; actual sessions
+through these VPNs on two PCs remain untested.
 
 ### Verification
 
 ```powershell
 ./tests/network/RunTransportTests.ps1
 ./tests/network/RunGameSmoke.ps1 -GameDirectory 'F:\SteamLibrary\steamapps\common\Amnesia The Dark Descent' -Campaign
+./tests/network/RunGameSmoke.ps1 -GameDirectory 'F:\SteamLibrary\steamapps\common\Amnesia The Dark Descent' -Media
 ./tests/network/RunLevelPlaythrough.ps1 -GameDirectory 'F:\SteamLibrary\steamapps\common\Amnesia The Dark Descent'
 ./tests/network/RunImpairedNetworkTest.ps1 -GameDirectory 'F:\SteamLibrary\steamapps\common\Amnesia The Dark Descent'
 ```
@@ -67,6 +77,8 @@ The campaign test launches two hidden game processes using separate test profile
 It checks authoritative movement, client camera, entity baseline, pickup,
 inventory use, lighting/message relay, save/load, level change and death/respawn.
 It uses Entrance Hall and Old Archives rather than traversing the full campaign.
+`-Media` also tests saved sound/particle creation, changes and removal, music,
+GUI audio, global sound volume/speed fades, camera shake and both independent lanterns.
 The smoke timer and test fixtures are enabled only by developer test variables.
 The level driver follows Rainy Hall's original corridors, grabs the first door,
 and requests the original exit from the client. It retains physics and campaign
@@ -458,7 +470,10 @@ assets are not included and are not covered by this licence. Binaries are availa
 
 ---
 
-## FAQ
+## FAQ (original local split-screen build)
+
+These answers describe the original local mode. For this branch's networked
+two-PC mode, use the online instructions at the top and the Italian guide above.
 
 **1. Is this networked? Do we both need the game?**
 

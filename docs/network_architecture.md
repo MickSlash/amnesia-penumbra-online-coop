@@ -66,7 +66,7 @@ abbia già una replica. Una disconnessione client elimina il mondo replica e tor
 al menu; una disconnessione host libera P2. Non è implementata la ripresa della
 sessione o la migrazione dell'host.
 
-## Protocollo versione 3
+## Protocollo versione 4
 
 ENet 1.3.18 incluso da sorgenti, licenza MIT conservata; mod GPLv3. Header AO,
 versione uint16 big-endian e tipo uint8; interi espliciti, nessuna struttura C++
@@ -76,7 +76,7 @@ trasmessa in memoria. Tre canali:
 | --- | --- | --- |
 | 0 | Affidabile e ordinato | Hello/Welcome, Map/MapReady, Action |
 | 1 | Ordinato, non affidabile | PlayerInput a 30 Hz (30 byte), Snapshot a 20 Hz (95 byte) |
-| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (95 byte) |
+| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (95 byte), Media (115–627 byte) |
 
 Ogni stato gameplay include un'epoch di mappa. Sequenze obsolete o duplicate
 sono ignorate con aritmetica che supporta il wraparound. MapReady abilita snapshot
@@ -84,7 +84,28 @@ e intenti; WorldReady e applicazione della baseline abilitano l'input client.
 Entità iniziali assenti dal roster host vengono rimosse dal client.
 Un'entità del roster che non può essere applicata chiude la replica, senza
 dichiarare completata una baseline incompleta. Life ha al massimo 64 elementi;
-overflow, cambio mappa e disconnessione eliminano la coda.
+overflow, cambio mappa e disconnessione eliminano la coda. La baseline attende
+anche l'applicazione della coda Media (massimo 1024 messaggi). Il roster Media
+host è limitato a 2048 elementi e invia al massimo 64 cambiamenti per tick.
+I vecchi percorsi assoluti di authoring degli asset originali già caricati da HPL
+sono convertiti nel nome logico locale usato dal fallback del motore; i pacchetti
+continuano a rifiutare percorsi assoluti e traversal.
+
+Media distingue SoundEntity, ParticleSystem e priorità musicali. Un ID distinto
+dal nome evita collisioni tra effetti omonimi; gli oggetti runtime ricevono un
+UniqueID conservato dal salvataggio HPL. Il client applica creazione, posizione,
+proprietà e rimozione. I media originali della mappa assenti dal roster host sono
+rimossi dopo la baseline. La musica riceve priorità, loop, volume, fade e posizione
+temporale solo ai cambiamenti di stato, senza seek a ogni tick. Il client non
+decide autonomamente la musica di pericolo/inseguimento.
+
+Presentation include anche suoni GUI degli script, fade dei SoundEntity,
+volume/velocità globale degli script, EmotionFlash e ScreenShake. Volume e
+velocità globali vengono inoltre trasferiti nello stato iniziale. Si mantengono
+le impostazioni audio personali del client. La velocità del fade HPL, che può
+essere negativa, viene trasmessa in valore assoluto: la destinazione ne determina
+il verso. Audio e particelle usano asset locali; fase esatta delle varianti SNT,
+seme casuale ed età interna degli emettitori non sono sincronizzati.
 
 PlayerInput contiene anche delta yaw/pitch del mouse e il tasto Rotate. Il client
 accumula i delta fra i tick di invio; l'host li consuma una volta per sequenza
@@ -127,7 +148,7 @@ Prima di dichiarare un MVP dell'intera campagna servono:
 1. Partita completa su due PC, con audit dei trigger, puzzle, inseguimenti,
    teletrasporti, cutscene e finali. Verifica separata della modalità Hard.
 2. Copertura degli effetti script ancora mancanti: effetti speciali,
-   suoni non vocali, particelle, trasformazioni/creazione di luci e tipi di entità
+   suoni diretti fuori dagli hook coperti, trasformazioni/creazione di luci e tipi di entità
    non compresi nel roster attuale (per esempio rope/commentary).
 3. Stato iniziale di journal/storia per join dopo un salvataggio o una raccolta:
    gli eventi nuovi sono replicati, la cronologia precedente non è trasferita.
@@ -139,3 +160,20 @@ Prima di dichiarare un MVP dell'intera campagna servono:
 
 Non commettere binari né dati proprietari. Build e configurazioni generate sono
 ignorate da Git; i salvataggi del launcher usano cartelle dedicate per ruolo.
+
+`RunGameSmoke.ps1 -Media` estende la regressione della campagna con suono ed
+emettitore persistenti, ricaricamento, modifica e rimozione, musica e presentazione
+audio/effetti. Richiede sia il timer smoke sia `AMNESIA_NET_TEST_MEDIA`; il launcher
+normale elimina entrambe le variabili. La prova enemy include un probe temporaneo
+con corpi Newton: controlla entrambi visibili, uno nascosto alla volta con cambio
+bersaglio, entrambi nascosti. Il probe allarga range/FOV e poi ripristina lo stato;
+non è una prova di fuga completa, sensibilità al rumore o tutti gli incontri.
+
+L'host salva la campagna e lo stato P2. Inventario condiviso, olio e attivazione
+lanterna individuali; il client ricostruisce le due luci con ownership invertita.
+La luce e la posa dell'avatar remoto sono visibili, senza una lanterna dettagliata
+in terza persona. La selezione bersaglio del nemico valuta entrambi ogni 0,75 s;
+un nemico sceglie un bersaglio alla volta e mantiene l'ultima posizione conosciuta
+durante la caccia. Gli attacchi di shape possono danneggiare entrambi i corpi se
+sono nell'area del colpo. Oscurità, immobilità, accovacciamento e lanterna
+modificano il raggio di rilevamento separatamente per ciascun giocatore.

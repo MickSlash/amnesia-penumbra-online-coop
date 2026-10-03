@@ -23,6 +23,8 @@
 #include "LuxMapHandler.h"
 #include "LuxPlayer.h"
 #include "LuxEnemy.h"
+#include "LuxNetwork.h"
+#include <algorithm>
 
 
 //////////////////////////////////////////////////////////////////////////
@@ -117,12 +119,14 @@ void cLuxMusicHandler::Update(float afTimeStep)
 
 	///////////////////////////////////
 	//Check if close by music should be played.
-	UpdateDangerMusic(afTimeStep);	
+	if(!gpBase->mpNetwork || !gpBase->mpNetwork->IsClientReplica()) UpdateDangerMusic(afTimeStep);
 
 	///////////////////////////////////
 	//Check if attack music should be played.
-	UpdateEnemyMusic(afTimeStep, eLuxEnemyMusic_Search);
-	UpdateEnemyMusic(afTimeStep, eLuxEnemyMusic_Attack);
+    if(!gpBase->mpNetwork || !gpBase->mpNetwork->IsClientReplica()) {
+        UpdateEnemyMusic(afTimeStep, eLuxEnemyMusic_Search);
+        UpdateEnemyMusic(afTimeStep, eLuxEnemyMusic_Attack);
+    }
 	
 	///////////////////////////////////
 	//Check if current song is over
@@ -142,6 +146,7 @@ void cLuxMusicHandler::Update(float afTimeStep)
 
 void cLuxMusicHandler::Play(const tString &asFile, bool abLoop,float afVolume, float afFadeTime, int alPrio, bool abResume, bool abSpecialEffect)
 {
+	if(alPrio < 0) return;
 	if(alPrio> mlMaxPrio) alPrio = mlMaxPrio;
 
 	if(mvGameMusic[alPrio].msFile == asFile) return;
@@ -151,7 +156,7 @@ void cLuxMusicHandler::Play(const tString &asFile, bool abLoop,float afVolume, f
 	//If higher or equal to song playing, start playing
 	if(mlCurrentMaxPrio <= alPrio)
 	{
-		float fFadeSpeed = fVolume / afFadeTime;
+		float fFadeSpeed = fVolume / std::max(0.001f, afFadeTime);
 		mpMusicHandler->Play(asFile,fVolume,fFadeSpeed,abLoop, abResume);
 		mlCurrentMaxPrio = alPrio;
 	}
@@ -162,12 +167,14 @@ void cLuxMusicHandler::Play(const tString &asFile, bool abLoop,float afVolume, f
 	mvGameMusic[alPrio].mbResume = abResume;
 	mvGameMusic[alPrio].mfVolume = fVolume;
 	mvGameMusic[alPrio].msFile = asFile;
+    if(gpBase->mpNetwork) gpBase->mpNetwork->MusicChanged(alPrio, afFadeTime);
 }
 
 //-----------------------------------------------------------------------
 
 void cLuxMusicHandler::Stop(float afFadeTime, int alPrio)
 {
+	if(alPrio < 0) return;
 	if(alPrio> mlMaxPrio) alPrio = mlMaxPrio;
 
 	//Check if there is any song playing at this prio
@@ -178,13 +185,14 @@ void cLuxMusicHandler::Stop(float afFadeTime, int alPrio)
 		//Check the current song playing is this
 		if(alPrio == mlCurrentMaxPrio)
 		{
-			float fFadeSpeed = mvGameMusic[alPrio].mfVolume / afFadeTime;
+			float fFadeSpeed = mvGameMusic[alPrio].mfVolume / std::max(0.001f, afFadeTime);
 			mpMusicHandler->Stop(fFadeSpeed);
 
 			//Play next song in priority if there is any.
 			mlCurrentMaxPrio = -1;
 			PlayHighestPriority();
 		}
+        if(gpBase->mpNetwork) gpBase->mpNetwork->MusicChanged(alPrio, afFadeTime);
 	}
 }
 
