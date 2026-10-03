@@ -19,6 +19,7 @@
 
 #include "LuxBase.h"
 #include "LuxNetwork.h"
+#include "LuxSteam.inl"
 
 #include "LuxInputHandler.h"
 
@@ -426,6 +427,7 @@ cLuxBase::cLuxBase()
 cLuxBase::~cLuxBase()
 {
 	ExitEngine();
+	luxsteam::Shutdown();
 
 	if(mpCustomStory)
 		hplDelete(mpCustomStory);
@@ -458,6 +460,8 @@ bool cLuxBase::Init(const tString &asCommandline)
 	
 	/////////////////////////////
 	// Init the engine
+	std::string steamError;
+	if(!luxsteam::Initialize(steamError)) { msErrorMessage = cString::To16Char(steamError); return false; }
 	if(InitEngine()==false) return false;
 
 	/////////////////////////////

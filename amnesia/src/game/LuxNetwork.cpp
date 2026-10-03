@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "LuxNetwork.h"
+#include "LuxSteam.h"
 #include "LuxPlayer.h"
 #include "LuxMapHandler.h"
 #include "LuxMap.h"
@@ -165,6 +166,7 @@ void cLuxNetwork::OnStart() {
         gpBase->mpEngine->SetWaitIfAppOutOfFocus(false);
 }
 void cLuxNetwork::Update(float timeStep) {
+    luxsteam::Update();
     gpBase->mpEngine->SetWaitIfAppOutOfFocus(
         mSession.GetRole() == online::Role::Offline && !mSmokeSeconds ? mOriginalFocusWait : false);
     mSession.Poll();

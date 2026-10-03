@@ -34,6 +34,7 @@ $manifest = [ordered]@{
     sourceRepository = 'https://github.com/TheBorn/Amnesia-The-Dark-Descent---Local-Co-op-Mod'
     builtExecutableSha256 = (Get-FileHash -LiteralPath "$destination/bin/Lux.exe" -Algorithm SHA256).Hash
     launcherSha256 = (Get-FileHash -LiteralPath "$destination/AmnesiaCoop.exe" -Algorithm SHA256).Hash
+    steamIntegration = 'Optional App ID 57300 presence; original installed steam_api64.dll and active Steam license required; no Steam runtime redistributed.'
     openALSha256 = (Get-FileHash -LiteralPath "$destination/bin/OpenAL32.dll" -Algorithm SHA256).Hash
     openALBackendSha256 = $(if (Test-Path -LiteralPath "$destination/bin/wrap_oal.dll") { (Get-FileHash -LiteralPath "$destination/bin/wrap_oal.dll" -Algorithm SHA256).Hash } else { $null })
     scope = 'Experimental Windows x64; no game assets; see LEGGIMI.md for tested scope and installation.'

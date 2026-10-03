@@ -11,6 +11,7 @@ using Microsoft.Win32;
 public sealed class CoopLauncher : Form {
     readonly TextBox folder = new TextBox();
     readonly CheckBox fullscreen = new CheckBox();
+    readonly CheckBox steamPresence = new CheckBox();
     readonly string state = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AmnesiaOnlineCoop");
     readonly string saveFolder = "AmnesiaOnlineCoop_Host";
     public CoopLauncher(string testProfile = null) {
@@ -26,15 +27,23 @@ public sealed class CoopLauncher : Form {
         var browse = new Button { Text = "Scegli cartella", Location = new Point(510,55), Size = new Size(130,32) };
         browse.Click += delegate { using(var dialog = new FolderBrowserDialog()) { dialog.Description = "Cartella contenente config, maps ed entities"; if(dialog.ShowDialog(this) == DialogResult.OK) folder.Text = dialog.SelectedPath; } }; Controls.Add(browse);
         fullscreen.Text = "Schermo intero"; fullscreen.AutoSize = true; fullscreen.Location = new Point(20,99); Controls.Add(fullscreen);
+        steamPresence.Text = "Mostra Amnesia su Steam"; steamPresence.AutoSize = true; steamPresence.Location = new Point(200,99); Controls.Add(steamPresence);
+        folder.TextChanged += delegate { steamPresence.Checked = SteamInstallation(folder.Text); };
         Controls.Add(new Label { Text = "Nel gioco: Co-op online > Ospita / Connetti > entrambi Pronto.\r\nL'host sceglie Nuova campagna o Continua salvataggio.", Location = new Point(20,130), Size = new Size(620,50) });
         var launch = new Button { Text = "Avvia Amnesia co-op", Location = new Point(390,185), Size = new Size(250,32) };
-        launch.Click += delegate { try { Launch(folder.Text, fullscreen.Checked); Close(); } catch(Exception error) { MessageBox.Show(this, error.Message, "Avvio non riuscito", MessageBoxButtons.OK, MessageBoxIcon.Error); } }; Controls.Add(launch); AcceptButton = launch;
+        launch.Click += delegate { try { Launch(folder.Text, fullscreen.Checked, steamPresence.Checked); Close(); } catch(Exception error) { MessageBox.Show(this, error.Message, "Avvio non riuscito", MessageBoxButtons.OK, MessageBoxIcon.Error); } }; Controls.Add(launch); AcceptButton = launch;
         var saved = Path.Combine(state,"game-folder.txt");
         if(File.Exists(saved)) folder.Text = File.ReadAllText(saved).Trim();
         if(!Valid(folder.Text)) folder.Text = Discover();
     }
     public static bool Valid(string path) {
         return !String.IsNullOrEmpty(path) && File.Exists(Path.Combine(path,"config","main_init.cfg")) && File.Exists(Path.Combine(path,"resources.cfg")) && Directory.Exists(Path.Combine(path,"maps")) && Directory.Exists(Path.Combine(path,"entities"));
+    }
+    public static bool SteamInstallation(string path) {
+        if(!Valid(path)) return false;
+        try { return File.Exists(Path.Combine(path,"steam_api64.dll")) && File.ReadAllText(Path.Combine(path,"steam_appid.txt")).Trim() == "57300"; }
+        catch(IOException) { return false; }
+        catch(UnauthorizedAccessException) { return false; }
     }
     static string Discover() {
         var steam = Convert.ToString(Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", ""));
@@ -52,9 +61,16 @@ public sealed class CoopLauncher : Form {
         }
         return "";
     }
-    public void Launch(string path, bool full) {
+    public void Launch(string path, bool full, bool steam) {
         if(!Valid(path)) throw new IOException("Questa cartella non contiene i dati di Amnesia. Scegli la cartella del gioco originale.");
         path = Path.GetFullPath(path);
+        if(steam) {
+            if(!SteamInstallation(path)) throw new IOException("Questa cartella non contiene il runtime Steam x64 originale di Amnesia. Verifica i file del gioco su Steam oppure disattiva Mostra Amnesia su Steam.");
+            var clients = Process.GetProcessesByName("steam");
+            bool running = clients.Length > 0;
+            foreach(var client in clients) client.Dispose();
+            if(!running) throw new IOException("Apri Steam con l'account che possiede Amnesia, poi riprova. In alternativa disattiva Mostra Amnesia su Steam.");
+        }
         string root = AppDomain.CurrentDomain.BaseDirectory;
         string executable = Path.Combine(root,"bin","Lux.exe");
         if(!File.Exists(executable)) executable = Path.GetFullPath(Path.Combine(root,"..","amnesia","src","game","x64","Release","Lux.exe"));
@@ -71,6 +87,14 @@ public sealed class CoopLauncher : Form {
         var keys = new System.Collections.Generic.List<string>();
         foreach(string key in start.EnvironmentVariables.Keys) if(key.StartsWith("AMNESIA_NET_",StringComparison.OrdinalIgnoreCase)) keys.Add(key);
         foreach(string key in keys) start.EnvironmentVariables.Remove(key);
+        start.EnvironmentVariables.Remove("AMNESIA_STEAM_PRESENCE");
+        start.EnvironmentVariables.Remove("SteamAppId");
+        start.EnvironmentVariables.Remove("SteamGameId");
+        if(steam) {
+            start.EnvironmentVariables["AMNESIA_STEAM_PRESENCE"] = "1";
+            start.EnvironmentVariables["SteamAppId"] = "57300";
+            start.EnvironmentVariables["SteamGameId"] = "57300";
+        }
         Process.Start(start);
     }
     [STAThread] public static void Main(string[] args) { Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false); Application.Run(new CoopLauncher(args.Length == 2 && args[0] == "--test-profile" ? args[1] : null)); }

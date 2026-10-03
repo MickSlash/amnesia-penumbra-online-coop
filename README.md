@@ -19,6 +19,13 @@ See the [Italian installation and LAN/VPN guide](docs/online_installazione_it.md
 LAN/Hamachi/Radmin require reachable IPv4/UDP; actual two-PC VPN play is untested.
 Both peers need the same build and game data. No game assets are distributed.
 
+For the original Steam edition, keep Steam open and select **Mostra Amnesia su
+Steam** in the launcher. Lux loads the installed original x64 runtime, validates
+App ID 57300 and the active license, and registers the official game as running.
+No Steam DLL is distributed. Uncheck the option for non-Steam installations.
+This does not add achievements, Cloud saves, Steam invites or matchmaking.
+See the [Steam integration QA report](docs/qa_steam_2026-10-03.md).
+
 ### Recovery and remaining limits
 
 Disconnects pause the campaign while the client retries. After a prolonged host

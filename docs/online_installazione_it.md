@@ -5,7 +5,7 @@ Build sperimentale Windows x64, protocollo 5, due giocatori. Entrambi devono pos
 ## Avvio senza PowerShell
 
 1. Estrarre **tutto lo ZIP** in una cartella propria. Conservare `AmnesiaCoop.exe`, `bin` e gli altri file insieme.
-2. Fare doppio clic su **AmnesiaCoop.exe**. Scegliere, se necessario, la cartella dell'installazione originale contenente `config`, `maps` ed `entities`. Premere **Avvia Amnesia co-op**. Il launcher ricorda il percorso.
+2. Fare doppio clic su **AmnesiaCoop.exe**. Scegliere, se necessario, la cartella dell'installazione originale contenente `config`, `maps` ed `entities`. Con la copia Steam, aprire Steam con l'account che possiede il gioco e lasciare selezionato **Mostra Amnesia su Steam**. Premere **Avvia Amnesia co-op**. Il launcher ricorda il percorso.
 3. Nel gioco scegliere **Co-op online**. L'host preme **Ospita**; l'altro inserisce l'IPv4 dell'host e preme **Connetti**. Porta predefinita: **27020 UDP**.
 4. Entrambi premono **Pronto**. L'host sceglie **Nuova campagna** oppure **Continua salvataggio**. Il client carica automaticamente il livello.
 
@@ -14,6 +14,14 @@ Tra PC diversi usare l'IPv4 LAN o del tunnel VPN; `127.0.0.1` serve solo per due
 Non occorrono PowerShell né Visual Studio per giocare. Lo script in `tools` rimane un'alternativa per sviluppo. Il launcher non sostituisce l'eseguibile Steam e non modifica i dati del gioco: scrive configurazioni separate in AppData. `manifest.json` contiene gli hash; `source.zip` i sorgenti e le licenze. Il pacchetto contiene OpenAL x64 e il relativo backend quando presente.
 
 Se manca `MSVCP140.dll`, `VCRUNTIME140.dll` o `VCRUNTIME140_1.dll`, installare il [Microsoft Visual C++ Redistributable x64](https://aka.ms/vc14/vc_redist.x64.exe). Serve un driver grafico compatibile con OpenGL.
+
+## Riconoscimento su Steam
+
+**Mostra Amnesia su Steam** viene selezionato automaticamente quando il launcher trova `steam_api64.dll` e il marcatore App ID 57300 nella cartella originale. La mod carica quella DLL a runtime, verifica l'App ID e la licenza attiva dell'account, ed esegue i callback Steam durante il gioco. Steam mostra **Amnesia: The Dark Descent — In esecuzione**. Avviare sempre dal nuovo `AmnesiaCoop.exe`: il pulsante Gioca della libreria Steam continua ad avviare il gioco originale.
+
+Steam deve essere aperto e la mod deve avere gli stessi privilegi Windows del client Steam: normalmente avviare entrambi senza **Esegui come amministratore**. Se il runtime manca, verificare i file di Amnesia dalla libreria Steam. L'avvio segnala un errore se l'integrazione richiesta non può essere inizializzata; non passa silenziosamente a una presenza diversa.
+
+Per giocare senza Steam, con un'altra distribuzione legittima o offline senza il client, deselezionare la casella. La rete co-op resta su IP/UDP. Questa integrazione registra l'attività di gioco: non aggiunge achievement, sincronizzazione dei salvataggi Steam Cloud, inviti Steam o matchmaking. È comparsa la notifica dell'overlay nel test locale; l'apertura con Shift+Tab non è stata confermata dall'automazione. I salvataggi co-op restano nel profilo separato descritto sotto. Nessuna DLL Steam viene inclusa nello ZIP. Dettagli delle prove in `docs/qa_steam_2026-10-03.md` dentro `source.zip`.
 
 ## LAN, Hamachi e Radmin VPN
 
