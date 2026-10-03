@@ -165,6 +165,8 @@ public:
 
 	void Move(eCharDir aDir, float afMul);
 	void AddYaw(float afAmount);
+    void ApplyNetworkLookAngles(float yaw, float pitch, float rawYaw, float rawPitch);
+    bool NetworkObjectControlsLook() const;
 	void AddPitch(float afAmount);
 	void SetLean(float afMul);
 	void AddLean(float afAdd);

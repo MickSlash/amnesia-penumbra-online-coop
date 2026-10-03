@@ -7,7 +7,7 @@ client, replicated players/world, validated interactions, shared inventory,
 map transitions, host saves and shared death/checkpoints. New story messages,
 voices and documents have presentation hooks; existing lights replicate state.
 **The complete original campaign is not yet validated.** See the
-[implementation status and remaining gaps](docs/network_architecture.md). The extended [QA report](docs/qa_2026-10-02.md) records intermittent death-state delivery and differences in cutscene, fog and HUD presentation.
+[implementation status and remaining gaps](docs/network_architecture.md). The historical [QA report](docs/qa_2026-10-02.md) records intermittent death-state delivery and differences in cutscene, fog and HUD presentation. The [current fixes and regression report](docs/qa_fixes_2026-10-03.md) documents reliable life events, canonical interaction input, camera effects, fog and hints.
 The [Rainy Hall traversal report](docs/qa_2026-10-03.md) records reaching Old Archives through the original exit using normal movement and client interactions on two local processes.
 
 ### Build Windows x64
@@ -52,7 +52,7 @@ to be reachable; no relay, NAT traversal or lobby is included.
 
 Developer console commands remain `net_host`, `net_join`, `net_status`, `net_ping`
 and `net_disconnect`. Startup accepts `AMNESIA_NET_ROLE`, `AMNESIA_NET_PORT` and
-`AMNESIA_NET_ADDRESS`. Protocol version 2 rejects incompatible builds.
+`AMNESIA_NET_ADDRESS`. Protocol version 3 rejects incompatible builds; update both peers together.
 
 ### Verification
 
@@ -60,6 +60,7 @@ and `net_disconnect`. Startup accepts `AMNESIA_NET_ROLE`, `AMNESIA_NET_PORT` and
 ./tests/network/RunTransportTests.ps1
 ./tests/network/RunGameSmoke.ps1 -GameDirectory 'F:\SteamLibrary\steamapps\common\Amnesia The Dark Descent' -Campaign
 ./tests/network/RunLevelPlaythrough.ps1 -GameDirectory 'F:\SteamLibrary\steamapps\common\Amnesia The Dark Descent'
+./tests/network/RunImpairedNetworkTest.ps1 -GameDirectory 'F:\SteamLibrary\steamapps\common\Amnesia The Dark Descent'
 ```
 
 The campaign test launches two hidden game processes using separate test profiles.
@@ -74,7 +75,7 @@ scripts, including the original introduction. Its input commands expire within
 `AMNESIA_NET_TEST_DRIVE_FILE`; the normal launcher clears these settings.
 
 Remaining work includes a complete two-PC campaign playthrough, unsupported script
-effects/entities, journal history for joining saved games, and WAN latency/loss
+effects/entities, journal history for joining saved games, and real WAN latency/loss
 validation. Voices/documents need manual presentation verification. Movement has
 no client prediction; body replication may stutter on Internet connections.
 Reconnect and host migration are not implemented. This is an experimental build.

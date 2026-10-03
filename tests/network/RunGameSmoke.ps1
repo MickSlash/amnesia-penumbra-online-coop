@@ -100,8 +100,10 @@ try {
             if ($Campaign) {
                 if (!$log.Contains('epoch=3') -or !$log.Contains('01_old_archives.map')) { throw "$role failed campaign map/save synchronization" }
                 if ($role -eq 'host' -and !$log.Contains('Host save/load retained remote player state')) { throw 'Host save/load failed' }
-                $deathMarker = if ($role -eq 'host') { 'Both players revived at host checkpoint' } else { 'Authoritative checkpoint revival applied on client' }
-                if (!$log.Contains($deathMarker)) { throw "$role failed shared death/revival" }
+                $deathMarker = if ($role -eq 'host') { 'Triggered authoritative shared death' } else { 'Authoritative death applied on client' }
+                $revivalMarker = if ($role -eq 'host') { 'Both players revived at host checkpoint' } else { 'Authoritative checkpoint revival applied on client' }
+                $deathIndex=$log.IndexOf($deathMarker); $revivalIndex=$log.IndexOf($revivalMarker)
+                if ($deathIndex -lt 0 -or $revivalIndex -le $deathIndex) { throw "$role failed ordered shared death/revival" }
             }
             if ($log.Contains('Rejected:') -or $log.Contains('readiness timed out')) { throw "$role replication failed; inspect log" }
             Write-Output "PASS: $role gameplay replication"

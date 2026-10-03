@@ -1461,11 +1461,15 @@ void cLuxInputHandler::UpdateGamePlayerInput()
 		{
 			cVector2l mouse = GetFrameMouseRel();
 			float scale = mfMouseSensitivity / (1.7f * mpGraphics->GetLowLevel()->GetScreenSizeFloat().y);
-			mpPlayer->AddYaw(-mouse.x * scale);
-			mpPlayer->AddPitch((mbInvertMouse ? 1.0f : -1.0f) * mouse.y * scale);
+            const float yawAdd = -mouse.x * scale;
+            const float pitchAdd = (mbInvertMouse ? 1.0f : -1.0f) * mouse.y * scale;
+            input.lookYaw = int16_t(cMath::Clamp(yawAdd * 10000, -31420.0f, 31420.0f));
+            input.lookPitch = int16_t(cMath::Clamp(pitchAdd * 10000, -31420.0f, 31420.0f));
+            if(!gpBase->mpNetwork->ClientObjectControlsLook()) { mpPlayer->AddYaw(yawAdd); mpPlayer->AddPitch(pitchAdd); }
 			input.forward = (P1IsTriggerd(eLuxAction_Forward) ? 1000 : 0) - (P1IsTriggerd(eLuxAction_Backward) ? 1000 : 0);
 			input.strafe = (P1IsTriggerd(eLuxAction_Right) ? 1000 : 0) - (P1IsTriggerd(eLuxAction_Left) ? 1000 : 0);
-			input.buttons = (P1IsTriggerd(eLuxAction_Jump) ? 1 : 0) | (P1IsTriggerd(eLuxAction_Crouch) ? 2 : 0) | (P1IsTriggerd(eLuxAction_Run) ? 4 : 0);
+            input.buttons = (P1IsTriggerd(eLuxAction_Jump) ? 1 : 0) | (P1IsTriggerd(eLuxAction_Crouch) ? 2 : 0) |
+                (P1IsTriggerd(eLuxAction_Run) ? 4 : 0) | (P1IsTriggerd(eLuxAction_Rotate) ? 8 : 0);
 		}
 		float yaw = mpPlayer->GetCamera()->GetYaw();
 		input.yaw = (int16_t)(atan2f(sinf(yaw), cosf(yaw)) * 1000.0f);

@@ -22,6 +22,9 @@ public:
     // Opt-in QA driver: normal movement/actions, never world state or scripts.
     bool UpdateQADrive(float timeStep);
     bool IsClientReplica() const { return mSession.GetRole() == online::Role::Client; }
+    bool ClientObjectControlsLook() const { return IsClientReplica() && mClientObjectLook; }
+    bool OwnsPlayerInput(const cLuxPlayer* player) const { return mSession.GetRole() == online::Role::Host && mRemotePlayer2 && player == mRemotePlayer2; }
+    bool RemoteRotateHeld() const { return mRemoteRotate; }
     bool HasNetworkPlayers() const { return mSession.Connected() && OwnsRemotePlayer2(); }
     bool WaitingForMap() const;
     bool UsesSharedInventory() const { return mSession.GetRole() != online::Role::Offline; }
@@ -38,12 +41,17 @@ private:
     int mQADriveFrames = 0;
     online::PlayerInput mQADriveInput;
     bool mQADriveInteract = false, mQADrivePreviousInteract = false;
+    bool mQADriveAttack = false, mQADrivePreviousAttack = false;
     float mQADriveTelemetryTime = 0;
     bool mOriginalFocusWait = true;
     std::chrono::steady_clock::time_point mSmokeStart;
     cLuxPlayer* mRemotePlayer2 = NULL; // observer; MapHandler owns player lifetime
     uint32_t mInputSequence = 0, mInputTick = 0;
     float mInputAccumulator = 0;
+    int mPendingLookYaw = 0, mPendingLookPitch = 0;
+    uint32_t mAppliedLookSequence = 0;
+    bool mHasLookSequence = false, mClientObjectLook = false, mClientScriptLook = false;
+    bool mRemoteRotate = false;
     cVector3f mRemoteSpawnFeet;
     bool mObservedRemoteMovement = false;
     bool mLoggedRemoteInput = false;
@@ -75,6 +83,9 @@ private:
     bool mAppliedInventory = false;
     bool mTestPotionRequested = false, mTestPotionUsed = false, mTestSaveLoaded = false, mTestTransitionStarted = false;
     bool mClientDead = false;
+    bool mHasClientLife = false, mHasHostLife = false;
+    online::Snapshot mClientLife, mHostLife;
+    std::chrono::steady_clock::time_point mClientDeathStart;
     bool mWasClient = false, mHadClientConnection = false;
     bool mTestDeathStarted = false, mTestDeathObserved = false, mTestRevived = false;
     bool mTestHasLifeSnapshot = false, mTestLastSentDead = false;
@@ -83,6 +94,7 @@ private:
     cVector3f mTestEnemyInitialPosition, mTestReplicaEnemyInitialPosition;
     std::deque<online::Presentation> mPendingPresentation;
     std::map<std::string, std::vector<uint8_t>> mLightBytes;
+    std::array<std::vector<uint8_t>, 2> mFogBytes;
     bool mLoggedLighting = false;
     void ApplyPresentation(cLuxMap* map, const online::Presentation& event);
     void ReplicateLights(cLuxMap* map);

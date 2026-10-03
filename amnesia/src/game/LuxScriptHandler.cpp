@@ -84,6 +84,15 @@ static cLuxPlayer* CoopGetOtherPlayer();
 static cLuxPlayer* CoopGetOtherPlayerForRelease();
 static cLuxPlayer* CoopGetOtherSanityReceiver();
 
+static void QueueNetworkScreenEffect(online::PresentationKind kind, float first, float second = 0, float third = 0)
+{
+    if(!gpBase->mpNetwork) return;
+    online::Presentation event; event.kind = kind;
+    event.values[0] = int32_t(first * 1000); event.values[1] = int32_t(second * 1000); event.values[2] = int32_t(third * 1000);
+    if(kind == online::PresentationKind::Fade) event.values[0] = first != 0 ? 1 : 0;
+    gpBase->mpNetwork->QueuePresentation(event);
+}
+
 //-----------------------------------------------------------------------
 
 /**
@@ -1426,11 +1435,13 @@ void __stdcall cLuxScriptHandler::SetupLoadScreen(string &asTextCat, string &asT
 void __stdcall cLuxScriptHandler::FadeIn(float afTime)
 {
 	gpBase->mpEffectHandler->GetFade()->FadeIn(afTime);
+    QueueNetworkScreenEffect(online::PresentationKind::Fade, 0, afTime);
 }
 
 void __stdcall cLuxScriptHandler::FadeOut(float afTime)
 {
 	gpBase->mpEffectHandler->GetFade()->FadeOut(afTime);
+    QueueNetworkScreenEffect(online::PresentationKind::Fade, 1, afTime);
 }
 
 //-----------------------------------------------------------------------
@@ -1438,6 +1449,7 @@ void __stdcall cLuxScriptHandler::FadeOut(float afTime)
 void __stdcall cLuxScriptHandler::FadeImageTrailTo(float afAmount, float afSpeed)
 {
 	gpBase->mpEffectHandler->GetImageTrail()->FadeTo(afAmount, afSpeed);
+    QueueNetworkScreenEffect(online::PresentationKind::ImageTrail, afAmount, afSpeed);
 }
 
 //-----------------------------------------------------------------------
@@ -1445,6 +1457,7 @@ void __stdcall cLuxScriptHandler::FadeImageTrailTo(float afAmount, float afSpeed
 void __stdcall cLuxScriptHandler::FadeSepiaColorTo(float afAmount, float afSpeed)
 {
 	gpBase->mpEffectHandler->GetSepiaColor()->FadeTo(afAmount, afSpeed);
+    QueueNetworkScreenEffect(online::PresentationKind::Sepia, afAmount, afSpeed);
 }
 
 //-----------------------------------------------------------------------
@@ -1452,11 +1465,13 @@ void __stdcall cLuxScriptHandler::FadeSepiaColorTo(float afAmount, float afSpeed
 void __stdcall cLuxScriptHandler::FadeRadialBlurTo(float afSize, float afSpeed)
 {
 	gpBase->mpEffectHandler->GetRadialBlur()->FadeTo(afSize, afSpeed);
+    QueueNetworkScreenEffect(online::PresentationKind::RadialBlur, afSize, afSpeed);
 }
 
 void __stdcall cLuxScriptHandler::SetRadialBlurStartDist(float afStartDist)
 {
 	gpBase->mpEffectHandler->GetRadialBlur()->SetBlurStartDist(afStartDist);
+    QueueNetworkScreenEffect(online::PresentationKind::BlurStart, afStartDist);
 }
 
 //-----------------------------------------------------------------------
@@ -1465,6 +1480,7 @@ void __stdcall cLuxScriptHandler::StartEffectFlash(float afFadeIn, float afWhite
 {
 	//afFadeIn was being discarded and afFadeOut passed twice.
 	gpBase->mpEffectHandler->GetFlash()->Start(afFadeIn, afWhite, afFadeOut);
+    QueueNetworkScreenEffect(online::PresentationKind::Flash, afFadeIn, afWhite, afFadeOut);
 }
 
 //-----------------------------------------------------------------------

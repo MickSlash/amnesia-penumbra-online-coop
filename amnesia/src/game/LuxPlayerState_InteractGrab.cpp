@@ -18,6 +18,7 @@
  */
 
 #include "LuxPlayerState_InteractGrab.h"
+#include "LuxNetwork.h"
 
 #include "LuxPlayer.h"
 #include "LuxMapHandler.h"
@@ -515,8 +516,7 @@ void cLuxPlayerState_InteractGrab::OnScroll(float afAmount)
 
 bool cLuxPlayerState_InteractGrab::OnAddYaw(float afAmount)
 {
-	cInput* pInput = gpBase->mpEngine->GetInput();
-	if(pInput->IsTriggerd(eLuxAction_Rotate) && mpGrabData->mbUseRotation)
+    if(IsRotationHeld())
 	{
 		m_mtxBodyRotation = cMath::MatrixMul(cMath::MatrixRotateY(afAmount * -3.2f),m_mtxBodyRotation);
 		return false;
@@ -527,9 +527,9 @@ bool cLuxPlayerState_InteractGrab::OnAddYaw(float afAmount)
 
 bool cLuxPlayerState_InteractGrab::OnAddPitch(float afAmount)
 {
-	cInput* pInput = gpBase->mpEngine->GetInput();
-	if(pInput->IsTriggerd(eLuxAction_Rotate) && mpGrabData->mbUseRotation)
+    if(IsRotationHeld())
 	{
+        if(!gpBase->mpNetwork || !gpBase->mpNetwork->OwnsPlayerInput(mpPlayer)) {
 #ifdef USE_GAMEPAD
 		////////////////
 		// We have both gamepad and mouse connected?
@@ -552,11 +552,19 @@ bool cLuxPlayerState_InteractGrab::OnAddPitch(float afAmount)
 #else
 		if(gpBase->mpInputHandler->GetInvertMouse()) afAmount = -afAmount;
 #endif
-		m_mtxBodyRotation = cMath::MatrixMul(cMath::MatrixRotateX(afAmount * -3.2f),m_mtxBodyRotation);
+        }
+        m_mtxBodyRotation = cMath::MatrixMul(cMath::MatrixRotateX(afAmount * -3.2f),m_mtxBodyRotation);
 		return false;
 	}
 
 	return true;
+}
+
+bool cLuxPlayerState_InteractGrab::IsRotationHeld() const
+{
+    if(!mpGrabData || !mpGrabData->mbUseRotation) return false;
+    if(gpBase->mpNetwork && gpBase->mpNetwork->OwnsPlayerInput(mpPlayer)) return gpBase->mpNetwork->RemoteRotateHeld();
+    return gpBase->mpEngine->GetInput()->IsTriggerd(eLuxAction_Rotate);
 }
 
 //-----------------------------------------------------------------------

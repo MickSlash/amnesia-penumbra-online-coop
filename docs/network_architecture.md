@@ -6,6 +6,8 @@ La [verifica estesa del 2 ottobre](qa_2026-10-02.md) aggiunge screenshot di live
 originali, prova del Grunt, stress ASAN e rete con ritardo/perdita. Ha trovato
 consegna intermittente dello stato di morte e differenze di cutscene/fog/HUD.
 Il passaggio delle prove precedenti non certifica la robustezza di questi casi.
+Le [correzioni del 3 ottobre](qa_fixes_2026-10-03.md) separano morte/checkpoint
+dal movimento e aggiungono input analogico delle interazioni e presentazione.
 
 ## Stato implementato
 
@@ -21,6 +23,12 @@ Implementati:
   olio, acciarini, lanterna, crouch, morte e stato attivo dei due giocatori.
   Buffer client da 100 ms, interpolazione e correzione dei teletrasporti.
   Orientamento della camera locale immediato; movimento senza prediction.
+- Camera canonica con roll, FOV, moltiplicatore aspect, offset della testa e
+  sensibilità script. LookAt e interazioni che consumano il mouse mantengono la
+  visuale canonica. Il normale orientamento non applica due volte sensibilità/sway.
+- Transizioni affidabili di morte, respawn e attivazione, campionate ogni tick;
+  coda distinta dagli snapshot di movimento. Il client conserva morte e rinascita
+  anche se arrivano nello stesso Poll; fade minimo di 400 ms e snap al checkpoint.
 - Replica di props, aree e nemici tramite ID host e generazione della mappa,
   trasformazioni dei corpi, animazioni, attivazione, distruzione, luci dei props,
   porte bloccate/chiuse e creazione dinamica dagli asset installati.
@@ -33,6 +41,8 @@ Implementati:
 - Salvataggi appartenenti all'host con stato di P2; morte e checkpoint condivisi.
 - Replica affidabile dei nuovi eventi di voce, messaggio, nota e diario;
   delta di colore, raggio, visibilità e attivazione delle luci esistenti.
+- Hint, fade, image trail, sepia, radial blur e flash degli script; fog globale
+  iniziale e modifiche di colore, intervallo, esponente, attivazione e culling.
 - Avvio con profili separati tramite `tools/StartOnlineCoop.ps1`.
 
 ## Autorità e integrazione del motore
@@ -56,7 +66,7 @@ abbia già una replica. Una disconnessione client elimina il mondo replica e tor
 al menu; una disconnessione host libera P2. Non è implementata la ripresa della
 sessione o la migrazione dell'host.
 
-## Protocollo versione 2
+## Protocollo versione 3
 
 ENet 1.3.18 incluso da sorgenti, licenza MIT conservata; mod GPLv3. Header AO,
 versione uint16 big-endian e tipo uint8; interi espliciti, nessuna struttura C++
@@ -65,13 +75,22 @@ trasmessa in memoria. Tre canali:
 | Canale | Affidabilità | Contenuto |
 | --- | --- | --- |
 | 0 | Affidabile e ordinato | Hello/Welcome, Map/MapReady, Action |
-| 1 | Ordinato, non affidabile | PlayerInput a 30 Hz (26 byte), Snapshot a 20 Hz (71 byte) |
-| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation |
+| 1 | Ordinato, non affidabile | PlayerInput a 30 Hz (30 byte), Snapshot a 20 Hz (95 byte) |
+| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (95 byte) |
 
 Ogni stato gameplay include un'epoch di mappa. Sequenze obsolete o duplicate
 sono ignorate con aritmetica che supporta il wraparound. MapReady abilita snapshot
 e intenti; WorldReady e applicazione della baseline abilitano l'input client.
 Entità iniziali assenti dal roster host vengono rimosse dal client.
+Un'entità del roster che non può essere applicata chiude la replica, senza
+dichiarare completata una baseline incompleta. Life ha al massimo 64 elementi;
+overflow, cambio mappa e disconnessione eliminano la coda.
+
+PlayerInput contiene anche delta yaw/pitch del mouse e il tasto Rotate. Il client
+accumula i delta fra i tick di invio; l'host li consuma una volta per sequenza
+per porte, leve, ruote, slide e rotazione di oggetti. Durante queste interazioni
+non trasforma l'errore di camera in una forza ripetuta. Inversione e Rotate
+provengono dal client, senza leggere i controlli fisici dell'host per P2.
 
 Handshake massimo 5 s, timeout ENet fino a 10 s, intenti di movimento scaduti
 in 250 ms, caricamento client massimo 30 s. Poll non bloccante limitato a 64 eventi;
@@ -107,7 +126,7 @@ Prima di dichiarare un MVP dell'intera campagna servono:
 
 1. Partita completa su due PC, con audit dei trigger, puzzle, inseguimenti,
    teletrasporti, cutscene e finali. Verifica separata della modalità Hard.
-2. Copertura degli effetti script ancora mancanti: fog, effetti speciali,
+2. Copertura degli effetti script ancora mancanti: effetti speciali,
    suoni non vocali, particelle, trasformazioni/creazione di luci e tipi di entità
    non compresi nel roster attuale (per esempio rope/commentary).
 3. Stato iniziale di journal/storia per join dopo un salvataggio o una raccolta:

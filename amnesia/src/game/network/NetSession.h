@@ -9,11 +9,12 @@
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 2;
+constexpr uint16_t ProtocolVersion = 3;
 constexpr uint16_t DefaultPort = 27020;
 enum class Role { Offline, Host, Client };
-enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11 };
-enum class PresentationKind : uint8_t { Note = 1, Diary = 2, Voice = 3, Message = 4, Light = 5, StopVoice = 6 };
+enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12 };
+enum class PresentationKind : uint8_t { Note = 1, Diary = 2, Voice = 3, Message = 4, Light = 5, StopVoice = 6,
+    Hint = 7, Fade = 8, ImageTrail = 9, Sepia = 10, RadialBlur = 11, BlurStart = 12, Flash = 13, FogColor = 14, FogProperties = 15 };
 struct Presentation {
     uint32_t epoch = 0;
     PresentationKind kind = PresentationKind::Message;
@@ -27,7 +28,8 @@ struct PlayerInput {
     uint32_t sequence = 0, tick = 0, epoch = 0;
     int16_t forward = 0, strafe = 0; // normalized signed axes, -1000..1000
     int16_t yaw = 0, pitch = 0; // radians * 1000
-    uint8_t buttons = 0; // jump, crouch, run
+    int16_t lookYaw = 0, lookPitch = 0; // raw look deltas, radians *10000, consumed once
+    uint8_t buttons = 0; // jump, crouch, run, rotate grabbed object
 };
 struct PlayerState {
     int32_t x = 0, y = 0, z = 0; // feet position, millimetres
@@ -35,7 +37,9 @@ struct PlayerState {
     uint16_t health = 10000, sanity = 10000, oil = 10000;
     int16_t eyeHeight = 1700;
     uint16_t tinderboxes = 0;
-    uint8_t flags = 4; // crouching, lantern, active, dead
+    int16_t roll = 0, cameraX = 0, cameraZ = 0; // radians *1000; head offsets in mm
+    uint16_t fov = 1200, aspect = 1000, lookSpeed = 1000; // *1000; aspect multiplier
+    uint8_t flags = 4; // crouching, lantern, active, dead, scripted look, object-controlled look
 };
 struct Snapshot {
     uint32_t epoch = 0, sequence = 0, acknowledgedInput = 0;
@@ -69,6 +73,9 @@ std::vector<uint8_t> EncodeEntity(const EntityState& entity);
 bool DecodeEntity(const uint8_t* data, size_t size, EntityState& entity);
 std::vector<uint8_t> EncodeSnapshot(const Snapshot& snapshot);
 bool DecodeSnapshot(const uint8_t* data, size_t size, Snapshot& snapshot);
+// Reliable ordered checkpoint/death transitions, independent of movement loss.
+std::vector<uint8_t> EncodeLife(const Snapshot& snapshot);
+bool DecodeLife(const uint8_t* data, size_t size, Snapshot& snapshot);
 std::vector<uint8_t> EncodeMap(const MapState& map);
 bool DecodeMap(const uint8_t* data, size_t size, MapState& map);
 std::vector<uint8_t> EncodeInput(const PlayerInput& input);
@@ -88,6 +95,8 @@ public:
     bool ReadInput(PlayerInput& input) const; // expires after 250 ms
     bool SendSnapshot(const Snapshot& snapshot);
     bool ReadSnapshot(Snapshot& snapshot) const;
+    bool SendLife(const Snapshot& snapshot);
+    bool ReadLife(Snapshot& snapshot);
     bool SendMap(const MapState& map);
     bool ReadMap(MapState& map) const;
     bool SendMapReady(uint32_t epoch);
@@ -129,5 +138,8 @@ private:
     InventoryState inventory_;
     bool hasInventory_ = false;
     std::deque<Presentation> presentation_;
+    std::deque<Snapshot> life_;
+    bool hasLife_ = false;
+    uint32_t lastLife_ = 0;
 };
 }

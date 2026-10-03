@@ -81,6 +81,7 @@ public:
 	void OnScroll(float afAmount);
 
 	bool OnAddYaw(float afAmount);
+    bool IsRotationHeld() const;
 	bool OnAddPitch(float afAmount);
 
 	cGuiGfxElement* GetCrosshair();

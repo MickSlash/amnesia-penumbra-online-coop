@@ -19,6 +19,7 @@
 
 #include "LuxPlayer.h"
 #include "LuxNetwork.h"
+#include <cmath>
 
 #include "LuxMap.h"
 #include "LuxInventory.h"
@@ -904,6 +905,37 @@ void cLuxPlayer::AddYaw(float afAmount)
 			mpCharBody->SetYaw(mpCamera->GetYaw());
 		}
 	}
+}
+
+bool cLuxPlayer::NetworkObjectControlsLook() const
+{
+    return mState == eLuxPlayerState_InteractSwingDoor || mState == eLuxPlayerState_InteractLever ||
+        mState == eLuxPlayerState_InteractWheel || mState == eLuxPlayerState_InteractSlide ||
+        (mState == eLuxPlayerState_InteractGrab && static_cast<cLuxPlayerState_InteractGrab*>(mvStates[mState])->IsRotationHeld());
+}
+
+void cLuxPlayer::ApplyNetworkLookAngles(float yaw, float pitch, float rawYaw, float rawPitch)
+{
+    if(!mbActive || IsDead() || !mpCharBody || mfLookSpeedMul <= 0) return;
+    if(mpLookAt->IsActive() || NetworkObjectControlsLook()) {
+        // Doors/levers consume mouse motion as force while the camera is fixed.
+        // Absolute camera error must never become a repeated force every tick.
+        // A soft scripted LookAt also accepts the original raw mouse input;
+        // the helper continues adding its canonical camera motion afterward.
+        AddYaw(rawYaw); AddPitch(rawPitch); return;
+    }
+    // Wire angles already include the owning client's input sensitivity/sway.
+    // Preserve state restrictions (ladder, lever, grab), and camera limits,
+    // without applying the mouse sensitivity and sanity sway a second time.
+    const float delta = yaw - mpCamera->GetYaw();
+    const float yawAdd = std::atan2(std::sin(delta), std::cos(delta));
+    const float pitchAdd = pitch - mpCamera->GetPitch();
+    if(mvStates[mState]->OnAddYaw(yawAdd * 0.5f) && mvMoveStates[mMoveState]->OnAddYaw(yawAdd * 0.5f)) {
+        mpCamera->AddYaw(yawAdd);
+        mpCharBody->SetYaw(mpCamera->GetYaw());
+    }
+    if(mvStates[mState]->OnAddPitch(pitchAdd * 0.5f) && mvMoveStates[mMoveState]->OnAddPitch(pitchAdd * 0.5f))
+        mpCamera->AddPitch(pitchAdd);
 }
 
 void cLuxPlayer::AddPitch(float afAmount)

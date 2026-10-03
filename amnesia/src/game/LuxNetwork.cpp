@@ -16,6 +16,7 @@
 #include "LuxEffectHandler.h"
 #include "LuxJournal.h"
 #include "LuxMessageHandler.h"
+#include "LuxHintHandler.h"
 #include <cstdio>
 #include "impl/ImGuiConsole.h"
 #include <cstdlib>
@@ -214,14 +215,16 @@ bool cLuxNetwork::UpdateQADrive(float timeStep) {
     if(!map || !player || !player->GetCharacterBody()) return true;
     FILE* command = std::fopen(mQADriveFile.c_str(), "rb");
     if(command) {
-        unsigned serial; int frames, forward, strafe, yaw, pitch, interact;
-        if(std::fscanf(command, "%u %d %d %d %d %d %d", &serial, &frames, &forward, &strafe, &yaw, &pitch, &interact) == 7 &&
+        unsigned serial; int frames, forward, strafe, yaw, pitch, interact, attack = 0;
+        const int fields = std::fscanf(command, "%u %d %d %d %d %d %d %d", &serial, &frames, &forward, &strafe, &yaw, &pitch, &interact, &attack);
+        if((fields == 7 || fields == 8) &&
             serial > mQADriveSerial && frames >= 0 && frames <= 120 && forward >= -1000 && forward <= 1000 && strafe >= -1000 && strafe <= 1000 &&
-            yaw >= -3142 && yaw <= 3142 && pitch >= -1571 && pitch <= 1571 && (interact == 0 || interact == 1)) {
+            yaw >= -3142 && yaw <= 3142 && pitch >= -1571 && pitch <= 1571 && (interact == 0 || interact == 1) && (attack == 0 || attack == 1)) {
             mQADriveSerial = serial; mQADriveFrames = frames;
             mQADriveInput.forward = int16_t(forward); mQADriveInput.strafe = int16_t(strafe);
             mQADriveInput.yaw = int16_t(yaw); mQADriveInput.pitch = int16_t(pitch);
             mQADriveInteract = interact != 0;
+            mQADriveAttack = attack != 0;
         }
         std::fclose(command);
     }
@@ -231,9 +234,17 @@ bool cLuxNetwork::UpdateQADrive(float timeStep) {
     if(!active) { input.forward = input.strafe = 0; }
     if(active) {
         float delta = input.yaw / 1000.0f - player->GetCamera()->GetYaw();
-        player->AddYaw(std::atan2(std::sin(delta), std::cos(delta)) * 0.5f);
-        player->AddPitch((input.pitch / 1000.0f - player->GetCamera()->GetPitch()) * 0.5f);
+        // Slow the QA feedback loop while it observes a delayed scripted camera.
+        const float gain = IsClientReplica() && mClientScriptLook ? 0.05f : 0.5f;
+        const float yawAdd = std::atan2(std::sin(delta), std::cos(delta)) * gain;
+        const float pitchAdd = (input.pitch / 1000.0f - player->GetCamera()->GetPitch()) * 0.5f;
+        input.lookYaw = int16_t(yawAdd * 10000); input.lookPitch = int16_t(pitchAdd * 10000);
+        if(!ClientObjectControlsLook()) { player->AddYaw(yawAdd); player->AddPitch(pitchAdd); }
     }
+    // Send the actual constrained view, just as physical mouse input does.
+    const float driveYaw = player->GetCamera()->GetYaw();
+    input.yaw = int16_t(std::atan2(std::sin(driveYaw), std::cos(driveYaw)) * 1000);
+    input.pitch = int16_t(std::max(-1.571f, std::min(1.571f, player->GetCamera()->GetPitch())) * 1000);
     if(IsClientReplica()) SendLocalInput(input, timeStep);
     else if(active) {
         player->Move(eCharDir_Forward, input.forward / 1000.0f);
@@ -247,6 +258,12 @@ bool cLuxNetwork::UpdateQADrive(float timeStep) {
         NetLog(std::string("[NET/QA] Interact=") + (held ? "pressed" : "released") + " focus=" +
             (player->GetEntityInFocus() ? player->GetEntityInFocus()->GetName() : "none"));
     }
+    const bool attack = active && mQADriveAttack;
+    if(attack != mQADrivePreviousAttack) {
+        if(IsClientReplica()) SendLocalAction(online::PlayerAction::Attack, attack);
+        else player->DoAction(eLuxPlayerAction_Attack, attack);
+        mQADrivePreviousAttack = attack;
+    }
     mQADriveTelemetryTime += timeStep;
     if(mQADriveTelemetryTime >= 0.25f) {
         mQADriveTelemetryTime = 0;
@@ -257,6 +274,17 @@ bool cLuxNetwork::UpdateQADrive(float timeStep) {
                 player->GetCamera()->GetYaw(), player->GetCamera()->GetPitch(), player->IsActive() ? 1 : 0, player->GetHealth(),
                 player->GetEntityInFocus() ? player->GetEntityInFocus()->GetName().c_str() : "none");
             std::fclose(state);
+        }
+        FILE* acknowledgement = std::fopen((mQADriveFile + ".ack").c_str(), "wb");
+        if(acknowledgement) { std::fprintf(acknowledgement, "%u\n", mQADriveSerial); std::fclose(acknowledgement); }
+        if(!IsClientReplica() && gpBase->mpPlayer2 && gpBase->mpPlayer2->GetCharacterBody()) {
+            FILE* peer = std::fopen((mQADriveFile + ".peer").c_str(), "wb");
+            if(peer) {
+                cLuxPlayer* p = gpBase->mpPlayer2; cVector3f feet = p->GetCharacterBody()->GetFeetPosition();
+                std::fprintf(peer, "%.4f %.4f %.4f %.4f %.4f %.4f %d\n", feet.x, feet.y, feet.z,
+                    p->GetCamera()->GetYaw(), p->GetCamera()->GetPitch(), p->GetLookSpeedMul(), int(p->GetCurrentState()));
+                std::fclose(peer);
+            }
         }
     }
     return true;
@@ -285,20 +313,29 @@ bool cLuxNetwork::PlaceRemotePlayer2() {
 void cLuxNetwork::Reset() {
     mRemotePlayer2 = NULL; mPreviousButtons = 0;
     mInputAccumulator = 0;
+    mPendingLookYaw = mPendingLookPitch = 0; mHasLookSequence = false;
+    mClientObjectLook = mClientScriptLook = mRemoteRotate = false;
     mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0;
     mEntityBytes.clear(); mEntityStates.clear(); mReplicaIDs.clear(); mLoggedWorldReplica = false;
     mBaselineApplied = false; mBaselineSent = false; mClientMoved = false;
     mAppliedInventory = false; mInventoryBytes.clear();
     mPendingPresentation.clear(); mLightBytes.clear(); mLoggedLighting = false;
+    for(auto& bytes : mFogBytes) bytes.clear();
+    mClientDead = false; mHasClientLife = false; mHasHostLife = false;
 }
 void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
     if (IsClientReplica() && (!mEpoch || !mReceivedSnapshot || !mBaselineApplied)) return;
+    if(IsClientReplica() && mClientDead) { input.forward = input.strafe = 0; input.buttons = 0; }
     ++mInputTick;
     mInputAccumulator += timeStep;
+    mPendingLookYaw = std::max(-31420, std::min(31420, mPendingLookYaw + int(input.lookYaw)));
+    mPendingLookPitch = std::max(-31420, std::min(31420, mPendingLookPitch + int(input.lookPitch)));
     // 30 Hz divides the engine's default 60 Hz logic rate; render FPS is irrelevant.
     if (mInputAccumulator < 1.0f / 30.0f) return;
     mInputAccumulator = std::fmod(mInputAccumulator, 1.0f / 30.0f);
     input.sequence = ++mInputSequence; input.tick = mInputTick;
+    input.lookYaw = int16_t(mPendingLookYaw); input.lookPitch = int16_t(mPendingLookPitch);
+    mPendingLookYaw = mPendingLookPitch = 0;
     input.epoch = mEpoch;
     if (mTestMovement) {
         if(mAppliedInventory && !mTestPotionRequested && gpBase->mpInventory->GetItem("online_test_potion")) {
@@ -343,6 +380,7 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
         NetLog(std::string("[NET/TEST] Applying received input; player active=") + (active ? "yes" : "no"));
     }
     uint8_t buttons = active ? input.buttons : 0;
+    mRemoteRotate = (buttons & 8) != 0;
     if (active) {
         cVector3f displacement = player->GetCharacterBody()->GetFeetPosition() - mRemoteSpawnFeet;
         if (mSmokeSeconds && OwnsRemotePlayer2() && !mObservedRemoteMovement &&
@@ -352,11 +390,10 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
         }
         player->Move(eCharDir_Forward, input.forward / 1000.0f);
         player->Move(eCharDir_Right, input.strafe / 1000.0f);
-        float delta = input.yaw / 1000.0f - player->GetCamera()->GetYaw();
-        // AddYaw/AddPitch expect raw input and internally multiply it by two.
-        // The wire contains the resulting camera angle, so halve the correction.
-        player->AddYaw(std::atan2(std::sin(delta), std::cos(delta)) * 0.5f);
-        player->AddPitch((input.pitch / 1000.0f - player->GetCamera()->GetPitch()) * 0.5f);
+        const bool freshLook = !mHasLookSequence || input.sequence != mAppliedLookSequence;
+        player->ApplyNetworkLookAngles(input.yaw / 1000.0f, input.pitch / 1000.0f,
+            freshLook ? input.lookYaw / 10000.0f : 0, freshLook ? input.lookPitch / 10000.0f : 0);
+        mAppliedLookSequence = input.sequence; mHasLookSequence = true;
     }
     if ((buttons ^ mPreviousButtons) & 1) player->Jump((buttons & 1) != 0);
     if ((buttons ^ mPreviousButtons) & 2) player->Crouch((buttons & 2) != 0);
@@ -389,11 +426,13 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
 }
 void cLuxNetwork::SendLocalAction(online::PlayerAction action, bool pressed) {
     if(!IsClientReplica() || !mReceivedSnapshot || !mEpoch || !mBaselineApplied) return;
+    if(mClientDead && pressed) return;
     online::ActionRequest request; request.epoch = mEpoch; request.sequence = ++mActionSequence;
     request.action = action; request.pressed = pressed; mSession.SendAction(request);
 }
 void cLuxNetwork::SendInventoryAction(online::PlayerAction action, const std::string& item, const std::string& secondItem) {
     if(!IsClientReplica() || !mReceivedSnapshot || !mBaselineApplied) return;
+    if(mClientDead) return;
     online::ActionRequest request; request.epoch = mEpoch; request.sequence = ++mActionSequence;
     request.action = action; request.pressed = true; request.item = item; request.secondItem = secondItem; mSession.SendAction(request);
 }
@@ -443,6 +482,8 @@ void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
     }
     mEpoch = state.epoch;
     mSnapshots.clear(); mReceivedSnapshot = false;
+    mHasClientLife = false; mClientDead = false;
+    mPendingLookYaw = mPendingLookPitch = 0; mClientObjectLook = false;
     map->GetWorld()->SetPhysicsSimulationEnabled(false);
     mSession.SendMapReady(mEpoch);
     NetLog("[NET/MAP] Replica loaded epoch=" + std::to_string(mEpoch) + " file=" + state.file);
@@ -456,13 +497,22 @@ void cLuxNetwork::ApplyReplica(cLuxPlayer* player, const online::PlayerState& st
     if(player->GetAvatar()) player->GetAvatar()->SetNetworkVelocity(step > 0 && displacement.Length() < 5 ? displacement / step : cVector3f(0));
     body->SetActiveSize((state.flags & 1) ? 1 : 0);
     body->SetFeetPosition(position);
-    body->SetYaw(localView && (state.flags & 4) ? player->GetCamera()->GetYaw() : state.yaw / 1000.0f);
-    if(!localView || !(state.flags & 4)) {
+    if(localView) { mClientObjectLook = (state.flags & 32) != 0; mClientScriptLook = (state.flags & 16) != 0; }
+    const bool localLook = localView && (state.flags & 4) && !(state.flags & 48);
+    body->SetYaw(localLook ? player->GetCamera()->GetYaw() : state.yaw / 1000.0f);
+    if(!localLook) {
         player->GetCamera()->SetYaw(state.yaw / 1000.0f);
         player->GetCamera()->SetPitch(state.pitch / 1000.0f);
     }
     // Physics is disabled on replicas; position the camera without advancing a body.
-    player->GetCamera()->SetPosition(body->GetFeetPosition() + cVector3f(0, state.eyeHeight / 1000.0f, 0));
+    player->GetCamera()->SetPosition(body->GetFeetPosition() + cVector3f(state.cameraX / 1000.0f, state.eyeHeight / 1000.0f, state.cameraZ / 1000.0f));
+    player->GetCamera()->SetRoll(state.roll / 1000.0f);
+    player->GetCamera()->SetFOV(state.fov / 1000.0f);
+    // The client keeps its own display ratio; reproduce only the scripted multiplier.
+    const float displayAspect = gpBase->mpEngine->GetGraphics()->GetLowLevel()->GetScreenSizeFloat().x /
+        gpBase->mpEngine->GetGraphics()->GetLowLevel()->GetScreenSizeFloat().y;
+    player->GetCamera()->SetAspect(displayAspect * state.aspect / 1000.0f);
+    player->SetLookSpeedMul(state.lookSpeed / 1000.0f);
     player->ApplyNetworkVitals(state.health / 100.0f, state.sanity / 100.0f, state.oil / 100.0f);
     player->SetTinderboxes(state.tinderboxes);
     player->SetActive((state.flags & 4) != 0);
@@ -474,6 +524,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
     if(!mSession.Connected()) {
         mMapAnnounced = false; mHostMapFile.clear();
         mSnapshots.clear(); mReceivedSnapshot = false;
+        mHasClientLife = mHasHostLife = false; mClientDead = false;
         if(map) map->GetWorld()->SetPhysicsSimulationEnabled(!IsClientReplica());
         return;
     }
@@ -485,12 +536,40 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         }
         if(!map) return;
         map->GetWorld()->SetPhysicsSimulationEnabled(false);
+        // Consume transitions separately from interpolation. Even if death and
+        // revival arrive in the same ENet poll, show a complete death fade.
+        online::Snapshot life;
+        if((!mClientDead || now - mClientDeathStart >= std::chrono::milliseconds(400)) && mSession.ReadLife(life)) {
+            if(life.epoch == mEpoch) {
+                const bool dead = (life.players[1].flags & 8) != 0;
+                if(dead != mClientDead) {
+                    mClientDead = dead;
+                    if(dead) { mClientDeathStart = now; gpBase->mpEffectHandler->GetFade()->FadeOut(0.35f); }
+                    else gpBase->mpEffectHandler->GetFade()->FadeIn(0.5f);
+                    if(mSmokeSeconds) NetLog(dead ? "[NET/TEST] Authoritative death applied on client" : "[NET/TEST] Authoritative checkpoint revival applied on client");
+                }
+                mClientLife = life; mHasClientLife = true;
+                {
+                    if(!mReceivedSnapshot) {
+                        NetLog("[NET/STATE] First authoritative player snapshot applied");
+                        const auto& p = life.players[1]; mReplicaInitialFeet = cVector3f(p.x / 1000.0f, p.y / 1000.0f, p.z / 1000.0f);
+                    }
+                    online::Snapshot pose = life, latest;
+                    if(mSession.ReadSnapshot(latest) && latest.epoch == mEpoch &&
+                        latest.sequence - life.sequence != 0 && latest.sequence - life.sequence < 0x80000000u) pose = latest;
+                    // A checkpoint is a discontinuity even within five metres.
+                    mSnapshots.clear(); mSnapshots.push_back({pose, now});
+                    mReceivedSequence = pose.sequence; mReceivedSnapshot = true;
+                }
+            }
+        }
         online::Presentation event;
         for(int count = 0; count < 128 && mSession.ReadPresentation(event); ++count)
             if(event.epoch == mEpoch && event.target != 1) ApplyPresentation(map, event);
         online::EntityState entity;
         for(int count = 0; count < 128 && mSession.ReadEntity(entity); ++count)
             if(entity.epoch == mEpoch) ApplyWorldEntity(map, entity);
+        if(!mSession.Connected()) return;
         if(!mBaselineApplied && mSession.IsWorldReady(mEpoch)) {
             // OnStart may remove original map entities on the host. The client
             // does not run that script, so reconcile the complete host roster.
@@ -512,7 +591,8 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             mAppliedInventory = true; mAppliedInventoryRevision = inventory.revision;
         }
         online::Snapshot snapshot;
-        if(mSession.ReadSnapshot(snapshot) && (!mReceivedSnapshot || snapshot.sequence != mReceivedSequence)) {
+        if(mSession.ReadSnapshot(snapshot) && (!mReceivedSnapshot ||
+            (snapshot.sequence - mReceivedSequence != 0 && snapshot.sequence - mReceivedSequence < 0x80000000u))) {
             if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_ENEMY") && !mTestEnemyDamage &&
                 (snapshot.players[0].health < 9900 || snapshot.players[1].health < 9900)) {
                 mTestEnemyDamage = true; NetLog("[NET/TEST] Host enemy damage applied on client");
@@ -547,18 +627,19 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                 p.health = q.health; p.sanity = q.sanity; p.oil = q.oil;
                 p.eyeHeight += int16_t((q.eyeHeight - p.eyeHeight) * alpha);
                 p.flags = q.flags; p.tinderboxes = q.tinderboxes;
+                p.roll = q.roll; p.fov = q.fov; p.aspect = q.aspect; p.lookSpeed = q.lookSpeed;
+                p.cameraX += int16_t((q.cameraX - p.cameraX) * alpha);
+                p.cameraZ += int16_t((q.cameraZ - p.cameraZ) * alpha);
             }
         }
         // The local viewport stays P1 internally; network ownership is explicit.
+        if(mHasClientLife) for(int i = 0; i < 2; ++i) {
+            interpolated.players[i].flags = (interpolated.players[i].flags & ~12) | (mClientLife.players[i].flags & 12);
+            if(mClientLife.players[i].flags & 8) interpolated.players[i].health = 0;
+        }
+        if(mClientDead) interpolated.players[1] = mClientLife.players[1];
         ApplyReplica(gpBase->mpPlayer, interpolated.players[1], true);
         ApplyReplica(gpBase->mpPlayer2, interpolated.players[0], false);
-        const bool dead = (interpolated.players[1].flags & 8) != 0;
-        if(dead != mClientDead) {
-            mClientDead = dead;
-            if(dead) gpBase->mpEffectHandler->GetFade()->FadeOut(0.35f);
-            else gpBase->mpEffectHandler->GetFade()->FadeIn(0.5f);
-            if(mSmokeSeconds) NetLog(dead ? "[NET/TEST] Authoritative death applied on client" : "[NET/TEST] Authoritative checkpoint revival applied on client");
-        }
         if(mSmokeSeconds && !mClientMoved && gpBase->mpPlayer->GetCharacterBody()) {
             cVector3f delta = gpBase->mpPlayer->GetCharacterBody()->GetFeetPosition() - mReplicaInitialFeet;
             if(delta.x*delta.x + delta.z*delta.z > 0.01f) { mClientMoved = true; NetLog("[NET/TEST] Client camera/body moved from authoritative snapshots"); }
@@ -574,8 +655,11 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         mHostMapFile = map->GetFileName(); mMapAnnounced = true; mMapWaitStart = now;
         mEntityBytes.clear(); mEntityStates.clear();
         mBaselineSent = false;
+        mHasHostLife = false;
+        mHasLookSequence = false;
         mInventoryBytes.clear();
         mLightBytes.clear();
+        for(auto& bytes : mFogBytes) bytes.clear();
         NetLog("[NET/MAP] Announced epoch=" + std::to_string(mEpoch) + " file=" + state.file);
     }
     map->GetWorld()->SetPhysicsSimulationEnabled(!WaitingForMap());
@@ -669,8 +753,6 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         }
     }
     mSnapshotAccumulator += timeStep;
-    if(mSnapshotAccumulator < 1.0f / 20.0f) return;
-    mSnapshotAccumulator = std::fmod(mSnapshotAccumulator, 1.0f / 20.0f);
     online::Snapshot snapshot; snapshot.epoch = mEpoch; snapshot.sequence = ++mSnapshotSequence;
     online::PlayerInput input; if(mSession.ReadInput(input)) snapshot.acknowledgedInput = input.sequence;
     cLuxPlayer* players[] = {gpBase->mpPlayer, gpBase->mpPlayer2};
@@ -684,10 +766,28 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         p.sanity = uint16_t(std::max(0.0f, std::min(100.0f, player->GetSanity())) * 100);
         p.oil = uint16_t(std::max(0.0f, std::min(100.0f, player->GetLampOil())) * 100);
         p.eyeHeight = int16_t(std::max(-5.0f, std::min(5.0f, player->GetCamera()->GetPosition().y - feet.y)) * 1000);
+        cCamera* camera = player->GetCamera();
+        const float roll = camera->GetRoll();
+        p.roll = int16_t(std::atan2(std::sin(roll), std::cos(roll)) * 1000);
+        p.cameraX = int16_t(std::max(-5.0f, std::min(5.0f, camera->GetPosition().x - feet.x)) * 1000);
+        p.cameraZ = int16_t(std::max(-5.0f, std::min(5.0f, camera->GetPosition().z - feet.z)) * 1000);
+        p.fov = uint16_t(std::max(0.01f, std::min(3.142f, camera->GetFOV())) * 1000);
+        const cVector2f screen = gpBase->mpEngine->GetGraphics()->GetLowLevel()->GetScreenSizeFloat();
+        p.aspect = uint16_t(std::max(0.01f, std::min(20.0f, camera->GetAspect() / (screen.x / screen.y))) * 1000);
+        p.lookSpeed = uint16_t(std::max(0.0f, std::min(10.0f, player->GetLookSpeedMul())) * 1000);
         p.tinderboxes = uint16_t(std::max(0, std::min(65535, player->GetTinderboxes())));
         p.flags = (player->GetCharacterBody()->GetActiveSize() == 1 ? 1 : 0) |
-            (player->GetHelperLantern()->IsActive() ? 2 : 0) | (player->IsActive() ? 4 : 0) | (player->IsDead() ? 8 : 0);
+            (player->GetHelperLantern()->IsActive() ? 2 : 0) | (player->IsActive() ? 4 : 0) | (player->IsDead() ? 8 : 0) |
+            (player->GetHelperLookAt()->IsActive() || player->GetLookSpeedMul() <= 0 ? 16 : 0) |
+            (player->NetworkObjectControlsLook() ? 32 : 0);
     }
+    if(!mHasHostLife || ((snapshot.players[0].flags ^ mHostLife.players[0].flags) & 12) ||
+        ((snapshot.players[1].flags ^ mHostLife.players[1].flags) & 12)) {
+        if(!mSession.SendLife(snapshot)) { NetLog("[NET/STATE] Cannot send life transition; closing session"); mSession.Stop(); return; }
+        mHostLife = snapshot; mHasHostLife = true;
+    }
+    if(mSnapshotAccumulator < 1.0f / 20.0f) return;
+    mSnapshotAccumulator = std::fmod(mSnapshotAccumulator, 1.0f / 20.0f);
     const bool snapshotSent = mSession.SendSnapshot(snapshot);
     const bool dead = (snapshot.players[1].flags & 8) != 0;
     if(mSmokeSeconds && snapshotSent && (!mTestHasLifeSnapshot || mTestLastSentDead != dead)) {
@@ -785,7 +885,10 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
         map->CreateEntity(state.name, state.file, UnpackTransform(state.transform), scale);
         entity = map->GetLatestEntity();
     }
-    if(!entity || entity->GetName() != state.name || uint8_t(entity->GetEntityType()) != state.type) return;
+    if(!entity || entity->GetName() != state.name || uint8_t(entity->GetEntityType()) != state.type) {
+        NetLog("[NET/WORLD] Cannot apply authoritative entity: " + state.name + "; closing incomplete replica");
+        mSession.Stop(); return;
+    }
     mReplicaIDs[state.id] = entity->GetID();
     entity->SetActive((state.flags & 1) != 0); entity->SetInteractionDisabled((state.flags & 2) != 0);
     if(state.type == eLuxEntityType_Prop) {
@@ -821,6 +924,19 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
     if(!mLoggedWorldReplica) { mLoggedWorldReplica = true; NetLog("[NET/WORLD] Authoritative entity state applied"); }
 }
 void cLuxNetwork::ReplicateLights(cLuxMap* map) {
+    cWorld* world = map->GetWorld();
+    online::Presentation fog[2];
+    fog[0].epoch = fog[1].epoch = mEpoch;
+    fog[0].kind = online::PresentationKind::FogColor;
+    const cColor color = world->GetFogColor();
+    fog[0].values = {{int32_t(color.r * 1000), int32_t(color.g * 1000), int32_t(color.b * 1000), int32_t(color.a * 1000), 0, 0}};
+    fog[1].kind = online::PresentationKind::FogProperties;
+    fog[1].values = {{int32_t(world->GetFogStart() * 1000), int32_t(world->GetFogEnd() * 1000), int32_t(world->GetFogFalloffExp() * 1000),
+        (world->GetFogActive() ? 1 : 0) | (world->GetFogCulling() ? 2 : 0), 0, 0}};
+    for(int i = 0; i < 2; ++i) {
+        auto bytes = online::EncodePresentation(fog[i]);
+        if(!bytes.empty() && bytes != mFogBytes[i] && mSession.SendPresentation(fog[i])) mFogBytes[i] = std::move(bytes);
+    }
     unsigned sent = 0;
     cLightListIterator it = map->GetWorld()->GetLightIterator();
     while(it.HasNext()) {
@@ -840,6 +956,30 @@ void cLuxNetwork::ReplicateLights(cLuxMap* map) {
 }
 void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& event) {
     switch(event.kind) {
+    case online::PresentationKind::Hint:
+        gpBase->mpHintHandler->Add(event.text[0], cString::UTF8ToWChar(event.text[1]), event.values[0] / 1000.0f);
+        if(mSmokeSeconds) NetLog("[NET/TEST] Host hint applied on client: " + event.text[0]);
+        break;
+    case online::PresentationKind::Fade:
+        if(event.values[0]) gpBase->mpEffectHandler->GetFade()->FadeOut(event.values[1] / 1000.0f);
+        else gpBase->mpEffectHandler->GetFade()->FadeIn(event.values[1] / 1000.0f);
+        break;
+    case online::PresentationKind::ImageTrail:
+        gpBase->mpEffectHandler->GetImageTrail()->FadeTo(event.values[0] / 1000.0f, event.values[1] / 1000.0f); break;
+    case online::PresentationKind::Sepia:
+        gpBase->mpEffectHandler->GetSepiaColor()->FadeTo(event.values[0] / 1000.0f, event.values[1] / 1000.0f); break;
+    case online::PresentationKind::RadialBlur:
+        gpBase->mpEffectHandler->GetRadialBlur()->FadeTo(event.values[0] / 1000.0f, event.values[1] / 1000.0f); break;
+    case online::PresentationKind::BlurStart:
+        gpBase->mpEffectHandler->GetRadialBlur()->SetBlurStartDist(event.values[0] / 1000.0f); break;
+    case online::PresentationKind::Flash:
+        gpBase->mpEffectHandler->GetFlash()->Start(event.values[0] / 1000.0f, event.values[1] / 1000.0f, event.values[2] / 1000.0f); break;
+    case online::PresentationKind::FogColor:
+        map->GetWorld()->SetFogColor(cColor(event.values[0] / 1000.0f, event.values[1] / 1000.0f, event.values[2] / 1000.0f, event.values[3] / 1000.0f)); break;
+    case online::PresentationKind::FogProperties:
+        map->GetWorld()->SetFogStart(event.values[0] / 1000.0f); map->GetWorld()->SetFogEnd(event.values[1] / 1000.0f);
+        map->GetWorld()->SetFogFalloffExp(event.values[2] / 1000.0f); map->GetWorld()->SetFogActive((event.values[3] & 1) != 0);
+        map->GetWorld()->SetFogCulling((event.values[3] & 2) != 0); break;
     case online::PresentationKind::Light: {
         iLight* light = map->GetWorld()->GetLight(event.text[0]);
         if(!light || event.text[0].find("PlayerLantern") == 0) break;

@@ -21,6 +21,8 @@
 
 #include "LuxHelpFuncs.h"
 #include "LuxMapHandler.h"
+#include "LuxNetwork.h"
+#include <algorithm>
 #include "input/Gamepad.h"
 
 #include <stdarg.h>
@@ -290,6 +292,12 @@ bool cLuxHintHandler::Add(const tString &asName, const tWString &asMessage, floa
 	if(it != m_setHintsGiven.end()) return false;
 
 	m_setHintsGiven.insert(asName);
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::Hint;
+        event.text[0] = asName; event.text[1] = cString::S16BitToUTF8(asMessage);
+        event.values[0] = int32_t(std::max(0.0f, afTimeShown) * 1000);
+        gpBase->mpNetwork->QueuePresentation(event);
+    }
 
     msCurrentText = gpBase->mpHelpFuncs->ParseString(asMessage);
 	mfShowTextCount = afTimeShown <=0 ? gpBase->mpHelpFuncs->GetStringDuration(msCurrentText)*mfTextDurationMul : afTimeShown;

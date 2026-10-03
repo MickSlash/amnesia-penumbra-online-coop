@@ -28,12 +28,13 @@ static void StressCodec(const T& seed, Encoder encode, Decoder decode) {
 static void MalformedInputStressTest() {
     PlayerInput input; StressCodec(input, EncodeInput, DecodeInput);
     Snapshot snapshot; snapshot.epoch = 1; StressCodec(snapshot, EncodeSnapshot, DecodeSnapshot);
+    StressCodec(snapshot, EncodeLife, DecodeLife);
     MapState map; map.epoch = 1; map.fingerprint = 1; map.file = "maps/test.map"; StressCodec(map, EncodeMap, DecodeMap);
     EntityState entity; entity.epoch = 1; entity.name = "box"; StressCodec(entity, EncodeEntity, DecodeEntity);
     InventoryState inventory; inventory.epoch = 1; InventoryItem item; item.name = "key"; inventory.items.push_back(item);
     StressCodec(inventory, EncodeInventory, DecodeInventory);
     Presentation event; event.epoch = 1; event.text[0] = "Story"; StressCodec(event, EncodePresentation, DecodePresentation);
-    std::cout << "PASS: 60000 deterministic malformed-input codec stress cases\n";
+    std::cout << "PASS: 70000 deterministic malformed-input codec stress cases\n";
 }
 static void InputLifetimeTest() {
     Session host(Log), client(Log);
@@ -68,6 +69,18 @@ static void InputLifetimeTest() {
     snapshot.sequence = 0; snapshot.players[0].x = 1234;
     host.SendSnapshot(snapshot); pump(20);
     Check(client.ReadSnapshot(replica) && replica.sequence == 1 && replica.players[0].x == 0, "stale snapshot ignored");
+    // The caller may not read state until death, revival and movement have all
+    // arrived. Reliable transitions must survive the latest-only movement slot.
+    Snapshot life = snapshot; life.sequence = 0xffffffffu; life.players[1].flags = 8; life.players[1].health = 0;
+    Check(host.SendLife(life), "reliable death transport");
+    life.sequence = 0; life.players[1].flags = 4; life.players[1].health = 10000; life.players[1].x = 9000;
+    Check(host.SendLife(life) && host.SendLife(life), "reliable revival and duplicate transport");
+    snapshot.sequence = 2; snapshot.players[1].x = 9100; Check(host.SendSnapshot(snapshot), "movement after revival");
+    pump(30);
+    Check(client.ReadSnapshot(replica) && replica.sequence == 2, "movement stays latest-only");
+    Check(client.ReadLife(replica) && replica.sequence == 0xffffffffu && (replica.players[1].flags & 8), "batched death retained");
+    Check(client.ReadLife(replica) && replica.sequence == 0 && replica.players[1].x == 9000 && !(replica.players[1].flags & 8), "batched checkpoint retained across sequence wrap");
+    Check(!client.ReadLife(replica) && !client.SendLife(life), "duplicate life ignored and client cannot originate life");
     input.sequence = 1; input.epoch = 6; client.SendInput(input); pump(20);
     Check(!host.ReadInput(received), "previous-map input rejected");
     input.epoch = 7; client.SendInput(input); pump(20);
@@ -97,35 +110,69 @@ static void InputLifetimeTest() {
     Presentation storyRead;
     Check(client.ReadPresentation(storyRead) && storyRead.text[0] == story.text[0] && storyRead.values[0] == -1234, "client ordered story event");
     Check(!client.SendPresentation(story), "client cannot originate host story events");
-    host.SendPresentation(story); pump(20);
+    host.SendPresentation(story); life.sequence = 1; host.SendLife(life); pump(20);
     map.epoch = 8; host.SendMap(map); pump(20);
     Check(!host.ReadInput(received) && !client.ReadSnapshot(replica), "transition clears previous-map state");
     Check(!client.SendMapReady(7), "old readiness cannot unlock new map");
     Check(!client.IsWorldReady(8), "new map clears world readiness");
     Check(!client.ReadInventory(inventoryReplica), "new map clears old inventory revision");
     Check(!client.ReadPresentation(storyRead), "new map clears old story events");
+    Check(!client.ReadLife(replica), "new map clears old life events");
     client.Stop(); pump(20);
     Check(!host.Connected() && !host.ReadInput(received), "disconnect clears input");
     std::cout << "PASS: sequence wrap, stale timeout, snapshots, map readiness and epoch isolation\n";
 }
+static void LifeQueueLimitTest() {
+    Session host(Log), client(Log);
+    Check(host.StartHost(27046) && client.StartClient("127.0.0.1", 27046), "life queue startup");
+    auto pump = [&]() {
+        for(int i = 0; i < 100; ++i) { client.Poll(); host.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+    };
+    pump();
+    MapState map; map.epoch = 1; map.fingerprint = 1; map.file = "maps/test.map";
+    Check(host.SendMap(map), "life queue map"); pump();
+    Check(client.SendMapReady(1), "life queue readiness"); pump();
+    Snapshot life; life.epoch = 1;
+    for(unsigned i = 0; i < 65; ++i) { life.sequence = i; Check(host.SendLife(life), "life queue send"); }
+    pump();
+    Check(!client.Connected() && !host.Connected() && !client.ReadLife(life), "life overflow disconnects and clears queue");
+    Check(client.StartClient("127.0.0.1", 27046), "life queue reconnect"); pump();
+    Check(host.Connected() && client.Connected() && host.SendMap(map), "life queue reconnect handshake"); pump();
+    Check(client.SendMapReady(1), "life queue reconnect readiness"); pump();
+    life.sequence = 0; Check(host.SendLife(life), "life sequence reset after reconnect"); pump();
+    Check(client.ReadLife(life) && life.sequence == 0, "life reconnect accepts fresh sequence");
+    std::cout << "PASS: bounded life queue, overflow rejection and reconnect reset\n";
+}
 int main(int argc, char** argv) {
     PlayerInput input; input.sequence = 0x12345678; input.tick = 42;
-    input.forward = -1000; input.strafe = 500; input.yaw = -3141; input.pitch = 1570; input.buttons = 7;
+    input.forward = -1000; input.strafe = 500; input.yaw = -3141; input.pitch = 1570; input.buttons = 15;
+    input.lookYaw = -1234; input.lookPitch = 31420;
     auto bytes = EncodeInput(input); PlayerInput decoded;
-    Check(bytes.size() == 26 && bytes[5] == 0x12 && bytes[8] == 0x78, "wire endian/size");
-    Check(DecodeInput(bytes.data(), bytes.size(), decoded) && decoded.forward == -1000 && decoded.yaw == -3141 && decoded.sequence == input.sequence, "roundtrip");
+    Check(bytes.size() == 30 && bytes[5] == 0x12 && bytes[8] == 0x78, "wire endian/size");
+    Check(DecodeInput(bytes.data(), bytes.size(), decoded) && decoded.forward == -1000 && decoded.yaw == -3141 && decoded.sequence == input.sequence &&
+        decoded.lookYaw == -1234 && decoded.lookPitch == 31420 && decoded.buttons == 15, "roundtrip");
     for (size_t n = 0; n < bytes.size(); ++n) Check(!DecodeInput(bytes.data(), n, decoded), "truncated input");
     bytes.push_back(0); Check(!DecodeInput(bytes.data(), bytes.size(), decoded), "trailing byte"); bytes.pop_back();
     bytes[3] = 99; Check(!DecodeInput(bytes.data(), bytes.size(), decoded), "version mismatch"); bytes[3] = ProtocolVersion;
     bytes[21] = 128; Check(!DecodeInput(bytes.data(), bytes.size(), decoded), "invalid buttons");
     input.forward = 1001; Check(EncodeInput(input).empty(), "invalid axis"); input.forward = -1000;
+    input.lookYaw = 31421; Check(EncodeInput(input).empty(), "raw look bounded"); input.lookYaw = 0;
     Snapshot snapshot; snapshot.epoch = 1; snapshot.sequence = 17; snapshot.players[0].x = -54321;
     auto stateBytes = EncodeSnapshot(snapshot); Snapshot stateRead;
-    Check(stateBytes.size() == 71 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
+    Check(stateBytes.size() == 95 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
         stateRead.players[0].x == -54321 && stateRead.sequence == 17, "signed snapshot roundtrip");
     for(size_t n = 0; n < stateBytes.size(); ++n) Check(!DecodeSnapshot(stateBytes.data(), n, stateRead), "truncated snapshot");
     stateBytes.push_back(0); Check(!DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead), "snapshot trailing byte");
     snapshot.players[1].oil = 10001; Check(EncodeSnapshot(snapshot).empty(), "snapshot vital range");
+    snapshot.players[1].oil = 10000; snapshot.players[1].roll = -1500; snapshot.players[1].cameraX = -200;
+    snapshot.players[1].fov = 900; snapshot.players[1].aspect = 800; snapshot.players[1].lookSpeed = 0; snapshot.players[1].flags = 20;
+    snapshot.players[1].flags |= 32;
+    auto lifeBytes = EncodeLife(snapshot);
+    Check(DecodeLife(lifeBytes.data(), lifeBytes.size(), stateRead) && stateRead.players[1].roll == -1500 &&
+        stateRead.players[1].cameraX == -200 && stateRead.players[1].aspect == 800 && stateRead.players[1].flags == 52, "camera and life roundtrip");
+    Check(!DecodeSnapshot(lifeBytes.data(), lifeBytes.size(), stateRead), "life cannot masquerade as movement");
+    for(size_t n = 0; n < lifeBytes.size(); ++n) Check(!DecodeLife(lifeBytes.data(), n, stateRead), "truncated life event");
+    snapshot.players[1].fov = 0; Check(EncodeLife(snapshot).empty(), "life camera range");
     MapState map; map.epoch = 1; map.fingerprint = 0x123456789abcdef0ull; map.file = "maps/main/ch01/02_entrance_hall.map";
     auto mapBytes = EncodeMap(map); MapState mapRead;
     Check(DecodeMap(mapBytes.data(), mapBytes.size(), mapRead) && mapRead.file == map.file && mapRead.fingerprint == map.fingerprint, "map fingerprint roundtrip");
@@ -163,7 +210,16 @@ int main(int argc, char** argv) {
     story.text[0] = "voice/test.ogg"; story.target = 3; Check(EncodePresentation(story).empty(), "story recipient bounded");
     story.target = 0; story.kind = PresentationKind(99); Check(EncodePresentation(story).empty(), "story kind bounded");
     story.kind = PresentationKind::Message; story.text[0] = std::string(4097, 'x'); Check(EncodePresentation(story).empty(), "story text bounded");
-    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); return 0; }
+    story = Presentation(); story.epoch = 1; story.kind = PresentationKind::Hint; story.text[0] = "Diary"; story.text[1] = std::string(4096, 'x');
+    auto hintBytes = EncodePresentation(story);
+    Check(DecodePresentation(hintBytes.data(), hintBytes.size(), storyRead) && storyRead.text[1].size() == 4096, "long hint roundtrip");
+    story.text[1].push_back('x'); Check(EncodePresentation(story).empty(), "hint text bounded");
+    story = Presentation(); story.epoch = 1; story.kind = PresentationKind::Fade; story.values[0] = 2;
+    Check(EncodePresentation(story).empty(), "fade direction bounded");
+    story.values[0] = 1; story.values[1] = 350;
+    auto fadeBytes = EncodePresentation(story);
+    Check(DecodePresentation(fadeBytes.data(), fadeBytes.size(), storyRead) && storyRead.values[1] == 350, "fade roundtrip");
+    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); LifeQueueLimitTest(); return 0; }
     const bool host = std::string(argv[1]) == "host";
     const bool badVersion = std::string(argv[1]) == "bad-version";
     const bool malformed = std::string(argv[1]) == "malformed";
@@ -213,11 +269,14 @@ int main(int argc, char** argv) {
                     }
                     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
                     input.forward = 1000; input.strafe = 0; input.buttons = 0; input.pitch = 0;
+                    input.lookYaw = input.lookPitch = 0;
                     input.yaw = int16_t(-3141 + int(seconds * 3141) % 6282);
                 }
                 ++input.sequence; Check(session.SendInput(input), "send input"); observed = true;
             }
-            else if (session.ReadInput(decoded)) { Check(decoded.forward == -1000 && decoded.buttons == 7, "received input"); observed = true; }
+            else if (session.ReadInput(decoded)) {
+                Check(decoded.forward == -1000 && decoded.buttons == 15 && decoded.lookPitch == 31420, "received input"); observed = true;
+            }
         }
         if (!host && observed && std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) break;
         if (host && observed && !session.Connected()) break;

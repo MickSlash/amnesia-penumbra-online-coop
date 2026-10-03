@@ -18,6 +18,7 @@
  */
 
 #include "LuxPlayerState_InteractRotateBase.h"
+#include "LuxNetwork.h"
 
 #include "LuxPlayer.h"
 #include "LuxMapHandler.h"
@@ -67,7 +68,10 @@ void iLuxPlayerState_InteractRotateBase::OnEnterState(eLuxPlayerState aPrevState
 
 	/////////////////////////////////
 	//Clear smoothing
-	if(gpBase->mpInputHandler->GetSmoothMouse()==false)
+    // Remote mouse motion was already accumulated by its owning client. Never
+    // mix it with the host's global mouse smoothing history.
+    if(gpBase->mpInputHandler->GetSmoothMouse()==false &&
+        (!gpBase->mpNetwork || !gpBase->mpNetwork->OwnsPlayerInput(mpPlayer)))
 		gpBase->mpInputHandler->ResetSmoothMousePos();
 
 	/////////////////////////////////
@@ -208,7 +212,8 @@ void iLuxPlayerState_InteractRotateBase::Update(float afTimeStep)
 	//////////////////////////////
 	//Update move add
 	
-	if(gpBase->mpInputHandler->GetSmoothMouse()==false)
+    if(gpBase->mpInputHandler->GetSmoothMouse()==false &&
+        (!gpBase->mpNetwork || !gpBase->mpNetwork->OwnsPlayerInput(mpPlayer)))
 		mvMouseAdd = gpBase->mpInputHandler->GetSmoothMousePos(mvMouseAdd);
 
 	//////////////////////////////
@@ -340,6 +345,7 @@ bool iLuxPlayerState_InteractRotateBase::OnAddYaw(float afAmount)
 
 bool iLuxPlayerState_InteractRotateBase::OnAddPitch(float afAmount)
 {
+    if(!gpBase->mpNetwork || !gpBase->mpNetwork->OwnsPlayerInput(mpPlayer)) {
 #ifdef USE_GAMEPAD
 	////////////////
 	// We have both gamepad and mouse connected?
@@ -362,7 +368,8 @@ bool iLuxPlayerState_InteractRotateBase::OnAddPitch(float afAmount)
 #else
 	if(gpBase->mpInputHandler->GetInvertMouse()) afAmount = -afAmount;
 #endif
-	mvMouseAdd.y += afAmount;
+    }
+    mvMouseAdd.y += afAmount;
 
 	return false;
 }

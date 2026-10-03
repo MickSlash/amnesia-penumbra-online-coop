@@ -13,13 +13,17 @@ std::vector<uint8_t> Header(Message type) { return { 'A', 'O', uint8_t(ProtocolV
 bool ValidHeader(const uint8_t* p, size_t n) { return p && n >= 5 && p[0] == 'A' && p[1] == 'O' && R16(p + 2) == ProtocolVersion; }
 bool ValidInput(const PlayerInput& i) {
     return i.forward >= -1000 && i.forward <= 1000 && i.strafe >= -1000 && i.strafe <= 1000 &&
-           i.yaw >= -3142 && i.yaw <= 3142 && i.pitch >= -1571 && i.pitch <= 1571 && !(i.buttons & ~7);
+           i.yaw >= -3142 && i.yaw <= 3142 && i.pitch >= -1571 && i.pitch <= 1571 && !(i.buttons & ~15) &&
+           i.lookYaw >= -31420 && i.lookYaw <= 31420 && i.lookPitch >= -31420 && i.lookPitch <= 31420;
 }
 bool ValidPlayer(const PlayerState& p) {
     return p.x >= -100000000 && p.x <= 100000000 && p.y >= -100000000 && p.y <= 100000000 &&
         p.z >= -100000000 && p.z <= 100000000 && p.yaw >= -3142 && p.yaw <= 3142 &&
         p.pitch >= -1571 && p.pitch <= 1571 && p.health <= 10000 && p.sanity <= 10000 && p.oil <= 10000 &&
-        p.eyeHeight >= -5000 && p.eyeHeight <= 5000 && !(p.flags & ~15);
+        p.eyeHeight >= -5000 && p.eyeHeight <= 5000 && !(p.flags & ~63) &&
+        p.roll >= -3142 && p.roll <= 3142 && p.cameraX >= -5000 && p.cameraX <= 5000 &&
+        p.cameraZ >= -5000 && p.cameraZ <= 5000 && p.fov >= 10 && p.fov <= 3142 &&
+        p.aspect >= 10 && p.aspect <= 20000 && p.lookSpeed <= 10000;
 }
 bool ValidMap(const std::string& file) {
     if (file.size() < 10 || file.size() > 240 || file.compare(0, 5, "maps/") ||
@@ -69,10 +73,17 @@ bool ValidInventoryItem(const InventoryItem& item) {
         (item.image.empty() || (item.image[0] != '/' && item.image[0] != '\\'));
 }
 bool ValidPresentation(const Presentation& event) {
-    if(!event.epoch || uint8_t(event.kind) < 1 || uint8_t(event.kind) > 6 || event.target > 2) return false;
+    if(!event.epoch || uint8_t(event.kind) < 1 || uint8_t(event.kind) > 15 || event.target > 2) return false;
     for(unsigned i = 0; i < 4; ++i)
-        if(event.text[i].size() > (i == 0 && event.kind == PresentationKind::Message ? 4096u : 256u) || event.text[i].find('\0') != std::string::npos) return false;
+        if(event.text[i].size() > ((i == 0 && event.kind == PresentationKind::Message) ||
+            (i == 1 && event.kind == PresentationKind::Hint) ? 4096u : 256u) || event.text[i].find('\0') != std::string::npos) return false;
     for(int32_t v : event.values) if(v < -100000000 || v > 100000000) return false;
+    if(event.kind == PresentationKind::Fade && (event.values[0] < 0 || event.values[0] > 1 || event.values[1] < 0)) return false;
+    if(event.kind == PresentationKind::ImageTrail || event.kind == PresentationKind::Sepia || event.kind == PresentationKind::RadialBlur ||
+        event.kind == PresentationKind::BlurStart || event.kind == PresentationKind::Flash)
+        for(int32_t v : event.values) if(v < 0) return false;
+    if(event.kind == PresentationKind::Hint && (event.text[0].empty() || event.values[0] < 0)) return false;
+    if(event.kind == PresentationKind::FogProperties && (event.values[2] < 0 || event.values[3] < 0 || event.values[3] > 3)) return false;
     if(event.kind == PresentationKind::Voice || event.kind == PresentationKind::Note || event.kind == PresentationKind::Diary) {
         for(unsigned i = event.kind == PresentationKind::Voice ? 0 : 1; i < 2; ++i) {
             const auto& path = event.text[i];
@@ -169,22 +180,37 @@ std::vector<uint8_t> EncodeSnapshot(const Snapshot& s) {
         U16(out, uint16_t(p.yaw)); U16(out, uint16_t(p.pitch));
         U16(out, p.health); U16(out, p.sanity); U16(out, p.oil);
         U16(out, uint16_t(p.eyeHeight)); U16(out, p.tinderboxes); out.push_back(p.flags);
+        U16(out, uint16_t(p.roll)); U16(out, uint16_t(p.cameraX)); U16(out, uint16_t(p.cameraZ));
+        U16(out, p.fov); U16(out, p.aspect); U16(out, p.lookSpeed);
     }
     return out;
 }
 bool DecodeSnapshot(const uint8_t* p, size_t n, Snapshot& s) {
-    if (!ValidHeader(p, n) || n != 71 || p[4] != uint8_t(Message::Snapshot)) return false;
+    if (!ValidHeader(p, n) || n != 95 || p[4] != uint8_t(Message::Snapshot)) return false;
     Snapshot value; value.epoch = R32(p + 5); value.sequence = R32(p + 9); value.acknowledgedInput = R32(p + 13);
     if (!value.epoch) return false;
     for (unsigned i = 0; i < 2; ++i) {
-        const uint8_t* b = p + 17 + i * 27; auto& player = value.players[i];
+        const uint8_t* b = p + 17 + i * 39; auto& player = value.players[i];
         player.x = Signed32(b); player.y = Signed32(b + 4); player.z = Signed32(b + 8);
         player.yaw = Signed16(b + 12); player.pitch = Signed16(b + 14);
         player.health = R16(b + 16); player.sanity = R16(b + 18); player.oil = R16(b + 20);
         player.eyeHeight = Signed16(b + 22); player.tinderboxes = R16(b + 24); player.flags = b[26];
+        player.roll = Signed16(b + 27); player.cameraX = Signed16(b + 29); player.cameraZ = Signed16(b + 31);
+        player.fov = R16(b + 33); player.aspect = R16(b + 35); player.lookSpeed = R16(b + 37);
         if (!ValidPlayer(player)) return false;
     }
     s = value; return true;
+}
+std::vector<uint8_t> EncodeLife(const Snapshot& s) {
+    auto bytes = EncodeSnapshot(s);
+    if(!bytes.empty()) bytes[4] = uint8_t(Message::Life);
+    return bytes;
+}
+bool DecodeLife(const uint8_t* p, size_t n, Snapshot& s) {
+    if(!ValidHeader(p, n) || n != 95 || p[4] != uint8_t(Message::Life)) return false;
+    auto bytes = std::vector<uint8_t>(p, p + n);
+    bytes[4] = uint8_t(Message::Snapshot);
+    return DecodeSnapshot(bytes.data(), bytes.size(), s);
 }
 std::vector<uint8_t> EncodeMap(const MapState& map) {
     if (!map.epoch || !map.fingerprint || !ValidMap(map.file)) return {};
@@ -205,15 +231,17 @@ std::vector<uint8_t> EncodeInput(const PlayerInput& i) {
     U32(out, i.sequence); U32(out, i.tick);
     U16(out, uint16_t(i.forward)); U16(out, uint16_t(i.strafe));
     U16(out, uint16_t(i.yaw)); U16(out, uint16_t(i.pitch)); out.push_back(i.buttons); U32(out, i.epoch);
+    U16(out, uint16_t(i.lookYaw)); U16(out, uint16_t(i.lookPitch));
     return out;
 }
 bool DecodeInput(const uint8_t* p, size_t n, PlayerInput& i) {
-    if (!ValidHeader(p, n) || n != 26 || p[4] != uint8_t(Message::Input)) return false;
+    if (!ValidHeader(p, n) || n != 30 || p[4] != uint8_t(Message::Input)) return false;
     PlayerInput value;
     value.sequence = R32(p + 5); value.tick = R32(p + 9);
     value.forward = Signed16(p + 13); value.strafe = Signed16(p + 15);
     value.yaw = Signed16(p + 17); value.pitch = Signed16(p + 19); value.buttons = p[21];
     value.epoch = R32(p + 22);
+    value.lookYaw = Signed16(p + 26); value.lookPitch = Signed16(p + 28);
     if (!ValidInput(value)) return false;
     i = value; return true;
 }
@@ -251,7 +279,7 @@ void Session::Stop() {
     host_ = nullptr; peer_ = nullptr; initialized_ = ready_ = hasInput_ = false; role_ = Role::Offline;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; map_ = MapState();
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
-    presentation_.clear();
+    presentation_.clear(); life_.clear(); hasLife_ = false;
 }
 bool Session::Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reliable) {
     if (!peer_ || bytes.empty()) return false;
@@ -266,7 +294,7 @@ void Session::Reject(const char* why) {
     peer_ = nullptr; ready_ = hasInput_ = false;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
-    presentation_.clear();
+    presentation_.clear(); life_.clear(); hasLife_ = false;
 }
 void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
     if (!ValidHeader(p, n)) { Reject("malformed packet or incompatible protocol"); return; }
@@ -279,6 +307,16 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         ready_ = true; log_("[NET/CONNECTION] Protocol handshake accepted; Player assigned ID 2"); return;
     }
     PlayerInput value;
+    if(ready_ && role_ == Role::Client && channel == 2 && p[4] == uint8_t(Message::Life)) {
+        Snapshot state;
+        if(!DecodeLife(p, n, state)) { Reject("invalid life transition"); return; }
+        if(!hasMap_ || state.epoch != map_.epoch) return;
+        uint32_t delta = state.sequence - lastLife_;
+        if(hasLife_ && (!delta || delta >= 0x80000000u)) return;
+        if(life_.size() >= 64) { Reject("life transition queue exceeded"); return; }
+        life_.push_back(state); hasLife_ = true; lastLife_ = state.sequence;
+        return;
+    }
     if(ready_ && role_ == Role::Client && channel == 2 && p[4] == uint8_t(Message::Presentation)) {
         Presentation event;
         if(!DecodePresentation(p, n, event)) { Reject("invalid presentation event"); return; }
@@ -336,7 +374,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         if (!DecodeMap(p, n, map)) { Reject("invalid map path or epoch"); return; }
         if (!hasMap_ || (map.epoch - map_.epoch != 0 && map.epoch - map_.epoch < 0x80000000u)) {
             map_ = map; hasMap_ = true; hasSnapshot_ = false; entities_.clear(); worldReadyEpoch_ = 0; hasInventory_ = false;
-            presentation_.clear();
+            presentation_.clear(); life_.clear(); hasLife_ = false;
         }
         return;
     }
@@ -361,7 +399,7 @@ void Session::Poll() {
         if (e.type == ENET_EVENT_TYPE_CONNECT) {
             peer_ = e.peer; ready_ = hasInput_ = hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; started_ = enet_time_get();
             entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
-            presentation_.clear();
+            presentation_.clear(); life_.clear(); hasLife_ = false;
             enet_peer_timeout(peer_, 8, 3000, 10000);
             if (role_ == Role::Host && e.data != ProtocolVersion) { Reject("incompatible connect version"); continue; }
             log_("[NET/CONNECTION] Peer connected");
@@ -373,7 +411,7 @@ void Session::Poll() {
             peer_ = nullptr; ready_ = hasInput_ = false; log_("[NET/CONNECTION] Peer disconnected or timed out");
             hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
             entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
-            presentation_.clear();
+            presentation_.clear(); life_.clear(); hasLife_ = false;
         }
     }
     if (peer_ && !ready_ && uint32_t(enet_time_get() - started_) > 5000) Reject("handshake timeout");
@@ -387,6 +425,11 @@ bool Session::ReadInput(PlayerInput& input) const {
 uint32_t Session::Ping() const { return peer_ && ready_ ? peer_->roundTripTime : 0; }
 bool Session::SendSnapshot(const Snapshot& s) { return role_ == Role::Host && ready_ && IsMapReady(s.epoch) && Send(EncodeSnapshot(s), 1, false); }
 bool Session::ReadSnapshot(Snapshot& s) const { if (!ready_ || !hasSnapshot_) return false; s = snapshot_; return true; }
+bool Session::SendLife(const Snapshot& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeLife(s), 2, true); }
+bool Session::ReadLife(Snapshot& s) {
+    if(!ready_ || life_.empty()) return false;
+    s = life_.front(); life_.pop_front(); return true;
+}
 bool Session::SendMap(const MapState& map) {
     if (role_ != Role::Host || !ready_ || !Send(EncodeMap(map), 0, true)) return false;
     map_ = map; hasMap_ = true; readyEpoch_ = 0; hasInput_ = false; actions_.clear(); return true;
