@@ -15,7 +15,8 @@ function Test-Connection([int]$TestPort, [bool]$RejectVersion, [bool]$Malformed 
             & $exePath malformed $TestPort
             if ($LASTEXITCODE -ne 0) { throw 'Malformed gameplay rejection failed' }
         }
-        & $exePath client $TestPort
+        $clientMode = if($Malformed) { 'client-resume' } else { 'client' }
+        & $exePath $clientMode $TestPort
         if ($LASTEXITCODE -ne 0) { throw 'Client test failed' }
         if (!$hostProcess.WaitForExit(10000)) { throw 'Host did not terminate' }
         $hostProcess.Refresh()

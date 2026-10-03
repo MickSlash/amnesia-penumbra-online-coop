@@ -22,7 +22,7 @@ Implementati:
 - Snapshot a 20 Hz di posizione, orientamento, altezza occhi, salute, sanità,
   olio, acciarini, lanterna, crouch, morte e stato attivo dei due giocatori.
   Buffer client da 100 ms, interpolazione e correzione dei teletrasporti.
-  Orientamento della camera locale immediato; movimento senza prediction.
+  Orientamento della camera locale immediato; prediction orizzontale limitata a 250 ms, con replay degli input non confermati e collisioni Newton.
 - Camera canonica con roll, FOV, moltiplicatore aspect, offset della testa e
   sensibilità script. LookAt e interazioni che consumano il mouse mantengono la
   visuale canonica. Il normale orientamento non applica due volte sensibilità/sway.
@@ -43,7 +43,7 @@ Implementati:
   delta di colore, raggio, visibilità e attivazione delle luci esistenti.
 - Hint, fade, image trail, sepia, radial blur e flash degli script; fog globale
   iniziale e modifiche di colore, intervallo, esponente, attivazione e culling.
-- Avvio con profili separati tramite `tools/StartOnlineCoop.ps1`.
+- Launcher grafico AmnesiaCoop.exe, menu online nativo, lobby Pronto, journal completo, riconnessione automatica e migrazione da checkpoint nativo.
 
 ## Autorità e integrazione del motore
 
@@ -62,21 +62,20 @@ globale, conservando un solo aggiornamento della simulazione.
 L'host resta proprietario degli script e degli effetti sul gameplay. Il client
 non esegue una seconda copia di AngelScript. Gli eventi di presentazione coprono
 solo i tipi elencati: questo non implica che ogni funzione script della campagna
-abbia già una replica. Una disconnessione client elimina il mondo replica e torna
-al menu; una disconnessione host libera P2. Non è implementata la ripresa della
-sessione o la migrazione dell'host.
+abbia già una replica. Una disconnessione conserva il mondo e P2, mette la campagna in pausa e avvia il recupero. Il client riprova lo stesso endpoint con identità persistente. Un checkpoint completo e validato consente di trasferire autorità e invertire i giocatori; il nuovo host aspetta il partner.
 
-## Protocollo versione 4
+## Protocollo versione 5
 
 ENet 1.3.18 incluso da sorgenti, licenza MIT conservata; mod GPLv3. Header AO,
 versione uint16 big-endian e tipo uint8; interi espliciti, nessuna struttura C++
-trasmessa in memoria. Tre canali:
+trasmessa in memoria. Quattro canali:
 
 | Canale | Affidabilità | Contenuto |
 | --- | --- | --- |
-| 0 | Affidabile e ordinato | Hello/Welcome, Map/MapReady, Action |
-| 1 | Ordinato, non affidabile | PlayerInput a 30 Hz (30 byte), Snapshot a 20 Hz (95 byte) |
-| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (95 byte), Media (115–627 byte) |
+| 0 | Affidabile e ordinato | Hello/Welcome, Map/MapReady, Action, Peer lobby, CheckpointAck |
+| 1 | Ordinato, non affidabile | PlayerInput a 30 Hz (30 byte), Snapshot a 20 Hz (123 byte) |
+| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (123 byte), Media (115–627 byte), Journal |
+| 3 | Affidabile e ordinato | Checkpoint compresso, frammenti da 1 KiB, massimo un invio per tick a 60 Hz |
 
 Ogni stato gameplay include un'epoch di mappa. Sequenze obsolete o duplicate
 sono ignorate con aritmetica che supporta il wraparound. MapReady abilita snapshot
@@ -150,16 +149,12 @@ Prima di dichiarare un MVP dell'intera campagna servono:
 2. Copertura degli effetti script ancora mancanti: effetti speciali,
    suoni diretti fuori dagli hook coperti, trasformazioni/creazione di luci e tipi di entità
    non compresi nel roster attuale (per esempio rope/commentary).
-3. Stato iniziale di journal/storia per join dopo un salvataggio o una raccolta:
-   gli eventi nuovi sono replicati, la cronologia precedente non è trasferita.
-4. Prove con latenza/perdita WAN e misure di banda; prediction del movimento e
-   interpolazione dei corpi se necessarie. Attualmente il movimento client
-   include ritardo di rete e buffer da 100 ms.
-5. Verifica manuale di grab, porte, leve, combinazioni e nemici a due bersagli,
-   oltre ai casi automatizzati. Reconnect, lobby e NAT traversal restano fuori.
+3. Prove su due PC e WAN, riavvio dopo crash, partizioni prolungate e progressi recuperati da checkpoint; la migrazione può perdere lo stato successivo al checkpoint ricevuto.
+4. Misure di banda e fluidità, prediction verticale e interpolazione degli oggetti fisici se necessarie. Il client prevede solo movimento orizzontale, fino a 250 ms.
+5. Verifica manuale di grab, porte, leve, combinazioni, voci/documenti e nemici, oltre ai casi automatizzati. NAT traversal, relay, matchmaking e discovery non sono inclusi.
 
 Non commettere binari né dati proprietari. Build e configurazioni generate sono
-ignorate da Git; i salvataggi del launcher usano cartelle dedicate per ruolo.
+ignorate da Git; il launcher grafico usa AmnesiaOnlineCoop_Host su ciascun PC.
 
 `RunGameSmoke.ps1 -Media` estende la regressione della campagna con suono ed
 emettitore persistenti, ricaricamento, modifica e rimozione, musica e presentazione
@@ -177,3 +172,46 @@ un nemico sceglie un bersaglio alla volta e mantiene l'ultima posizione conosciu
 durante la caccia. Gli attacchi di shape possono danneggiare entrambi i corpi se
 sono nell'area del colpo. Oscurità, immobilità, accovacciamento e lanterna
 modificano il raggio di rilevamento separatamente per ciascun giocatore.
+
+## Journal, prediction e recupero nel protocollo 5
+
+Journal trasferisce fino a 512 voci e 60000 byte con revisione e map epoch. Note,
+diari ordinati per gruppo e obiettivi attivi/completati provengono dalla collezione
+host; la sostituzione client attende la chiusura del journal per non invalidare
+puntatori delle pagine aperte. Il caricamento e ogni nuova connessione inviano una
+baseline completa, indipendente dagli eventi recenti di presentazione.
+
+Gli snapshot includono velocità e parametri del CharacterBody. La prediction del
+giocatore locale rimuove gli input confermati dal tick effettivamente applicato
+sull'host e ripete quelli pendenti: massimo 32 comandi e 250 ms. Verifica la shape
+Newton contro il mondo, consente slide orizzontali e disabilita il replay durante
+salti/crouch, morte e look controllato dagli script o dagli oggetti. Il partner
+rimane interpolato con buffer di 100 ms. Non è rollback dell'intera fisica.
+
+Hello/Welcome e Peer scambiano identità di ripresa, porta e stato Pronto. La
+configurazione conserva l'identità locale; la sessione ammette il precedente
+partner dopo una disconnessione e dopo inversione dei ruoli. L'identità evita
+riassegnazioni accidentali dello slot: non costituisce autenticazione crittografica.
+La perdita di input per oltre un secondo sospende la simulazione; la nuova map
+epoch riavvia questa verifica dopo il primo input, evitando un'attesa circolare
+tra baseline e input. Il mondo e P2 sono conservati durante il recupero.
+
+I checkpoint includono il salvataggio nativo completo e la collezione delle mappe
+visitate. Sono compressi con zlib, limitati a 32 MiB espansi e trasferiti sul
+canale 3 a circa 60 KiB/s prima degli overhead. Il checksum FNV64 verifica la
+completezza; non è una firma. Il client valida struttura XML, tipi, factory,
+lunghezze degli array, componenti dei vettori, valori finiti e profondità prima
+della deserializzazione. Conferma il checkpoint solo dopo questa verifica.
+
+Dopo un'assenza prolungata il precedente host cede l'autorità (circa 8 secondi),
+il client con un checkpoint valido tenta la promozione (circa 12 secondi), scambia
+P1/P2 nel salvataggio e attende il partner. Sono timer del recupero dopo il
+rilevamento della disconnessione, non garanzie di tempo dalla caduta del cavo.
+Un checkpoint ogni 20 secondi più il trasferimento comporta possibile rollback.
+Raggiungibilità bidirezionale, identità conservate e checkpoint valido sono
+necessari. Crash/restart dei PC e partizioni WAN non sono certificati.
+
+`RunRecoveryGameTest.ps1` interrompe il trasporto dopo ACK di un vero checkpoint.
+Verifica due secondi di interruzione e, separatamente, inversione host/client,
+variabile campagna, salute individuale e cronologia journal. Esercita inoltre
+rifiuto di classi sconosciute, vettori incompleti e factory incompatibili.

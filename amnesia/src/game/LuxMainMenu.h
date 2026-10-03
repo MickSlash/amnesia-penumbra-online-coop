@@ -37,6 +37,7 @@ enum eLuxMainMenuWindow
 	//////////////
 	// HARDMODE
 	eLuxMainMenuWindow_StartGame,
+    eLuxMainMenuWindow_Online,
 
 	eLuxMainMenuWindow_LastEnum,
 };
@@ -130,6 +131,8 @@ public:
 #endif
 	
 private:
+    bool PressOnline(iWidget* apWidget, const cGuiMessageData& aData);
+    kGuiCallbackDeclarationEnd(PressOnline);
 	///////////////////////
 	// Helper methods
 	

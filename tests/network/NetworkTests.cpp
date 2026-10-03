@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../amnesia/src/game/network/NetSession.h"
+#include "../../amnesia/src/game/network/Prediction.h"
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -183,6 +184,70 @@ static void LifeQueueLimitTest() {
     Check(client.ReadLife(life) && life.sequence == 0, "life reconnect accepts fresh sequence");
     std::cout << "PASS: bounded life queue, overflow rejection and reconnect reset\n";
 }
+static void RecoveryTests() {
+    JournalState journal; journal.epoch = 7; journal.revision = 42;
+    for(unsigned i = 0; i < 5; ++i) {
+        JournalEntry e; e.kind = uint8_t(i%3); e.name = "quest"; e.group = "Daniel"; e.nameEntry = "name";
+        e.textEntry = "text"; e.icon = "graphics/note_icon.tga"; e.active = i != 2; journal.entries.push_back(e);
+    }
+    auto bytes = EncodeJournal(journal); JournalState restored;
+    Check(DecodeJournal(bytes.data(),bytes.size(),restored) && restored.entries.size() == 5 && !restored.entries[2].active, "full journal chronology and completed quest roundtrip");
+    for(size_t i = 0; i < bytes.size(); ++i) Check(!DecodeJournal(bytes.data(),i,restored), "journal truncation");
+    journal.entries[0].image = "../secret"; Check(EncodeJournal(journal).empty(), "journal traversal rejected"); journal.entries[0].image.clear();
+    StressCodec(journal,EncodeJournal,DecodeJournal);
+    std::vector<uint8_t> payload(CheckpointChunkBytes+123,17);
+    CheckpointChunk c; c.epoch = 7; c.id = 1; c.total = uint32_t(payload.size()); c.hash = CheckpointHash(payload);
+    c.bytes.assign(payload.begin(),payload.begin()+CheckpointChunkBytes);
+    bytes = EncodeCheckpoint(c); CheckpointChunk decoded;
+    Check(DecodeCheckpoint(bytes.data(),bytes.size(),decoded), "checkpoint chunk roundtrip");
+    StressCodec(c,EncodeCheckpoint,DecodeCheckpoint);
+    CheckpointReceiver receiver; Checkpoint checkpoint;
+    Check(receiver.Accept(c) && !receiver.Read(checkpoint), "partial checkpoint is not exposed");
+    c.offset = CheckpointChunkBytes; c.bytes.assign(payload.begin()+CheckpointChunkBytes,payload.end());
+    Check(receiver.Accept(c) && receiver.Read(checkpoint) && checkpoint.bytes == payload, "complete checkpoint hash verified");
+    receiver.Reset(); Check(!receiver.Accept(c), "out-of-order checkpoint rejected");
+    c.offset = 0; c.bytes.assign(payload.begin(),payload.begin()+CheckpointChunkBytes); receiver.Accept(c);
+    c.offset = CheckpointChunkBytes; c.bytes.assign(payload.begin()+CheckpointChunkBytes,payload.end()); c.bytes[0] ^= 1;
+    Check(!receiver.Accept(c) && !receiver.Read(checkpoint), "checkpoint corruption never exposed");
+    c.total = MaxCheckpointBytes+1; Check(EncodeCheckpoint(c).empty(), "checkpoint memory bounded");
+    MovementPrediction prediction; PlayerInput input; input.sequence = 1; input.forward = 1000;
+    PlayerState state; state.forwardMax = state.sideMax = 3000; state.acceleration = state.deceleration = 30000;
+    auto free = [](PredictedPosition,PredictedPosition to) { return to; };
+    for(int i = 0; i < 6; ++i) prediction.Push(input,1.0f/60);
+    auto position = prediction.Reconcile(state,0,free);
+    Check(position.z < -0.1f && position.z > -0.31f, "local input predicts before authoritative acknowledgement");
+    position = prediction.Reconcile(state,1,free); Check(position.z == 0 && prediction.Pending() == 0, "acknowledged commands removed");
+    for(int i = 0; i < 120; ++i) prediction.Push(input,1.0f/60);
+    position = prediction.Reconcile(state,0,free); Check(prediction.Pending() == 32 && position.z > -0.76f, "prediction horizon and memory bounded during loss");
+    position = prediction.Reconcile(state,0,[](PredictedPosition from,PredictedPosition) { return from; }); Check(position.z == 0, "blocked movement cannot predict through wall");
+    state.flags |= 32; position = prediction.Reconcile(state,0,free); Check(position.z == 0 && prediction.Pending() == 0, "interactions suppress prediction");
+    Session host(Log), client(Log), stranger(Log);
+    host.SetLobbyReady(false); client.SetLobbyReady(false);
+    Check(host.StartHost(27047) && client.StartClient("127.0.0.1",27047), "recovery transport startup");
+    auto pump = [&](int ms) { for(int i = 0; i < ms; ++i) { host.Poll(); client.Poll(); stranger.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    pump(100); Check(host.Connected() && client.Connected() && !host.LobbyReady(), "lobby handshake does not bypass readiness");
+    host.SetLobbyReady(true); pump(20); Check(!host.LobbyReady(), "both players must be ready");
+    client.SetLobbyReady(true); pump(20); Check(host.LobbyReady() && client.LobbyReady(), "both ready replicated");
+    MapState map; map.epoch = 7; map.fingerprint = 1; map.file = "maps/test.map"; host.SendMap(map); pump(20); client.SendMapReady(7); pump(20);
+    Check(host.SendJournal(journal), "send complete journal history"); pump(20); Check(client.ReadJournal(restored) && restored.entries.size() == 5, "join journal baseline received");
+    client.Stop(); pump(20);
+    Check(stranger.StartClient("127.0.0.1",27047), "stranger connect"); pump(100);
+    Check(!host.Connected() && !stranger.Connected(), "different player cannot take disconnected player's slot"); stranger.Stop();
+    Check(client.StartClient("127.0.0.1",27047,true), "same player resume"); pump(100);
+    Check(host.Connected() && client.Connected() && host.Generation() == 2 && !client.ReadJournal(restored), "resume handshake rebuilds baseline without stale journal");
+    map.epoch = 8; host.SendMap(map); pump(20); client.SendMapReady(8); pump(20);
+    c.epoch = 8; c.total = uint32_t(payload.size()); c.offset = 0; c.bytes.assign(payload.begin(),payload.begin()+CheckpointChunkBytes);
+    Check(host.SendCheckpoint(c), "first checkpoint transport chunk"); pump(20); Check(!client.ReadCheckpoint(checkpoint), "network partial checkpoint withheld");
+    c.offset = CheckpointChunkBytes; c.bytes.assign(payload.begin()+CheckpointChunkBytes,payload.end());
+    Check(host.SendCheckpoint(c), "last checkpoint transport chunk"); pump(20);
+    Check(client.ReadCheckpoint(checkpoint) && checkpoint.bytes == payload && host.CheckpointAcknowledged() == 0, "checkpoint requires application validation before acknowledgement");
+    Check(client.AcknowledgeCheckpoint(checkpoint.id), "validated checkpoint acknowledgement"); pump(20);
+    Check(host.CheckpointAcknowledged() == 1, "checkpoint completion acknowledgement");
+    host.SuspendTransportForTest(); pump(20);
+    Check(client.StartHost(27048,true) && host.StartClient("127.0.0.1",27048,true), "reverse roles preserving peer identities"); pump(100);
+    Check(host.Connected() && client.Connected() && client.GetRole() == Role::Host && host.GetRole() == Role::Client, "host migration transport role reversal");
+    std::cout << "PASS: journal, checkpoint integrity, lobby, resume identity, role reversal and bounded prediction; 20000 additional codec stress cases\n";
+}
 int main(int argc, char** argv) {
     MediaCodecTest();
     PlayerInput input; input.sequence = 0x12345678; input.tick = 42;
@@ -200,7 +265,7 @@ int main(int argc, char** argv) {
     input.lookYaw = 31421; Check(EncodeInput(input).empty(), "raw look bounded"); input.lookYaw = 0;
     Snapshot snapshot; snapshot.epoch = 1; snapshot.sequence = 17; snapshot.players[0].x = -54321;
     auto stateBytes = EncodeSnapshot(snapshot); Snapshot stateRead;
-    Check(stateBytes.size() == 95 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
+    Check(stateBytes.size() == 123 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
         stateRead.players[0].x == -54321 && stateRead.sequence == 17, "signed snapshot roundtrip");
     for(size_t n = 0; n < stateBytes.size(); ++n) Check(!DecodeSnapshot(stateBytes.data(), n, stateRead), "truncated snapshot");
     stateBytes.push_back(0); Check(!DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead), "snapshot trailing byte");
@@ -260,7 +325,7 @@ int main(int argc, char** argv) {
     story.values[0] = 1; story.values[1] = 350;
     auto fadeBytes = EncodePresentation(story);
     Check(DecodePresentation(fadeBytes.data(), fadeBytes.size(), storyRead) && storyRead.values[1] == 350, "fade roundtrip");
-    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); LifeQueueLimitTest(); return 0; }
+    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); LifeQueueLimitTest(); RecoveryTests(); return 0; }
     const bool host = std::string(argv[1]) == "host";
     const bool badVersion = std::string(argv[1]) == "bad-version";
     const bool malformed = std::string(argv[1]) == "malformed";
@@ -268,19 +333,19 @@ int main(int argc, char** argv) {
     uint16_t port = argc > 2 ? uint16_t(std::stoi(argv[2])) : DefaultPort;
     if (badVersion || malformed) {
         Check(enet_initialize() == 0, "raw ENet init");
-        ENetHost* raw = enet_host_create(nullptr, 1, 3, 0, 0); Check(raw != nullptr, "raw host");
+        ENetHost* raw = enet_host_create(nullptr, 1, 4, 0, 0); Check(raw != nullptr, "raw host");
         ENetAddress address = {}; address.port = port; enet_address_set_host(&address, "127.0.0.1");
-        ENetPeer* rawPeer = enet_host_connect(raw, &address, 3, badVersion ? ProtocolVersion + 1 : ProtocolVersion);
+        ENetPeer* rawPeer = enet_host_connect(raw, &address, 4, badVersion ? ProtocolVersion + 1 : ProtocolVersion);
         Check(rawPeer != nullptr, "raw connect");
         ENetEvent event; bool rejected = false;
         for (int i = 0; i < 500 && !rejected; ++i) {
             while (enet_host_service(raw, &event, 0) > 0) {
                 if(malformed && event.type == ENET_EVENT_TYPE_CONNECT) {
-                    const uint8_t hello[] = {'A','O',0,uint8_t(ProtocolVersion),uint8_t(Message::Hello)};
+                    const uint8_t hello[] = {'A','O',0,uint8_t(ProtocolVersion),uint8_t(Message::Hello),0,0,0,0,0,0,0,1,105,159};
                     enet_peer_send(rawPeer,0,enet_packet_create(hello,sizeof(hello),ENET_PACKET_FLAG_RELIABLE));
                 }
                 if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-                    if(malformed && event.packet->dataLength == 9 && event.packet->data[4] == uint8_t(Message::Welcome)) {
+                    if(malformed && event.packet->dataLength == 19 && event.packet->data[4] == uint8_t(Message::Welcome)) {
                         auto invalidInput = EncodeInput(input); invalidInput[13] = 0x7f; invalidInput[14] = 0xff;
                         enet_peer_send(rawPeer,1,enet_packet_create(invalidInput.data(),invalidInput.size(),0));
                     }
@@ -295,6 +360,7 @@ int main(int argc, char** argv) {
         std::cout << (malformed ? "PASS: malformed gameplay input rejected\n" : "PASS: incompatible peer rejected\n"); return 0;
     }
     Session session(Log);
+    if(std::string(argv[1]) == "client-resume") Check(session.SetLocalIdentity(1), "restore persisted client identity");
     Check(host ? session.StartHost(port) : session.StartClient("127.0.0.1", port), "start transport");
     bool connected = false, observed = false;
     auto start = std::chrono::steady_clock::now();

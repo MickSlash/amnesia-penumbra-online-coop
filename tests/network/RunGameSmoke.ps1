@@ -6,6 +6,7 @@ param(
     [switch]$Replication,
     [switch]$Campaign,
     [switch]$Media,
+    [switch]$Prediction,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
@@ -32,7 +33,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -60,6 +61,8 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_CAMPAIGN', $(if ($Campaign -and $role -eq 'host') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_ENEMY', $(if ($Enemy) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_MEDIA', $(if ($Media) { '1' } else { $null }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_RECOVERY', $null)
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_PREDICTION', $(if ($Prediction -and $role -eq 'client') { '1' } else { $null }))
         $style = if ($Visual) { 'Normal' } else { 'Hidden' }
         $processes += Start-Process -FilePath $exePath -WorkingDirectory $gamePath -ArgumentList $initPath -WindowStyle $style -PassThru
     }
@@ -113,6 +116,7 @@ try {
             }
         }
         if ($Replication) {
+            if($Prediction -and $role -eq 'client' -and !$log.Contains('Local movement prediction applied before host acknowledgement with world collision checks')) { throw 'Native prediction did not exercise pending input and collision checks' }
             $markers = if ($role -eq 'host') { @('Announced epoch=', 'Remote Player 2 moved under network input', 'Complete host entity baseline sent', 'Host validated remote pickup; exactly one tinderbox awarded') } else { @('Replica loaded epoch=', 'First authoritative player snapshot applied', 'Created host avatar in replica world', 'Complete host entity baseline applied', 'Client camera/body moved from authoritative snapshots', 'Host pickup destruction replicated to client') }
             foreach ($marker in $markers) { if (!$log.Contains($marker)) { throw "Missing $role replication proof: $marker" } }
             $inventoryMarker = if ($role -eq 'host') { 'Host validated remote inventory use; one potion consumed' } else { 'Shared host inventory applied' }

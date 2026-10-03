@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "NetSession.h"
 #include <enet/enet.h>
+#include <random>
 namespace online {
 namespace {
 void U16(std::vector<uint8_t>& out, uint16_t v) { out.push_back(uint8_t(v >> 8)); out.push_back(uint8_t(v)); }
@@ -127,6 +128,49 @@ std::vector<uint8_t> EncodeMedia(const MediaState& s) {
     for(int32_t v : s.values) U32(out, uint32_t(v));
     String(out, s.name); String(out, s.file); return out;
 }
+std::vector<uint8_t> EncodeCheckpoint(const CheckpointChunk& c) {
+    if(!c.epoch || !c.id || !c.total || c.total > MaxCheckpointBytes || c.bytes.empty() || c.bytes.size() > CheckpointChunkBytes ||
+        c.offset > c.total || c.bytes.size() > c.total - c.offset) return {};
+    auto out = Header(Message::Checkpoint); U32(out, c.epoch); U32(out, c.id); U32(out, c.total); U32(out, c.offset);
+    U32(out, uint32_t(c.hash >> 32)); U32(out, uint32_t(c.hash)); out.insert(out.end(), c.bytes.begin(), c.bytes.end()); return out;
+}
+bool DecodeCheckpoint(const uint8_t* p, size_t n, CheckpointChunk& c) {
+    if(!ValidHeader(p,n) || p[4] != uint8_t(Message::Checkpoint) || n <= 29 || n > 29 + CheckpointChunkBytes) return false;
+    CheckpointChunk value; value.epoch = R32(p+5); value.id = R32(p+9); value.total = R32(p+13); value.offset = R32(p+17);
+    value.hash = (uint64_t(R32(p+21)) << 32) | R32(p+25); value.bytes.assign(p+29,p+n);
+    if(EncodeCheckpoint(value).empty()) return false;
+    c = std::move(value); return true;
+}
+std::vector<uint8_t> EncodeJournal(const JournalState& s) {
+    if(!s.epoch || s.entries.size() > 512) return {};
+    auto out = Header(Message::Journal); U32(out, s.epoch); U32(out, s.revision); U16(out, uint16_t(s.entries.size()));
+    for(const auto& e : s.entries) {
+        if(e.kind > 2) return {};
+        out.push_back(e.kind); out.push_back(e.active ? 1 : 0);
+        for(const auto* value : {&e.group, &e.name, &e.nameEntry, &e.textEntry, &e.icon, &e.image}) {
+            if(value->size() > 256 || value->find('\0') != std::string::npos) return {};
+            String(out, *value);
+        }
+        for(const auto* path : {&e.icon, &e.image})
+            if(path->find("..") != std::string::npos || path->find(':') != std::string::npos ||
+                (!path->empty() && ((*path)[0] == '/' || (*path)[0] == '\\'))) return {};
+    }
+    return out.size() <= 60000 ? out : std::vector<uint8_t>();
+}
+bool DecodeJournal(const uint8_t* p, size_t n, JournalState& s) {
+    if(!ValidHeader(p, n) || n < 15 || n > 60000 || p[4] != uint8_t(Message::Journal) || R16(p + 13) > 512) return false;
+    JournalState value; value.epoch = R32(p + 5); value.revision = R32(p + 9);
+    size_t cursor = 15;
+    for(unsigned i = 0; i < R16(p + 13); ++i) {
+        if(n - cursor < 2 || p[cursor] > 2 || p[cursor + 1] > 1) return false;
+        JournalEntry e; e.kind = p[cursor++]; e.active = p[cursor++] != 0;
+        for(auto* text : {&e.group, &e.name, &e.nameEntry, &e.textEntry, &e.icon, &e.image})
+            if(!ReadString(p, n, cursor, *text, 256)) return false;
+        value.entries.push_back(std::move(e));
+    }
+    if(cursor != n || EncodeJournal(value).empty()) return false;
+    s = std::move(value); return true;
+}
 bool DecodeMedia(const uint8_t* p, size_t n, MediaState& s) {
     if(!ValidHeader(p, n) || p[4] != uint8_t(Message::Media) || n < 115 || n > 627) return false;
     MediaState value; value.epoch = R32(p + 5); value.id = R32(p + 9);
@@ -226,22 +270,27 @@ std::vector<uint8_t> EncodeSnapshot(const Snapshot& s) {
         U16(out, p.health); U16(out, p.sanity); U16(out, p.oil);
         U16(out, uint16_t(p.eyeHeight)); U16(out, p.tinderboxes); out.push_back(p.flags);
         U16(out, uint16_t(p.roll)); U16(out, uint16_t(p.cameraX)); U16(out, uint16_t(p.cameraZ));
-        U16(out, p.fov); U16(out, p.aspect); U16(out, p.lookSpeed);
+                U16(out, p.fov); U16(out, p.aspect); U16(out, p.lookSpeed);
+        U16(out, uint16_t(p.forwardSpeed)); U16(out, uint16_t(p.sideSpeed));
+        U16(out, p.forwardMax); U16(out, p.sideMax); U16(out, p.acceleration); U16(out, p.deceleration); U16(out,p.backwardMax);
     }
     return out;
 }
 bool DecodeSnapshot(const uint8_t* p, size_t n, Snapshot& s) {
-    if (!ValidHeader(p, n) || n != 95 || p[4] != uint8_t(Message::Snapshot)) return false;
+    if (!ValidHeader(p, n) || n != 123 || p[4] != uint8_t(Message::Snapshot)) return false;
     Snapshot value; value.epoch = R32(p + 5); value.sequence = R32(p + 9); value.acknowledgedInput = R32(p + 13);
     if (!value.epoch) return false;
     for (unsigned i = 0; i < 2; ++i) {
-        const uint8_t* b = p + 17 + i * 39; auto& player = value.players[i];
+        const uint8_t* b = p + 17 + i * 53; auto& player = value.players[i];
         player.x = Signed32(b); player.y = Signed32(b + 4); player.z = Signed32(b + 8);
         player.yaw = Signed16(b + 12); player.pitch = Signed16(b + 14);
         player.health = R16(b + 16); player.sanity = R16(b + 18); player.oil = R16(b + 20);
         player.eyeHeight = Signed16(b + 22); player.tinderboxes = R16(b + 24); player.flags = b[26];
         player.roll = Signed16(b + 27); player.cameraX = Signed16(b + 29); player.cameraZ = Signed16(b + 31);
-        player.fov = R16(b + 33); player.aspect = R16(b + 35); player.lookSpeed = R16(b + 37);
+                player.fov = R16(b + 33); player.aspect = R16(b + 35); player.lookSpeed = R16(b + 37);
+        player.forwardSpeed = Signed16(b+39); player.sideSpeed = Signed16(b+41);
+        player.forwardMax = R16(b+43); player.sideMax = R16(b+45); player.acceleration = R16(b+47); player.deceleration = R16(b+49);
+        player.backwardMax = R16(b+51);
         if (!ValidPlayer(player)) return false;
     }
     s = value; return true;
@@ -252,7 +301,7 @@ std::vector<uint8_t> EncodeLife(const Snapshot& s) {
     return bytes;
 }
 bool DecodeLife(const uint8_t* p, size_t n, Snapshot& s) {
-    if(!ValidHeader(p, n) || n != 95 || p[4] != uint8_t(Message::Life)) return false;
+    if(!ValidHeader(p, n) || n != 123 || p[4] != uint8_t(Message::Life)) return false;
     auto bytes = std::vector<uint8_t>(p, p + n);
     bytes[4] = uint8_t(Message::Snapshot);
     return DecodeSnapshot(bytes.data(), bytes.size(), s);
@@ -281,6 +330,7 @@ std::vector<uint8_t> EncodeInput(const PlayerInput& i) {
 }
 bool DecodeInput(const uint8_t* p, size_t n, PlayerInput& i) {
     if (!ValidHeader(p, n) || n != 30 || p[4] != uint8_t(Message::Input)) return false;
+
     PlayerInput value;
     value.sequence = R32(p + 5); value.tick = R32(p + 9);
     value.forward = Signed16(p + 13); value.strafe = Signed16(p + 15);
@@ -290,29 +340,29 @@ bool DecodeInput(const uint8_t* p, size_t n, PlayerInput& i) {
     if (!ValidInput(value)) return false;
     i = value; return true;
 }
-Session::Session(Logger logger) : log_(logger) {}
+Session::Session(Logger logger) : log_(logger) { std::random_device random; identity_ = (uint64_t(random()) << 32) | random(); if(!identity_) identity_ = 1; }
 Session::~Session() { Stop(); }
 bool Session::Initialize() {
     if (enet_initialize() != 0) { log_("[NET/CONNECTION] ENet initialization failed"); return false; }
     initialized_ = true; return true;
 }
-bool Session::StartHost(uint16_t port) {
-    Stop(); if (!port || !Initialize()) return false;
+bool Session::StartHost(uint16_t port, bool resume) {
+    Stop(); fatal_ = false; if(!resume) { expectedIdentity_ = 0; checkpointAck_ = 0; } listenPort_ = port; if (!port || !Initialize()) return false;
     ENetAddress address = {}; address.host = ENET_HOST_ANY; address.port = port;
-    host_ = enet_host_create(&address, 1, 3, 0, 0);
+    host_ = enet_host_create(&address, 1, 4, 0, 0);
     if (!host_) { log_("[NET/CONNECTION] Cannot bind host socket"); Stop(); return false; }
     host_->maximumPacketSize = 65536; host_->maximumWaitingData = 262144;
     role_ = Role::Host;
     log_("[NET/CONNECTION] Listening on 0.0.0.0:" + std::to_string(port)); return true;
 }
-bool Session::StartClient(const std::string& name, uint16_t port) {
-    Stop(); if (name.empty() || !port || !Initialize()) return false;
-    host_ = enet_host_create(nullptr, 1, 3, 0, 0);
+bool Session::StartClient(const std::string& name, uint16_t port, bool resume) {
+    Stop(); fatal_ = false; if(!resume) { expectedIdentity_ = 0; checkpointAck_ = 0; } if (name.empty() || !port || !Initialize()) return false;
+    host_ = enet_host_create(nullptr, 1, 4, 0, 0);
     if (!host_) { Stop(); return false; }
     host_->maximumPacketSize = 65536; host_->maximumWaitingData = 262144;
     ENetAddress address = {}; address.port = port;
     if (enet_address_set_host(&address, name.c_str()) != 0) { log_("[NET/CONNECTION] Invalid host address"); Stop(); return false; }
-    peer_ = enet_host_connect(host_, &address, 3, ProtocolVersion);
+    peer_ = enet_host_connect(host_, &address, 4, ProtocolVersion);
     if (!peer_) { Stop(); return false; }
     role_ = Role::Client; started_ = enet_time_get();
     log_("[NET/CONNECTION] Connecting to " + name + ":" + std::to_string(port)); return true;
@@ -323,8 +373,11 @@ void Session::Stop() {
     if (initialized_) enet_deinitialize();
     host_ = nullptr; peer_ = nullptr; initialized_ = ready_ = hasInput_ = false; role_ = Role::Offline;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; map_ = MapState();
-    entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
+    entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+}
+void Session::SuspendTransportForTest() {
+    const Role previous = role_; Stop(); role_ = previous;
 }
 bool Session::Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reliable) {
     if (!peer_ || bytes.empty()) return false;
@@ -333,25 +386,53 @@ bool Session::Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reli
     if (enet_peer_send(peer_, channel, packet) != 0) { enet_packet_destroy(packet); return false; }
     return true;
 }
-void Session::Reject(const char* why) {
+void Session::Reject(const char* why) { fatal_ = true;
     log_(std::string("[NET/CONNECTION] Rejected: ") + why);
     if (peer_) enet_peer_disconnect_now(peer_, 1);
     peer_ = nullptr; ready_ = hasInput_ = false;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
-    entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
+    entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
 }
 void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
     if (!ValidHeader(p, n)) { Reject("malformed packet or incompatible protocol"); return; }
-    if (!ready_ && role_ == Role::Host && channel == 0 && n == 5 && p[4] == uint8_t(Message::Hello)) {
-        auto welcome = Header(Message::Welcome); U32(welcome, 2);
+    if (!ready_ && role_ == Role::Host && channel == 0 && n == 15 && p[4] == uint8_t(Message::Hello)) {
+        const uint64_t identity = (uint64_t(R32(p + 5)) << 32) | R32(p + 9);
+        if(!identity || !R16(p + 13) || (expectedIdentity_ && identity != expectedIdentity_)) { Reject("different resume identity"); return; }
+        expectedIdentity_ = identity; remotePort_ = R16(p + 13);
+        auto welcome = Header(Message::Welcome); U32(welcome, 2); U32(welcome, uint32_t(identity_ >> 32)); U32(welcome, uint32_t(identity_)); U16(welcome, listenPort_);
         if (!Send(welcome, 0, true)) { Reject("cannot send Welcome"); return; }
-        ready_ = true; log_("[NET/CONNECTION] Protocol handshake accepted; Player assigned ID 2"); return;
+        ready_ = true; fatal_ = false; ++generation_; SetLobbyReady(localReady_);
+        log_("[NET/CONNECTION] Protocol handshake accepted; Player assigned ID 2"); return;
     }
-    if (!ready_ && role_ == Role::Client && channel == 0 && n == 9 && p[4] == uint8_t(Message::Welcome) && R32(p + 5) == 2) {
-        ready_ = true; log_("[NET/CONNECTION] Protocol handshake accepted; Player assigned ID 2"); return;
+    if (!ready_ && role_ == Role::Client && channel == 0 && n == 19 && p[4] == uint8_t(Message::Welcome) && R32(p + 5) == 2) {
+        const uint64_t identity = (uint64_t(R32(p + 9)) << 32) | R32(p + 13);
+        if(!identity || !R16(p + 17) || (expectedIdentity_ && identity != expectedIdentity_)) { Reject("different host identity"); return; }
+        expectedIdentity_ = identity; remotePort_ = R16(p + 17);
+        ready_ = true; fatal_ = false; ++generation_; SetLobbyReady(localReady_);
+        log_("[NET/CONNECTION] Protocol handshake accepted; Player assigned ID 2"); return;
     }
+    if(ready_ && channel == 0 && n == 8 && p[4] == uint8_t(Message::Peer) && p[5] <= 1 && R16(p + 6)) {
+        remoteReady_ = p[5] != 0; remotePort_ = R16(p + 6); return;
+    }
+    if(ready_ && role_ == Role::Client && channel == 3 && p[4] == uint8_t(Message::Checkpoint)) {
+        CheckpointChunk chunk;
+        if(!DecodeCheckpoint(p,n,chunk)) { Reject("invalid recovery checkpoint"); return; }
+        if(!hasMap_ || chunk.epoch != map_.epoch) return;
+        if(!checkpointReceiver_.Accept(chunk)) { Reject("invalid recovery checkpoint order or checksum"); return; }
+        return;
+    }
+    if(ready_ && role_ == Role::Host && channel == 0 && n == 9 && p[4] == uint8_t(Message::CheckpointAck)) { if(R32(p+5) == checkpointSent_) checkpointAck_ = checkpointSent_; return; }
     PlayerInput value;
+    if(ready_ && role_ == Role::Client && channel == 2 && p[4] == uint8_t(Message::Journal)) {
+        JournalState state;
+        if(!DecodeJournal(p, n, state)) { Reject("invalid journal snapshot"); return; }
+        if(hasMap_ && state.epoch == map_.epoch && (!hasJournal_ || journal_.epoch != state.epoch ||
+            (state.revision - journal_.revision != 0 && state.revision - journal_.revision < 0x80000000u))) {
+            journal_ = std::move(state); hasJournal_ = true;
+        }
+        return;
+    }
     if(ready_ && role_ == Role::Client && channel == 2 && p[4] == uint8_t(Message::Life)) {
         Snapshot state;
         if(!DecodeLife(p, n, state)) { Reject("invalid life transition"); return; }
@@ -425,7 +506,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         MapState map;
         if (!DecodeMap(p, n, map)) { Reject("invalid map path or epoch"); return; }
         if (!hasMap_ || (map.epoch - map_.epoch != 0 && map.epoch - map_.epoch < 0x80000000u)) {
-            map_ = map; hasMap_ = true; hasSnapshot_ = false; entities_.clear(); worldReadyEpoch_ = 0; hasInventory_ = false;
+            map_ = map; hasMap_ = true; hasSnapshot_ = false; entities_.clear(); worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
         }
         return;
@@ -449,24 +530,28 @@ void Session::Poll() {
     // Bound work per logic tick; malformed peers cannot monopolize the game loop.
     for (int count = 0; count < 64 && enet_host_service(host_, &e, 0) > 0; ++count) {
         if (e.type == ENET_EVENT_TYPE_CONNECT) {
+            char address[64] = {}; enet_address_get_host_ip(&e.peer->address, address, sizeof(address)); remoteAddress_ = address; remoteReady_ = false;
             peer_ = e.peer; ready_ = hasInput_ = hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; started_ = enet_time_get();
-            entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
+            entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
             enet_peer_timeout(peer_, 8, 3000, 10000);
             if (role_ == Role::Host && e.data != ProtocolVersion) { Reject("incompatible connect version"); continue; }
             log_("[NET/CONNECTION] Peer connected");
-            if (role_ == Role::Client && !Send(Header(Message::Hello), 0, true)) Reject("cannot send Hello");
+                        if(role_ == Role::Client) {
+                auto hello = Header(Message::Hello); U32(hello, uint32_t(identity_ >> 32)); U32(hello, uint32_t(identity_)); U16(hello, listenPort_);
+                if(!Send(hello, 0, true)) Reject("cannot send Hello");
+            }
         } else if (e.type == ENET_EVENT_TYPE_RECEIVE) {
             if (e.peer == peer_) Receive(e.packet->data, e.packet->dataLength, e.channelID);
             enet_packet_destroy(e.packet);
         } else if (e.type == ENET_EVENT_TYPE_DISCONNECT && e.peer == peer_) {
             peer_ = nullptr; ready_ = hasInput_ = false; log_("[NET/CONNECTION] Peer disconnected or timed out");
             hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
-            entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false;
+            entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
         }
     }
-    if (peer_ && !ready_ && uint32_t(enet_time_get() - started_) > 5000) Reject("handshake timeout");
+    if (peer_ && !ready_ && uint32_t(enet_time_get() - started_) > 5000) { Reject("handshake timeout"); fatal_ = false; }
     enet_host_flush(host_);
 }
 bool Session::SendInput(const PlayerInput& input) { return role_ == Role::Client && ready_ && Send(EncodeInput(input), 1, false); }
@@ -475,6 +560,11 @@ bool Session::ReadInput(PlayerInput& input) const {
     input = input_; return true;
 }
 uint32_t Session::Ping() const { return peer_ && ready_ ? peer_->roundTripTime : 0; }
+void Session::SetLobbyReady(bool ready) {
+    localReady_ = ready;
+    if(!ready_) return;
+    auto out = Header(Message::Peer); out.push_back(ready ? 1 : 0); U16(out, listenPort_); Send(out, 0, true);
+}
 bool Session::SendSnapshot(const Snapshot& s) { return role_ == Role::Host && ready_ && IsMapReady(s.epoch) && Send(EncodeSnapshot(s), 1, false); }
 bool Session::ReadSnapshot(Snapshot& s) const { if (!ready_ || !hasSnapshot_) return false; s = snapshot_; return true; }
 bool Session::SendLife(const Snapshot& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeLife(s), 2, true); }
@@ -512,4 +602,16 @@ bool Session::SendPresentation(const Presentation& event) { return role_ == Role
 bool Session::ReadPresentation(Presentation& event) { if(presentation_.empty()) return false; event = std::move(presentation_.front()); presentation_.pop_front(); return true; }
 bool Session::SendMedia(const MediaState& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeMedia(s), 2, true); }
 bool Session::ReadMedia(MediaState& s) { if(media_.empty()) return false; s = std::move(media_.front()); media_.pop_front(); return true; }
+bool Session::SendJournal(const JournalState& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeJournal(s), 2, true); }
+bool Session::ReadJournal(JournalState& s) const { if(!ready_ || !hasJournal_ || !hasMap_ || journal_.epoch != map_.epoch) return false; s = journal_; return true; }
+bool Session::SendCheckpoint(const CheckpointChunk& c) {
+    if(role_ != Role::Host || !IsMapReady(c.epoch) || !Send(EncodeCheckpoint(c),3,true)) return false;
+    if(c.offset + c.bytes.size() == c.total) checkpointSent_ = c.id;
+    return true;
+}
+bool Session::ReadCheckpoint(Checkpoint& c) { if(!checkpointReceiver_.Read(c)) return false; checkpointDelivered_ = c.id; return true; }
+bool Session::AcknowledgeCheckpoint(uint32_t id) {
+    if(role_ != Role::Client || !ready_ || !id || id != checkpointDelivered_) return false;
+    auto ack = Header(Message::CheckpointAck); U32(ack,id); return Send(ack,0,true);
+}
 }

@@ -2,6 +2,7 @@
 #pragma once
 #include "LuxBase.h"
 #include "network/NetSession.h"
+#include "network/Prediction.h"
 #include <chrono>
 #include <deque>
 #include <map>
@@ -25,7 +26,7 @@ public:
     bool ClientObjectControlsLook() const { return IsClientReplica() && mClientObjectLook; }
     bool OwnsPlayerInput(const cLuxPlayer* player) const { return mSession.GetRole() == online::Role::Host && mRemotePlayer2 && player == mRemotePlayer2; }
     bool RemoteRotateHeld() const { return mRemoteRotate; }
-    bool HasNetworkPlayers() const { return mSession.Connected() && OwnsRemotePlayer2(); }
+    bool HasNetworkPlayers() const { return mSession.GetRole() != online::Role::Offline && OwnsRemotePlayer2(); }
     bool WaitingForMap() const;
     bool UsesSharedInventory() const { return mSession.GetRole() != online::Role::Offline; }
     void SendLocalAction(online::PlayerAction action, bool pressed);
@@ -33,6 +34,10 @@ public:
     void OnMapEnter(cLuxMap* map);
     void QueuePresentation(online::Presentation event);
     void MusicChanged(int priority, float fadeTime);
+    bool Host(uint16_t port);
+    bool Join(const std::string& address, uint16_t port);
+    void Disconnect();
+    std::string ConnectionStatus() const;
 private:
     online::Session mSession;
     uint8_t mPreviousButtons = 0;
@@ -52,6 +57,8 @@ private:
     int mPendingLookYaw = 0, mPendingLookPitch = 0;
     uint32_t mAppliedLookSequence = 0;
     bool mHasLookSequence = false, mClientObjectLook = false, mClientScriptLook = false;
+    online::MovementPrediction mPrediction;
+    bool mPredictionTestObserved = false;
     bool mRemoteRotate = false;
     cVector3f mRemoteSpawnFeet;
     bool mObservedRemoteMovement = false;
@@ -82,12 +89,35 @@ private:
     std::vector<uint8_t> mInventoryBytes;
     uint32_t mInventoryRevision = 0, mAppliedInventoryRevision = 0;
     bool mAppliedInventory = false;
+    std::vector<uint8_t> mJournalBytes;
+    uint32_t mJournalRevision = 0, mAppliedJournalRevision = 0;
+    bool mAppliedJournal = false;
     bool mTestPotionRequested = false, mTestPotionUsed = false, mTestSaveLoaded = false, mTestTransitionStarted = false;
     bool mClientDead = false;
     bool mHasClientLife = false, mHasHostLife = false;
     online::Snapshot mClientLife, mHostLife;
     std::chrono::steady_clock::time_point mClientDeathStart;
     bool mWasClient = false, mHadClientConnection = false;
+    bool mRecovering = false, mEverConnected = false;
+    uint32_t mConnectionGeneration = 0;
+    std::string mConnectAddress = "127.0.0.1";
+    uint16_t mConnectPort = online::DefaultPort;
+    std::chrono::steady_clock::time_point mRetryAt, mRecoveryStart;
+    online::Checkpoint mRecoveryCheckpoint, mSendingCheckpoint;
+    uint32_t mCheckpointID = 0, mCheckpointOffset = 0, mLastCheckpointEpoch = 0;
+    uint64_t mCheckpointHash = 0;
+    float mCheckpointTimer = 0;
+    float mCheckpointPacer = 0;
+    bool mMigrationHost = false, mMigrationAttempted = false;
+    bool mInputLeaseSeen = false, mInputLeasePaused = false;
+    std::chrono::steady_clock::time_point mInputLeaseAt;
+    int mRecoveryTest = 0;
+    bool mRecoveryTestFixtures = false, mRecoveryTestInterrupted = false, mRecoveryTestResumed = false;
+    std::chrono::steady_clock::time_point mRecoveryTestAt;
+    uint32_t mJournalTestLastEpoch = 0;
+    void UpdateRecoveryTest();
+    void UpdateCheckpoint(float timeStep);
+    bool PromoteFromCheckpoint();
     bool mTestDeathStarted = false, mTestDeathObserved = false, mTestRevived = false;
     bool mTestHasLifeSnapshot = false, mTestLastSentDead = false;
     bool mTestEnemySpawned = false, mTestEnemyHunting = false, mTestEnemyMoved = false;

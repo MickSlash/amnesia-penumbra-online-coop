@@ -874,7 +874,11 @@ bool cLuxBase::ParseCommandLine(const tString &asCommandline)
 	//////////////////////////////////
 	//Main Init config file
 	// TODO: Parse the command line better?
-	msInitConfigFile = cString::To16Char(asCommandline);
+    tString initArgument = asCommandline;
+    // Windows launchers quote a single path, including paths with spaces.
+    if(initArgument.size() >= 2 && initArgument.front() == '"' && initArgument.back() == '"')
+        initArgument = initArgument.substr(1,initArgument.size()-2);
+    msInitConfigFile = cString::To16Char(initArgument);
 	if(msInitConfigFile==_W("")) 
 		msInitConfigFile = msDefaultInitConfigFile;
 

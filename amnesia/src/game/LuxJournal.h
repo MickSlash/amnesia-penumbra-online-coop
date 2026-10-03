@@ -23,6 +23,7 @@
 //----------------------------------------------
 
 #include "LuxBase.h"
+#include "network/NetSession.h"
 
 class cLuxPlayer;
 
@@ -141,6 +142,8 @@ friend class cLuxMusicHandler_SaveData;
 friend class cLuxJournalStateData;
 friend class cLuxJournal_SaveData;
 public:	
+    online::JournalState CaptureNetworkJournal(uint32_t epoch) const;
+    bool ApplyNetworkJournal(const online::JournalState& state);
 	cLuxJournal();
 	~cLuxJournal();
 	

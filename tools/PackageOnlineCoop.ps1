@@ -3,12 +3,15 @@ param([string]$Executable = "$PSScriptRoot/../amnesia/src/game/x64/Release/Lux.e
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath "$PSScriptRoot/..").Path
 $exe = (Resolve-Path -LiteralPath $Executable).Path
+& "$PSScriptRoot/BuildLauncher.ps1"
+if ($LASTEXITCODE -ne 0) { throw 'Could not build the graphical launcher.' }
 $runtime = Join-Path (Split-Path -Parent $exe) 'OpenAL32.dll'
 if (!(Test-Path -LiteralPath $runtime)) { throw 'Place the installed x64 OpenAL32.dll beside Lux.exe before packaging.' }
 # Use a fresh directory; never overwrite an older package or include game data.
 $destination = Join-Path $repo ('build/packages/AmnesiaOnlineCoop_' + [DateTime]::UtcNow.ToString('yyyyMMdd_HHmmss') + '_' + [Guid]::NewGuid().ToString('N').Substring(0,6))
 New-Item -ItemType Directory -Path "$destination/bin", "$destination/tools" -Force | Out-Null
 Copy-Item -LiteralPath $exe -Destination "$destination/bin/Lux.exe"
+Copy-Item -LiteralPath "$repo/build/AmnesiaCoop.exe" -Destination "$destination/AmnesiaCoop.exe"
 Copy-Item -LiteralPath $runtime -Destination "$destination/bin/OpenAL32.dll"
 # The Creative router needs its software backend; OpenAL Soft needs no backend
 # DLL. Prefer a sidecar, otherwise copy the installed x64 Windows backend.
@@ -26,10 +29,11 @@ Copy-Item -LiteralPath "$repo/docs/online_installazione_it.md" -Destination "$de
 Copy-Item -LiteralPath "$repo/LICENSE" -Destination "$destination/LICENSE"
 $commit = (& git -c "safe.directory=$($repo.Replace('\','/'))" -C $repo rev-parse HEAD).Trim()
 $manifest = [ordered]@{
-    protocol = 4
+    protocol = 5
     sourceCommit = $commit
     sourceRepository = 'https://github.com/TheBorn/Amnesia-The-Dark-Descent---Local-Co-op-Mod'
     builtExecutableSha256 = (Get-FileHash -LiteralPath "$destination/bin/Lux.exe" -Algorithm SHA256).Hash
+    launcherSha256 = (Get-FileHash -LiteralPath "$destination/AmnesiaCoop.exe" -Algorithm SHA256).Hash
     openALSha256 = (Get-FileHash -LiteralPath "$destination/bin/OpenAL32.dll" -Algorithm SHA256).Hash
     openALBackendSha256 = $(if (Test-Path -LiteralPath "$destination/bin/wrap_oal.dll") { (Get-FileHash -LiteralPath "$destination/bin/wrap_oal.dll" -Algorithm SHA256).Hash } else { $null })
     scope = 'Experimental Windows x64; no game assets; see LEGGIMI.md for tested scope and installation.'
@@ -40,4 +44,4 @@ $manifest | ConvertTo-Json | Set-Content -LiteralPath "$destination/manifest.jso
 if ($LASTEXITCODE -ne 0) { throw 'Could not archive the corresponding source.' }
 Compress-Archive -LiteralPath $destination -DestinationPath "$destination.zip"
 Write-Output "Package: $destination.zip"
-Write-Output "Launcher: $destination/tools/StartOnlineCoop.ps1"
+Write-Output "Launcher: $destination/AmnesiaCoop.exe (double-click)"

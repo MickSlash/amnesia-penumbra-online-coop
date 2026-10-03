@@ -19,6 +19,12 @@
 #include "LuxHintHandler.h"
 #include "LuxMusicHandler.h"
 #include "LuxHelpFuncs.h"
+#include "LuxSavedGameTypes.h"
+#include "LuxSavedGame.h"
+#include "impl/tinyXML/tinyxml.h"
+#include "resources/BinaryBuffer.h"
+#include "../../../HPL2/dependencies/sources/zlib/zlib.h"
+#include <cstring>
 #include "resources/SoundEntityManager.h"
 #include "sound/SoundEntityData.h"
 #include "sound/SoundChannel.h"
@@ -101,12 +107,20 @@ cLuxNetwork::~cLuxNetwork() {
         cImGuiConsole::UnregisterCommand(name);
 }
 void cLuxNetwork::OnStart() {
+    const tString savedIdentity = gpBase->mpMainConfig->GetString("Online","ResumeIdentity","");
+    char* identityEnd = NULL; const uint64_t identity = std::strtoull(savedIdentity.c_str(),&identityEnd,10);
+    if(!savedIdentity.empty() && identityEnd && !*identityEnd && identity) mSession.SetLocalIdentity(identity);
+    else {
+        gpBase->mpMainConfig->SetString("Online","ResumeIdentity",std::to_string(mSession.LocalIdentity()));
+        if(gpBase->mbSaveConfigAtExit) gpBase->mpMainConfig->Save();
+    }
     mOriginalFocusWait = gpBase->mpEngine->GetWaitIfAppOutOfFocus();
     const char* smoke = std::getenv("AMNESIA_NET_SMOKE_SECONDS");
     if (smoke && Port(smoke, mSmokeSeconds) && mSmokeSeconds <= 900)
         mSmokeStart = std::chrono::steady_clock::now();
     else mSmokeSeconds = 0;
     mTestMovement = mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MOVEMENT");
+    if(mSmokeSeconds) { const char* test = std::getenv("AMNESIA_NET_TEST_RECOVERY"); if(test) mRecoveryTest = std::string(test) == "migrate" ? 2 : std::string(test) == "reconnect" ? 1 : 0; }
     const char* drive = std::getenv("AMNESIA_NET_TEST_DRIVE_FILE");
     if(mSmokeSeconds && drive && *drive) {
         mQADriveFile = drive;
@@ -116,16 +130,16 @@ void cLuxNetwork::OnStart() {
         [this](const cImGuiConsole::tArgs& args) {
             uint16_t port = online::DefaultPort;
             if (args.size() > 1 || (!args.empty() && !Port(args[0], port))) { NetLog("[NET] Usage: net_host [1..65535]"); return; }
-            mSession.StartHost(port);
+            Host(port);
         });
     cImGuiConsole::RegisterCommand("net_join", "net_join IP [port] - connect (connectivity prototype)",
         [this](const cImGuiConsole::tArgs& args) {
             uint16_t port = online::DefaultPort;
             if (args.empty() || args.size() > 2 || (args.size() == 2 && !Port(args[1], port))) { NetLog("[NET] Usage: net_join IP [1..65535]"); return; }
-            mSession.StartClient(args[0], port);
+            Join(args[0], port);
         });
     cImGuiConsole::RegisterCommand("net_disconnect", "net_disconnect - close session",
-        [this](const cImGuiConsole::tArgs&) { mSession.Stop(); NetLog("[NET/CONNECTION] Session closed"); });
+        [this](const cImGuiConsole::tArgs&) { Disconnect(); NetLog("[NET/CONNECTION] Session closed"); });
     cImGuiConsole::RegisterCommand("net_status", "net_status - role and handshake status",
         [this](const cImGuiConsole::tArgs&) {
             const char* role = mSession.GetRole() == online::Role::Host ? "host" : mSession.GetRole() == online::Role::Client ? "client" : "offline";
@@ -142,10 +156,10 @@ void cLuxNetwork::OnStart() {
     uint16_t port = online::DefaultPort;
     const char* portText = std::getenv("AMNESIA_NET_PORT");
     if (portText && !Port(portText, port)) { NetLog("[NET] Invalid AMNESIA_NET_PORT"); return; }
-    if (std::string(role) == "host") mSession.StartHost(port);
+    if (std::string(role) == "host") Host(port);
     else if (std::string(role) == "client") {
         const char* address = std::getenv("AMNESIA_NET_ADDRESS");
-        mSession.StartClient(address ? address : "127.0.0.1", port);
+        Join(address ? address : "127.0.0.1", port);
     } else NetLog("[NET] AMNESIA_NET_ROLE must be host or client");
     if (mSession.GetRole() != online::Role::Offline || mSmokeSeconds)
         gpBase->mpEngine->SetWaitIfAppOutOfFocus(false);
@@ -154,10 +168,43 @@ void cLuxNetwork::Update(float timeStep) {
     gpBase->mpEngine->SetWaitIfAppOutOfFocus(
         mSession.GetRole() == online::Role::Offline && !mSmokeSeconds ? mOriginalFocusWait : false);
     mSession.Poll();
+    const auto connectionNow = std::chrono::steady_clock::now();
+    online::PlayerInput freshInput;
+    if(mSession.GetRole() == online::Role::Host && mSession.ReadInput(freshInput)) { mInputLeaseSeen = true; mInputLeaseAt = connectionNow; }
+    mInputLeasePaused = mSession.GetRole() == online::Role::Host && mInputLeaseSeen && connectionNow - mInputLeaseAt > std::chrono::seconds(1);
+    if(mSession.Connected()) {
+        if(mConnectionGeneration != mSession.Generation()) {
+            mConnectionGeneration = mSession.Generation();
+            mMapAnnounced = false; mAppliedJournal = false; mJournalBytes.clear();
+            mInputLeaseSeen = mInputLeasePaused = false; mPrediction.Clear();
+            mJournalTestLastEpoch = 0;
+            if(IsClientReplica()) { mEpoch = 0; mBaselineApplied = false; mAppliedInventory = false; }
+            if(mRecovering) NetLog("[NET/RECOVERY] Partner reconnected; rebuilding authoritative baseline");
+        }
+        mEverConnected = true; mRecovering = false;
+        mMigrationHost = false; mMigrationAttempted = false;
+    } else if(mEverConnected && mSession.GetRole() != online::Role::Offline) {
+        if(!mRecovering) { mRecovering = true; mRecoveryStart = connectionNow; mRetryAt = connectionNow; NetLog("[NET/RECOVERY] Connection lost; campaign paused for recovery"); }
+        if(IsClientReplica() && mSession.RetryAllowed() && !mSession.AttemptActive() && connectionNow >= mRetryAt) {
+            mSession.StartClient(mConnectAddress, mConnectPort, true); mRetryAt = connectionNow + std::chrono::seconds(1);
+        }
+        const auto missing = connectionNow - mRecoveryStart;
+        if(!mMigrationHost && !mMigrationAttempted && mSession.RetryAllowed()) {
+            if(IsClientReplica() && missing >= std::chrono::seconds(12) && !mRecoveryCheckpoint.bytes.empty()) {
+                mMigrationAttempted = true;
+                if(!PromoteFromCheckpoint()) NetLog("[NET/RECOVERY] Promotion failed; campaign remains paused");
+            } else if(mSession.GetRole() == online::Role::Host && missing >= std::chrono::seconds(8) && mSession.CheckpointAcknowledged()) {
+                const auto address = mSession.RemoteAddress(); const auto port = mSession.RemotePort();
+                mConnectAddress = address; mConnectPort = port;
+                mSession.StartClient(address,port,true); mWasClient = true; mHadClientConnection = true;
+                mMigrationAttempted = true;
+                NetLog("[NET/RECOVERY] Former host yielded authority; reconnecting to partner");
+            }
+        }
+    }
     if(IsClientReplica()) {
         mWasClient = true;
         if(mSession.Connected()) mHadClientConnection = true;
-        else if(mHadClientConnection) mSession.Stop();
     }
     if(mWasClient && !IsClientReplica()) {
         mWasClient = mHadClientConnection = false;
@@ -167,6 +214,14 @@ void cLuxNetwork::Update(float timeStep) {
         NetLog("[NET/CONNECTION] Client session ended; replica world unloaded");
     }
     UpdateReplication(timeStep);
+    UpdateRecoveryTest();
+    UpdateCheckpoint(timeStep);
+    if(IsClientReplica() && gpBase->mpEngine->GetUpdater()->GetCurrentContainerName() != "Default") {
+        online::PlayerInput idle; auto* camera = gpBase->mpPlayer->GetCamera();
+        idle.yaw = int16_t(std::atan2(std::sin(camera->GetYaw()),std::cos(camera->GetYaw()))*1000);
+        idle.pitch = int16_t(std::max(-1.571f,std::min(1.571f,camera->GetPitch()))*1000);
+        SendLocalInput(idle,timeStep);
+    }
     cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
     if(map && mSession.Connected() && !gpBase->mpMapHandler->GetCoopMode()) {
         map->GetWorld()->SetActive(true);
@@ -211,7 +266,7 @@ void cLuxNetwork::Update(float timeStep) {
             }
             mPreviousButtons = 0;
         }
-    } else if (OwnsRemotePlayer2()) {
+    } else if (OwnsRemotePlayer2() && mSession.GetRole() == online::Role::Offline) {
         if (mSmokeSeconds && mRemotePlayer2->GetCharacterBody()) {
             cVector3f delta = mRemotePlayer2->GetCharacterBody()->GetFeetPosition() - mRemoteSpawnFeet;
             NetLog("[NET/TEST] P2 displacement=" + std::to_string(delta.x) + "," + std::to_string(delta.y) + "," + std::to_string(delta.z) +
@@ -340,9 +395,11 @@ void cLuxNetwork::Reset() {
     mPendingLookYaw = mPendingLookPitch = 0; mHasLookSequence = false;
     mClientObjectLook = mClientScriptLook = mRemoteRotate = false;
     mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0;
+    mPrediction.Clear();
     mEntityBytes.clear(); mEntityStates.clear(); mReplicaIDs.clear(); mLoggedWorldReplica = false;
     mBaselineApplied = false; mBaselineSent = false; mClientMoved = false;
     mAppliedInventory = false; mInventoryBytes.clear();
+    mAppliedJournal = false; mJournalBytes.clear();
     mPendingPresentation.clear(); mLightBytes.clear(); mLoggedLighting = false;
     for(auto& bytes : mFogBytes) bytes.clear();
     mMediaBytes.clear(); mMediaStates.clear(); mReplicaMediaIDs.clear(); mMusicFadeTimes.clear(); mMediaBaselineApplied = false;
@@ -350,8 +407,10 @@ void cLuxNetwork::Reset() {
     mClientDead = false; mHasClientLife = false; mHasHostLife = false;
 }
 void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
+    if(!mSession.Connected()) { mPrediction.Clear(); return; }
     if (IsClientReplica() && (!mEpoch || !mReceivedSnapshot || !mBaselineApplied)) return;
     if(IsClientReplica() && mClientDead) { input.forward = input.strafe = 0; input.buttons = 0; }
+    if(IsClientReplica() && !mTestMovement) { input.sequence = mInputSequence + 1; mPrediction.Push(input,timeStep); }
     ++mInputTick;
     mInputAccumulator += timeStep;
     mPendingLookYaw = std::max(-31420, std::min(31420, mPendingLookYaw + int(input.lookYaw)));
@@ -387,6 +446,7 @@ void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
             }
         }
     }
+    if(IsClientReplica() && mTestMovement && TestFlag("AMNESIA_NET_TEST_PREDICTION")) mPrediction.Push(input,1.0f/30);
     mSession.SendInput(input);
 }
 void cLuxNetwork::OnExit() {
@@ -476,8 +536,35 @@ void cLuxNetwork::MusicChanged(int priority, float fadeTime) {
     if(mSession.GetRole() == online::Role::Host) mMusicFadeTimes[priority] = std::max(0.0f, fadeTime);
 }
 bool cLuxNetwork::WaitingForMap() const {
+    if(mRecovering || mInputLeasePaused) return true;
     return mSession.GetRole() == online::Role::Host && mSession.Connected() &&
         mMapAnnounced && !mSession.IsMapReady(mEpoch);
+}
+bool cLuxNetwork::Host(uint16_t port) {
+    mEverConnected = mRecovering = false; mConnectionGeneration = 0;
+    mConnectPort = port;
+    gpBase->mpMainConfig->SetString("Online","Port",std::to_string(port));
+    mRecoveryCheckpoint.bytes.clear(); mMigrationAttempted = mMigrationHost = false;
+    return mSession.StartHost(port);
+}
+bool cLuxNetwork::Join(const std::string& address, uint16_t port) {
+    mEverConnected = mRecovering = false; mConnectionGeneration = 0;
+    mConnectAddress = address; mConnectPort = port;
+    gpBase->mpMainConfig->SetString("Online","LastAddress",address);
+    gpBase->mpMainConfig->SetString("Online","Port",std::to_string(port));
+    mRecoveryCheckpoint.bytes.clear(); mMigrationAttempted = mMigrationHost = false;
+    mSession.SetListenPort(port);
+    return mSession.StartClient(address, port);
+}
+void cLuxNetwork::Disconnect() { mSession.Stop(); mRecovering = mEverConnected = false; }
+std::string cLuxNetwork::ConnectionStatus() const {
+    if(mInputLeasePaused) return "La rete non risponde: campagna in pausa, attesa del partner.";
+    if(mMigrationHost && mRecovering) return "Host trasferito a questo PC. Campagna recuperata, in attesa del partner.";
+    if(mRecovering) return mSession.RetryAllowed() ? "Connessione persa: riconnessione automatica, campagna in pausa." : "Connessione rifiutata: controlla versione e dati del gioco.";
+    if(mSession.GetRole() == online::Role::Offline) return "Scegli Ospita oppure inserisci l'IP del tuo amico e premi Connetti.";
+    if(!mSession.Connected()) return mSession.GetRole() == online::Role::Host ? "In attesa del tuo amico sulla porta UDP " + std::to_string(mConnectPort) : "Connessione in corso...";
+    if(!mSession.LobbyReady()) return "Amico connesso. Entrambi devono premere Pronto.";
+    return "Entrambi pronti. L'host puo avviare la campagna. Ping: " + std::to_string(mSession.Ping()) + " ms";
 }
 void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
     if(MapFingerprint(state.file) != state.fingerprint) {
@@ -502,7 +589,7 @@ void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
         cLuxMap* next = gpBase->mpMapHandler->LoadMap(state.file.substr(slash + 1), true);
         gpBase->mpMapHandler->DestroyMap(old, false);
         gpBase->mpMapHandler->SetCurrentMap(next, false, false, "");
-        mReplicaIDs.clear(); mBaselineApplied = false; mAppliedInventory = false;
+        mReplicaIDs.clear(); mBaselineApplied = false; mAppliedInventory = false; mAppliedJournal = false;
         mLoggedWorldReplica = false; mLoggedLighting = false;
     }
     cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
@@ -554,10 +641,11 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
     cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
     const auto now = std::chrono::steady_clock::now();
     if(!mSession.Connected()) {
+        mSendingCheckpoint.bytes.clear(); mLastCheckpointEpoch = 0;
         mMapAnnounced = false; mHostMapFile.clear();
         mSnapshots.clear(); mReceivedSnapshot = false;
         mHasClientLife = mHasHostLife = false; mClientDead = false;
-        if(map) map->GetWorld()->SetPhysicsSimulationEnabled(!IsClientReplica());
+        if(map) map->GetWorld()->SetPhysicsSimulationEnabled(!IsClientReplica() && !mRecovering);
         return;
     }
     if(IsClientReplica()) {
@@ -591,6 +679,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                         latest.sequence - life.sequence != 0 && latest.sequence - life.sequence < 0x80000000u) pose = latest;
                     // A checkpoint is a discontinuity even within five metres.
                     mSnapshots.clear(); mSnapshots.push_back({pose, now});
+                    mPrediction.Clear();
                     mReceivedSequence = pose.sequence; mReceivedSnapshot = true;
                 }
             }
@@ -635,6 +724,12 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         }
         map->FlushNetworkDestruction();
         online::InventoryState inventory;
+        online::JournalState journal;
+        if(mSession.ReadJournal(journal) && journal.epoch == mEpoch &&
+            (!mAppliedJournal || journal.revision != mAppliedJournalRevision) && gpBase->mpJournal->ApplyNetworkJournal(journal)) {
+            if(!mAppliedJournal) NetLog("[NET/JOURNAL] Complete journal history applied");
+            mAppliedJournal = true; mAppliedJournalRevision = journal.revision;
+        }
         if(mSession.ReadInventory(inventory) && inventory.epoch == mEpoch && (!mAppliedInventory || inventory.revision != mAppliedInventoryRevision)) {
             gpBase->mpInventory->ApplyNetworkInventory(inventory);
             if(!mAppliedInventory) NetLog("[NET/INVENTORY] Shared host inventory applied");
@@ -688,7 +783,30 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             if(mClientLife.players[i].flags & 8) interpolated.players[i].health = 0;
         }
         if(mClientDead) interpolated.players[1] = mClientLife.players[1];
-        ApplyReplica(gpBase->mpPlayer, interpolated.players[1], true);
+        online::PlayerState local = mSnapshots.back().state.players[1];
+        if(mClientDead) local = mClientLife.players[1];
+        auto* body = gpBase->mpPlayer->GetCharacterBody();
+        if(body && mBaselineApplied) {
+            auto predicted = mPrediction.Reconcile(local,mSnapshots.back().state.acknowledgedInput,[&](online::PredictedPosition from, online::PredictedPosition to) {
+                const float y = local.y/1000.0f + body->GetCurrentShape()->GetSize().y/2;
+                auto blocked = [&](float x,float z) {
+                    cVector3f push;
+                    const bool collision = map->GetWorld()->GetPhysicsWorld()->CheckShapeWorldCollision(&push,body->GetCurrentShape(),cMath::MatrixTranslate(cVector3f(x,y,z)),body->GetCurrentBody(),false,true,NULL,false);
+                    return collision && (std::fabs(push.x) > 0.00001f || std::fabs(push.z) > 0.00001f || push.y < 0 || push.y > 0.04f);
+                };
+                // Slide against walls; the host resolves slopes, jumps and props.
+                online::PredictedPosition result = from;
+                if(!blocked(to.x,from.z)) result.x = to.x;
+                if(!blocked(result.x,to.z)) result.z = to.z;
+                return result;
+            });
+            local.x = int32_t(predicted.x*1000); local.z = int32_t(predicted.z*1000);
+            if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_PREDICTION") && !mPredictionTestObserved && mPrediction.Pending() &&
+                (std::abs(local.x-mSnapshots.back().state.players[1].x) + std::abs(local.z-mSnapshots.back().state.players[1].z) > 5)) {
+                mPredictionTestObserved = true; NetLog("[NET/TEST] Local movement prediction applied before host acknowledgement with world collision checks");
+            }
+        }
+        ApplyReplica(gpBase->mpPlayer, local, true);
         ApplyReplica(gpBase->mpPlayer2, interpolated.players[0], false);
         if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) {
             const float elapsed = std::chrono::duration<float>(now - mSmokeStart).count();
@@ -726,11 +844,16 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         state.fingerprint = MapFingerprint(state.file);
         if(!mSession.SendMap(state)) { NetLog("[NET/MAP] Cannot announce map; closing session"); mSession.Stop(); return; }
         mHostMapFile = map->GetFileName(); mMapAnnounced = true; mMapWaitStart = now;
+        // The client cannot send input for the new epoch until its baseline is
+        // applied. Start the input lease again after the first new input.
+        mInputLeaseSeen = mInputLeasePaused = false;
+        mSendingCheckpoint.bytes.clear(); mLastCheckpointEpoch = 0;
         mEntityBytes.clear(); mEntityStates.clear();
         mBaselineSent = false;
         mHasHostLife = false;
         mHasLookSequence = false;
         mInventoryBytes.clear();
+        mJournalBytes.clear();
         mLightBytes.clear();
         mMediaBytes.clear(); mMediaStates.clear();
         for(auto& bytes : mGlobalAudioBytes) bytes.clear();
@@ -739,7 +862,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
     }
     map->GetWorld()->SetPhysicsSimulationEnabled(!WaitingForMap());
     if(WaitingForMap()) {
-        if(now - mMapWaitStart > std::chrono::seconds(30)) {
+        if(!mSession.IsMapReady(mEpoch) && now - mMapWaitStart > std::chrono::seconds(30)) {
             NetLog("[NET/MAP] Client map readiness timed out"); mSession.Stop();
         }
         return;
@@ -832,7 +955,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
     }
     mSnapshotAccumulator += timeStep;
     online::Snapshot snapshot; snapshot.epoch = mEpoch; snapshot.sequence = ++mSnapshotSequence;
-    online::PlayerInput input; if(mSession.ReadInput(input)) snapshot.acknowledgedInput = input.sequence;
+    snapshot.acknowledgedInput = mHasLookSequence ? mAppliedLookSequence : 0;
     cLuxPlayer* players[] = {gpBase->mpPlayer, gpBase->mpPlayer2};
     for(int i = 0; i < 2; ++i) {
         auto& p = snapshot.players[i]; cLuxPlayer* player = players[i];
@@ -854,6 +977,13 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         p.aspect = uint16_t(std::max(0.01f, std::min(20.0f, camera->GetAspect() / (screen.x / screen.y))) * 1000);
         p.lookSpeed = uint16_t(std::max(0.0f, std::min(10.0f, player->GetLookSpeedMul())) * 1000);
         p.tinderboxes = uint16_t(std::max(0, std::min(65535, player->GetTinderboxes())));
+        auto* body = player->GetCharacterBody();
+        auto fixedSpeed = [](float value) { return uint16_t(std::max(0.0f,std::min(65.0f,value))*1000); };
+        p.forwardSpeed = int16_t(std::max(-32.0f,std::min(32.0f,body->GetMoveSpeed(eCharDir_Forward)))*1000);
+        p.sideSpeed = int16_t(std::max(-32.0f,std::min(32.0f,body->GetMoveSpeed(eCharDir_Right)))*1000);
+        p.forwardMax = fixedSpeed(body->GetMaxPositiveMoveSpeed(eCharDir_Forward)); p.sideMax = fixedSpeed(body->GetMaxPositiveMoveSpeed(eCharDir_Right));
+        p.backwardMax = fixedSpeed(std::fabs(body->GetMaxNegativeMoveSpeed(eCharDir_Forward)));
+        p.acceleration = fixedSpeed(body->GetMoveAcc(eCharDir_Forward)); p.deceleration = fixedSpeed(body->GetMoveDeacc(eCharDir_Forward));
         p.flags = (player->GetCharacterBody()->GetActiveSize() == 1 ? 1 : 0) |
             (player->GetHelperLantern()->IsActive() ? 2 : 0) | (player->IsActive() ? 4 : 0) | (player->IsDead() ? 8 : 0) |
             (player->GetHelperLookAt()->IsActive() || player->GetLookSpeedMul() <= 0 ? 16 : 0) |
@@ -882,6 +1012,12 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         mPendingPresentation.pop_front();
     }
     online::InventoryState inventory = gpBase->mpInventory->CaptureNetworkInventory(mEpoch);
+    auto journal = gpBase->mpJournal->CaptureNetworkJournal(mEpoch);
+    auto journalBytes = online::EncodeJournal(journal);
+    if(!journalBytes.empty() && journalBytes != mJournalBytes) {
+        journal.revision = ++mJournalRevision;
+        if(mSession.SendJournal(journal)) mJournalBytes = std::move(journalBytes);
+    }
     auto inventoryBytes = online::EncodeInventory(inventory);
     if(!inventoryBytes.empty() && inventoryBytes != mInventoryBytes) {
         inventory.revision = ++mInventoryRevision;
@@ -1342,3 +1478,4 @@ void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& ev
     }
     }
 }
+#include "LuxNetwork_Checkpoint.inl"

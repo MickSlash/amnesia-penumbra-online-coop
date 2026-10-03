@@ -29,6 +29,8 @@
 #include "LuxConfigHandler.h"
 #include "LuxDebugHandler.h"
 #include "LuxLoadScreenHandler.h"
+#include "LuxNetwork.h"
+#include <cstdlib>
 
 #include "LuxMainMenu_Profile.h"
 #include "LuxMainMenu_Options.h"
@@ -107,6 +109,7 @@ void iLuxMainMenuWindow::SetActive(bool abX)
 
 //-----------------------------------------------------------------------
 
+#include "LuxMainMenu_Online.inl"
 cLuxMainMenu::cLuxMainMenu() : iLuxUpdateable("LuxDebugHandler")
 {
 	///////////////////////////////
@@ -147,6 +150,7 @@ cLuxMainMenu::cLuxMainMenu() : iLuxUpdateable("LuxDebugHandler")
 	mvWindows[eLuxMainMenuWindow_KeyConfig] = hplNew(cLuxMainMenu_KeyConfig, (mpGuiSet, mpGuiSkin));
 	mvWindows[eLuxMainMenuWindow_LoadGame] = hplNew(cLuxMainMenu_LoadGame, (mpGuiSet, mpGuiSkin));
 	mvWindows[eLuxMainMenuWindow_StartGame] = hplNew(cLuxMainMenu_StartGame, (mpGuiSet, mpGuiSkin));
+    mvWindows[eLuxMainMenuWindow_Online] = hplNew(cLuxMainMenu_Online, (mpGuiSet, mpGuiSkin));
 
 
 	cLuxMainMenu_CustomStory* pCustomStoryWindow = hplNew(cLuxMainMenu_CustomStory,(mpGuiSet, mpGuiSkin));
@@ -369,6 +373,11 @@ void cLuxMainMenu::OnEnterContainer(const tString& asOldContainer)
 
 	mCurrentWindow = eLuxMainMenuWindow_LastEnum;
 
+    if(!gpBase->mpUserConfig && gpBase->mpMainConfig->GetBool("Online","AutoProfile",false)) {
+        gpBase->CreateProfile(gpBase->msDefaultProfileName);
+        gpBase->SetProfile(gpBase->msDefaultProfileName);
+        gpBase->InitUserConfig();
+    }
 	CreateGui();
 	CreateBackground();
 
@@ -1200,6 +1209,9 @@ void cLuxMainMenu::CreateTopMenuGui()
 
 	///////////////
 	//Options
+    pLabel = mpGuiSet->CreateWidgetLabel(vPos,0,L"Co-op online");
+    pLabel->AddCallback(eGuiMessage_MouseDown,this,kGuiCallback(PressOnline));
+    SetupTopMenuLabel(pLabel); vPos.y += fRowAdd;
 	pLabel = mpGuiSet->CreateWidgetLabel(vPos,0,kTranslate("MainMenu","Options"));
 	pLabel->AddCallback(eGuiMessage_MouseDown,this, kGuiCallback(PressOptions));
 	SetupTopMenuLabel(pLabel);
@@ -1529,6 +1541,7 @@ kGuiCallbackDeclaredFuncEnd(cLuxMainMenu, TopMenuTextDraw);
 
 bool cLuxMainMenu::PressContinue(iWidget* apWidget, const cGuiMessageData& aData)
 {
+    if(gpBase->mpNetwork->GetSession().GetRole() != online::Role::Offline) { SetWindowActive(eLuxMainMenuWindow_Online); return true; }
 	if(mbTopMenuVisible==false)
 		return true;
 
@@ -1569,6 +1582,7 @@ kGuiCallbackDeclaredFuncEnd(cLuxMainMenu, ClickedContinuePopup)
 
 bool cLuxMainMenu::PressStartGame(iWidget* apWidget, const cGuiMessageData& aData)
 {
+    if(gpBase->mpNetwork->GetSession().GetRole() != online::Role::Offline) { SetWindowActive(eLuxMainMenuWindow_Online); return true; }
 	if(mbTopMenuVisible==false)
 		return true;
 	
@@ -1640,6 +1654,7 @@ kGuiCallbackDeclaredFuncEnd(cLuxMainMenu, PressBackToGame);
 
 bool cLuxMainMenu::PressLoadGame(iWidget* apWidget, const cGuiMessageData& aData)
 {
+    if(gpBase->mpNetwork->GetSession().GetRole() != online::Role::Offline) { SetWindowActive(eLuxMainMenuWindow_Online); return true; }
 	if(mbTopMenuVisible==false)
 		return true;
 
@@ -1811,6 +1826,11 @@ bool cLuxMainMenu::PressOptions(iWidget* apWidget, const cGuiMessageData& aData)
 	return true;
 }
 kGuiCallbackDeclaredFuncEnd(cLuxMainMenu, PressOptions);
+bool cLuxMainMenu::PressOnline(iWidget*, const cGuiMessageData&) {
+    if(mbTopMenuVisible) SetWindowActive(eLuxMainMenuWindow_Online);
+    return true;
+}
+kGuiCallbackDeclaredFuncEnd(cLuxMainMenu, PressOnline);
 
 //-----------------------------------------------------------------------
 

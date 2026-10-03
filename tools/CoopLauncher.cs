@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+using System;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
+using Microsoft.Win32;
+
+public sealed class CoopLauncher : Form {
+    readonly TextBox folder = new TextBox();
+    readonly CheckBox fullscreen = new CheckBox();
+    readonly string state = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AmnesiaOnlineCoop");
+    readonly string saveFolder = "AmnesiaOnlineCoop_Host";
+    public CoopLauncher(string testProfile = null) {
+        if(testProfile != null) {
+            if(!Regex.IsMatch(testProfile,"^OnlineCoopMenuQA_[a-zA-Z0-9_]+$")) throw new ArgumentException("Invalid QA profile");
+            state = Path.Combine(state,testProfile); saveFolder = testProfile;
+        }
+        Text = "Amnesia - Campagna co-op"; ClientSize = new Size(660,225);
+        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; StartPosition = FormStartPosition.CenterScreen;
+        Font = new Font("Segoe UI",10);
+        Controls.Add(new Label { Text = "Seleziona la tua installazione di Amnesia: The Dark Descent.", AutoSize = true, Location = new Point(20,20) });
+        folder.Location = new Point(20,57); folder.Size = new Size(475,28); Controls.Add(folder);
+        var browse = new Button { Text = "Scegli cartella", Location = new Point(510,55), Size = new Size(130,32) };
+        browse.Click += delegate { using(var dialog = new FolderBrowserDialog()) { dialog.Description = "Cartella contenente config, maps ed entities"; if(dialog.ShowDialog(this) == DialogResult.OK) folder.Text = dialog.SelectedPath; } }; Controls.Add(browse);
+        fullscreen.Text = "Schermo intero"; fullscreen.AutoSize = true; fullscreen.Location = new Point(20,99); Controls.Add(fullscreen);
+        Controls.Add(new Label { Text = "Nel gioco: Co-op online > Ospita / Connetti > entrambi Pronto.\r\nL'host sceglie Nuova campagna o Continua salvataggio.", Location = new Point(20,130), Size = new Size(620,50) });
+        var launch = new Button { Text = "Avvia Amnesia co-op", Location = new Point(390,185), Size = new Size(250,32) };
+        launch.Click += delegate { try { Launch(folder.Text, fullscreen.Checked); Close(); } catch(Exception error) { MessageBox.Show(this, error.Message, "Avvio non riuscito", MessageBoxButtons.OK, MessageBoxIcon.Error); } }; Controls.Add(launch); AcceptButton = launch;
+        var saved = Path.Combine(state,"game-folder.txt");
+        if(File.Exists(saved)) folder.Text = File.ReadAllText(saved).Trim();
+        if(!Valid(folder.Text)) folder.Text = Discover();
+    }
+    public static bool Valid(string path) {
+        return !String.IsNullOrEmpty(path) && File.Exists(Path.Combine(path,"config","main_init.cfg")) && File.Exists(Path.Combine(path,"resources.cfg")) && Directory.Exists(Path.Combine(path,"maps")) && Directory.Exists(Path.Combine(path,"entities"));
+    }
+    static string Discover() {
+        var steam = Convert.ToString(Registry.GetValue(@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath", ""));
+        var candidates = new System.Collections.Generic.List<string>();
+        if(!String.IsNullOrEmpty(steam)) {
+            candidates.Add(Path.Combine(steam,"steamapps","common","Amnesia The Dark Descent"));
+            var libraries = Path.Combine(steam,"steamapps","libraryfolders.vdf");
+            if(File.Exists(libraries)) foreach(Match match in Regex.Matches(File.ReadAllText(libraries), "\"path\"\\s*\"([^\"]+)\"")) candidates.Add(Path.Combine(match.Groups[1].Value.Replace(@"\\",@"\"),"steamapps","common","Amnesia The Dark Descent"));
+        }
+        foreach(var candidate in candidates) if(Valid(candidate)) return candidate;
+        // Do not block startup on disconnected network drives or optical media.
+        foreach(var drive in DriveInfo.GetDrives()) if(drive.DriveType == DriveType.Fixed) {
+            var candidate = Path.Combine(drive.RootDirectory.FullName,"SteamLibrary","steamapps","common","Amnesia The Dark Descent");
+            if(Valid(candidate)) return candidate;
+        }
+        return "";
+    }
+    public void Launch(string path, bool full) {
+        if(!Valid(path)) throw new IOException("Questa cartella non contiene i dati di Amnesia. Scegli la cartella del gioco originale.");
+        path = Path.GetFullPath(path);
+        string root = AppDomain.CurrentDomain.BaseDirectory;
+        string executable = Path.Combine(root,"bin","Lux.exe");
+        if(!File.Exists(executable)) executable = Path.GetFullPath(Path.Combine(root,"..","amnesia","src","game","x64","Release","Lux.exe"));
+        if(!File.Exists(executable)) throw new FileNotFoundException("Lux.exe mancante: estrai tutto il pacchetto ZIP prima di avviare.");
+        Directory.CreateDirectory(state); File.WriteAllText(Path.Combine(state,"game-folder.txt"),path,Encoding.UTF8);
+        string settings = Path.Combine(state,"settings.cfg"), init = Path.Combine(state,"init.cfg");
+        File.WriteAllText(settings,"<Main ShowMenu=\"true\" ShowPreMenu=\"false\" SaveConfig=\"true\" DefaultProfileName=\"online\" UpdateLogActive=\"false\" />\n<Graphics TextureQuality=\"0\" Shadows=\"1\" SSAOActive=\"true\" />\n<Engine LimitFPS=\"true\" />\n<Screen Width=\"1280\" Height=\"720\" Display=\"0\" FullScreen=\"" + (full ? "true" : "false") + "\" Vsync=\"true\" />\n<Physics PhysicsAccuracy=\"2\" UpdatesPerSec=\"60\" />\n<Online AutoProfile=\"true\" />\n",new UTF8Encoding(false));
+        string source = File.ReadAllText(Path.Combine(path,"config","main_init.cfg"));
+        source = Regex.Replace(source,"MainSaveFolder\\s*=\\s*\"[^\"]*\"", "MainSaveFolder = \"" + saveFolder + "\"");
+        if(saveFolder.StartsWith("OnlineCoopMenuQA_")) source = Regex.Replace(source,"GameName\\s*=\\s*\"[^\"]*\"", "GameName = \"Amnesia Menu QA [" + saveFolder + "]\"");
+        source = Regex.Replace(source,"(DefaultMainSettings(?:SDL2)?)\\s*=\\s*\"[^\"]*\"",delegate(Match match) { return match.Groups[1].Value + " = \"" + System.Security.SecurityElement.Escape(settings) + "\""; });
+        File.WriteAllText(init,source,new UTF8Encoding(false));
+        var start = new ProcessStartInfo(executable,"\"" + init + "\"") { WorkingDirectory = path, UseShellExecute = false };
+        var keys = new System.Collections.Generic.List<string>();
+        foreach(string key in start.EnvironmentVariables.Keys) if(key.StartsWith("AMNESIA_NET_",StringComparison.OrdinalIgnoreCase)) keys.Add(key);
+        foreach(string key in keys) start.EnvironmentVariables.Remove(key);
+        Process.Start(start);
+    }
+    [STAThread] public static void Main(string[] args) { Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false); Application.Run(new CoopLauncher(args.Length == 2 && args[0] == "--test-profile" ? args[1] : null)); }
+}

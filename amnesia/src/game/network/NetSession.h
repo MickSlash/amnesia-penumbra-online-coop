@@ -6,13 +6,22 @@
 #include <vector>
 #include <array>
 #include <deque>
+#include "Checkpoint.h"
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 4;
+constexpr uint16_t ProtocolVersion = 5;
 constexpr uint16_t DefaultPort = 27020;
 enum class Role { Offline, Host, Client };
-enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13 };
+enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17 };
+struct JournalEntry {
+    uint8_t kind = 0; // note, diary, quest
+    bool active = true;
+    std::string group, name, nameEntry, textEntry, icon, image;
+};
+struct JournalState { uint32_t epoch = 0, revision = 0; std::vector<JournalEntry> entries; };
+std::vector<uint8_t> EncodeJournal(const JournalState& state);
+bool DecodeJournal(const uint8_t* data, size_t size, JournalState& state);
 enum class PresentationKind : uint8_t { Note = 1, Diary = 2, Voice = 3, Message = 4, Light = 5, StopVoice = 6,
     Hint = 7, Fade = 8, ImageTrail = 9, Sepia = 10, RadialBlur = 11, BlurStart = 12, Flash = 13, FogColor = 14, FogProperties = 15,
     GuiSound = 16, SoundFade = 17, GlobalVolume = 18, GlobalSpeed = 19, Emotion = 20, Shake = 21 };
@@ -41,6 +50,8 @@ struct PlayerState {
     int16_t roll = 0, cameraX = 0, cameraZ = 0; // radians *1000; head offsets in mm
     uint16_t fov = 1200, aspect = 1000, lookSpeed = 1000; // *1000; aspect multiplier
     uint8_t flags = 4; // crouching, lantern, active, dead, scripted look, object-controlled look
+    int16_t forwardSpeed = 0, sideSpeed = 0; // current local-axis velocity, mm/s
+    uint16_t forwardMax = 0, sideMax = 0, acceleration = 0, deceleration = 0, backwardMax = 0; // mm/s, mm/s^2
 };
 struct Snapshot {
     uint32_t epoch = 0, sequence = 0, acknowledgedInput = 0;
@@ -99,9 +110,11 @@ public:
     ~Session();
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
-    bool StartHost(uint16_t port);
-    bool StartClient(const std::string& address, uint16_t port);
+    bool StartHost(uint16_t port, bool resume = false);
+    bool StartClient(const std::string& address, uint16_t port, bool resume = false);
     void Stop();
+    // Fault injection used only by the opt-in QA driver. Retain session identity.
+    void SuspendTransportForTest();
     void Poll(); // non-blocking; caller owns scheduling
     bool SendInput(const PlayerInput& input);
     bool ReadInput(PlayerInput& input) const; // expires after 250 ms
@@ -125,9 +138,28 @@ public:
     bool ReadPresentation(Presentation& event);
     bool SendMedia(const MediaState& state);
     bool ReadMedia(MediaState& state);
+    bool SendJournal(const JournalState& state);
+    bool ReadJournal(JournalState& state) const;
+    bool SendCheckpoint(const CheckpointChunk& chunk);
+    bool ReadCheckpoint(Checkpoint& checkpoint);
+    bool AcknowledgeCheckpoint(uint32_t id);
+    uint32_t CheckpointAcknowledged() const { return checkpointAck_; }
     bool Connected() const { return ready_; }
     Role GetRole() const { return role_; }
     uint32_t Ping() const;
+    void SetLobbyReady(bool ready);
+    bool LobbyReady() const { return Connected() && localReady_ && remoteReady_; }
+    bool LocalReady() const { return localReady_; }
+    bool RemoteReady() const { return remoteReady_; }
+    uint32_t Generation() const { return generation_; }
+    bool AttemptActive() const { return peer_ != nullptr; }
+    bool RetryAllowed() const { return !fatal_; }
+    const std::string& RemoteAddress() const { return remoteAddress_; }
+    uint16_t RemotePort() const { return remotePort_; }
+    uint16_t ListenPort() const { return listenPort_; }
+    void SetListenPort(uint16_t port) { listenPort_ = port; }
+    uint64_t LocalIdentity() const { return identity_; }
+    bool SetLocalIdentity(uint64_t identity) { if(role_ != Role::Offline || !identity) return false; identity_ = identity; return true; }
 private:
     bool Initialize();
     bool Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reliable);
@@ -156,5 +188,15 @@ private:
     std::deque<Snapshot> life_;
     bool hasLife_ = false;
     uint32_t lastLife_ = 0;
+    JournalState journal_;
+    bool hasJournal_ = false;
+    uint64_t identity_ = 0, expectedIdentity_ = 0;
+    uint32_t generation_ = 0;
+    bool fatal_ = false, localReady_ = true, remoteReady_ = false;
+    uint16_t listenPort_ = DefaultPort, remotePort_ = DefaultPort;
+    std::string remoteAddress_;
+    CheckpointReceiver checkpointReceiver_;
+    uint32_t checkpointAck_ = 0;
+    uint32_t checkpointSent_ = 0, checkpointDelivered_ = 0;
 };
 }

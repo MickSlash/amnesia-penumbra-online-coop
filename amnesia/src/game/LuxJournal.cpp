@@ -33,6 +33,50 @@
 #include "LuxHintHandler.h"
 
 #include "LuxAchievementHandler.h"
+#include "LuxNetwork.h"
+
+online::JournalState cLuxJournal::CaptureNetworkJournal(uint32_t epoch) const {
+    online::JournalState result; result.epoch = epoch;
+    auto document = [&](const auto* item, uint8_t kind, const tString& group) {
+        online::JournalEntry e; e.kind = kind; e.group = group;
+        e.nameEntry = item->msNameEntry; e.textEntry = item->msTextEntry;
+        e.icon = item->msIconFile; e.image = item->msImageFile;
+        result.entries.push_back(e);
+    };
+    for(const auto* note : mvNotes) document(note, 0, "");
+    for(const auto* group : mvDiaryContainers)
+        for(const auto* diary : group->mvDiaries) document(diary, 1, group->msType);
+    for(const auto* quest : mvQuestNotes) {
+        online::JournalEntry e; e.kind = 2; e.active = quest->mbActive; e.name = quest->msName;
+        e.nameEntry = quest->msNameEntry; e.textEntry = quest->msTextEntry;
+        result.entries.push_back(e);
+    }
+    return result;
+}
+bool cLuxJournal::ApplyNetworkJournal(const online::JournalState& state) {
+    // Open pages and list widgets retain pointers into these collections.
+    // Defer replacement until the reader has closed the journal.
+    if(mbActive || gpBase->mpEngine->GetUpdater()->GetCurrentContainerName() == "Journal") return false;
+    ResetSessionVars();
+    STLDeleteAll(mvNotes); STLDeleteAll(mvDiaryContainers); STLDeleteAll(mvQuestNotes);
+    for(const auto& e : state.entries) {
+        if(e.kind == 0) {
+            auto* note = hplNew(cLuxNote, ());
+            note->msNameEntry = e.nameEntry; note->msTextEntry = e.textEntry;
+            note->msIconFile = e.icon; note->msImageFile = e.image; mvNotes.push_back(note);
+        } else if(e.kind == 1) {
+            cLuxDiaryContainer* container = NULL;
+            for(auto* group : mvDiaryContainers) if(group->msType == e.group) { container = group; break; }
+            if(!container) { container = hplNew(cLuxDiaryContainer, ()); container->msType = e.group; mvDiaryContainers.push_back(container); }
+            auto* diary = hplNew(cLuxDiary, ()); diary->msNameEntry = e.nameEntry; diary->msTextEntry = e.textEntry;
+            diary->msIconFile = e.icon; diary->msImageFile = e.image; container->mvDiaries.push_back(diary);
+        } else {
+            auto* quest = hplNew(cLuxQuestNote, ()); quest->mbActive = e.active; quest->msName = e.name;
+            quest->msNameEntry = e.nameEntry; quest->msTextEntry = e.textEntry; mvQuestNotes.push_back(quest);
+        }
+    }
+    return true;
+}
 
 //-----------------------------------------------------------------------
 
@@ -600,7 +644,7 @@ void cLuxJournal::OnEnterContainer(const tString& asOldContainer)
 	//The RESTORES on the way out are left alone. Restoring volume that was never
 	//ducked is a no-op, and it means a bag opened before this build -- or in
 	//single player -- always ends up back at full volume.
-	bool bQuietTheWorld = (gpBase->mpMapHandler->GetCoopMode()==false);
+    bool bQuietTheWorld = !gpBase->mpMapHandler->GetCoopMode() && (!gpBase->mpNetwork || !gpBase->mpNetwork->HasNetworkPlayers());
 
 	if(bQuietTheWorld)
 		gpBase->mpMapHandler->GetCurrentMap()->GetPhysicsWorld()->FadeoutAllLoopSounds(1.0f);
