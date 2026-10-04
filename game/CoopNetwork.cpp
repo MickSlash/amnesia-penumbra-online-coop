@@ -1,0 +1,639 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#include "CoopNetwork.h"
+#include "Player.h"
+#include "PlayerHelper.h"
+#include "PlayerHands.h"
+#include "MapHandler.h"
+#include "GameEntity.h"
+#include "Inventory.h"
+#include "GameItemType.h"
+#include "GameMessageHandler.h"
+#include "FadeHandler.h"
+#include "MainMenu.h"
+#include "EffectHandler.h"
+#include "GameMusicHandler.h"
+#include "graphics/Renderer3D.h"
+#include "resources/TextureManager.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <set>
+
+using namespace hpl;
+namespace hpl { extern bool gbGameScriptExecution; }
+namespace hpl { extern bool (*gGameGuiSoundCallback)(const tString&,float); }
+namespace {
+cCoopNetwork* activeNetwork=nullptr;
+bool ScriptSound(const tString& name,float volume) {
+    if(!activeNetwork) return false;
+    activeNetwork->RelayGuiSound(name,volume);
+    return activeNetwork->IsHost() && activeNetwork->IsRemoteContext();
+}
+struct PlayerScope {
+    cInit* init; cPlayer* player; cPlayerHands* hands;
+    PlayerScope(cInit* i, cPlayer* p, cPlayerHands* h) : init(i), player(i->mpPlayer), hands(i->mpPlayerHands) {
+        init->mpPlayer = p; init->mpPlayerHands = h;
+    }
+    ~PlayerScope() { init->mpPlayer = player; init->mpPlayerHands = hands; }
+};
+float Wrapped(float angle) { while(angle > kPif) angle -= k2Pif; while(angle < -kPif) angle += k2Pif; return angle; }
+cVector3f AimAngles(const cVector3f& from,const cVector3f& target) {
+    auto angles=cMath::GetAngleFromPoints3D(from,target);
+    // The engine helper returns pitch in [0,2*pi); the camera clamps signed pitch.
+    angles.x=Wrapped(angles.x); angles.y=Wrapped(angles.y); return angles;
+}
+online::Transform Pack(const cMatrixf& m) {
+    online::Transform out;
+    for(int r=0;r<3;++r) for(int c=0;c<4;++c) out[r*4+c]=int32_t(std::round(m.m[r][c]*(c==3?1000:10000)));
+    return out;
+}
+cMatrixf Unpack(const online::Transform& in) {
+    cMatrixf out=cMatrixf::Identity;
+    for(int r=0;r<3;++r) for(int c=0;c<4;++c) out.m[r][c]=in[r*4+c]/(c==3?1000.0f:10000.0f);
+    return out;
+}
+uint32_t EntityID(const std::string& s) { uint32_t h=2166136261u; for(unsigned char c:s) h=(h^c)*16777619u; return h?h:1; }
+uint64_t Fingerprint(const std::string& path) {
+    std::ifstream file(path,std::ios::binary); if(!file) return 0;
+    uint64_t hash=14695981039346656037ull; char block[65536];
+    while(file) { file.read(block,sizeof block); for(std::streamsize i=0;i<file.gcount();++i) hash=(hash^uint8_t(block[i]))*1099511628211ull; }
+    return hash;
+}
+online::PlayerState Capture(cPlayer* p) {
+    online::PlayerState s; auto* body=p->GetCharacterBody(); auto* camera=p->GetCamera();
+    cVector3f pos=body->GetFeetPosition(); s.x=int32_t(std::round(pos.x*1000)); s.y=int32_t(std::round(pos.y*1000)); s.z=int32_t(std::round(pos.z*1000));
+    s.yaw=int16_t(Wrapped(camera->GetYaw())*1000); s.pitch=int16_t(camera->GetPitch()*1000);
+    s.health=uint16_t(std::clamp(p->GetHealth(),0.0f,100.0f)*100); s.oil=uint16_t(std::clamp(p->GetPower(),0.0f,100.0f)*100);
+    s.eyeHeight=int16_t((camera->GetPosition().y-pos.y)*1000);
+    s.flags=(p->IsActive()?4:0)|(p->IsDead()?8:0)|(p->GetMoveState()==ePlayerMoveState_Crouch?1:0)|(p->GetFlashLight()->IsActive()?2:0);
+    if(p->GetState()==ePlayerState_Move) s.flags|=16;
+    s.forwardSpeed=int16_t(body->GetMoveSpeed(eCharDir_Forward)*1000); s.sideSpeed=int16_t(body->GetMoveSpeed(eCharDir_Right)*1000);
+    s.forwardMax=uint16_t(body->GetMaxPositiveMoveSpeed(eCharDir_Forward)*1000); s.sideMax=uint16_t(body->GetMaxPositiveMoveSpeed(eCharDir_Right)*1000);
+    s.backwardMax=uint16_t(-body->GetMaxNegativeMoveSpeed(eCharDir_Forward)*1000);
+    s.acceleration=uint16_t(body->GetMoveAcc(eCharDir_Forward)*1000); s.deceleration=uint16_t(body->GetMoveDeacc(eCharDir_Forward)*1000);
+    return s;
+}
+}
+
+cCoopNetwork::cCoopNetwork(cInit* i) : iUpdateable("OvertureOnline"), init(i), session([](const std::string& s){ Log("[COOP] %s\n",s.c_str()); }) {
+    const char* role=getenv("PENUMBRA_COOP_ROLE"); if(!role) return;
+    const char* portText=getenv("PENUMBRA_COOP_PORT"); const long port=portText?std::strtol(portText,nullptr,10):online::DefaultPort;
+    if(port<1 || port>65535) FatalError("Invalid cooperative UDP port\n");
+    if(std::string(role)=="host") { if(!session.StartHost(uint16_t(port))) FatalError("Cannot open cooperative UDP port\n"); CreateRemote(); }
+    else if(std::string(role)=="client") {
+        const char* address=getenv("PENUMBRA_COOP_ADDRESS");
+        if(!address || !*address || !session.StartClient(address,uint16_t(port))) FatalError("Cannot connect to cooperative host\n");
+        hpl::gbGameScriptExecution=false;
+    } else FatalError("Invalid cooperative role\n");
+    Log("[COOP] Experimental Overture protocol %u; campaign authority=host\n",unsigned(online::ProtocolVersion));
+    if(IsHost()) cSoundEntity::AddGlobalCallback(this);
+    activeNetwork=this; hpl::gGameGuiSoundCallback=ScriptSound;
+    steam.Start();
+}
+cCoopNetwork::~cCoopNetwork() {
+    hpl::gGameGuiSoundCallback=nullptr; activeNetwork=nullptr;
+    cSoundEntity::RemoveGlobalCallback(this);
+    session.CloseVoluntarily(); session.Stop();
+    if(remotePlayer) {
+        PlayerScope scope(init,remotePlayer,remoteHands);
+        if(remotePlayer->GetCharacterBody()) remotePlayer->OnWorldExit();
+        remoteHands->OnWorldExit();
+        delete remotePlayer; delete remoteHands;
+    }
+    hpl::gbGameScriptExecution=true;
+}
+void cCoopNetwork::CreateRemote() {
+    remoteHands=new cPlayerHands(init);
+    { PlayerScope scope(init,init->mpPlayer,remoteHands); remotePlayer=new cPlayer(init); remotePlayer->SetNetworkRemote(true); }
+    init->mpGame->GetScene()->SetCamera(init->mpPlayer->GetCamera());
+}
+bool cCoopNetwork::Ready() const { return map.epoch && session.Connected() && (IsHost()?session.IsWorldApplied(map.epoch):positioned); }
+void cCoopNetwork::BeforeMapLoad() {
+    if(IsHost()) session.BeginMapLoad();
+    if(remotePlayer && remotePlayer->GetCharacterBody()) { PlayerScope scope(init,remotePlayer,remoteHands); remotePlayer->OnWorldExit(); remoteHands->OnWorldExit(); }
+    auto* world=init->mpGame->GetScene()->GetWorld3D();
+    if(world) {
+        for(auto* part:avatar) if(part) world->DestroyMeshEntity(part);
+        if(remoteLight) world->DestroyLight(remoteLight);
+    }
+    for(auto& part:avatar) part=nullptr;
+    remoteLight=nullptr; hasAvatarPosition=false; positioned=false; baselineSent=false;
+    prediction.Clear(); motion.clear(); published.clear(); pendingPresentation.clear(); remoteButtons=0; lastInput=0;
+    mediaBytes.clear(); pendingMedia.clear(); currentMusic.clear(); currentSkybox.clear(); inventoryBytes.clear();
+}
+void cCoopNetwork::AfterMapLoad(const tString& file) {
+    if(!IsOnline()) return;
+    if(IsHost()) {
+        ++map.epoch; map.file="maps/"+cString::GetFileName(file); map.fingerprint=Fingerprint(map.file);
+        if(!map.fingerprint) FatalError("Cannot fingerprint cooperative map '%s'\n",map.file.c_str());
+        { PlayerScope scope(init,remotePlayer,remoteHands); remotePlayer->OnWorldLoad(); remotePlayer->SetPower(100); }
+        remotePlayer->GetCharacterBody()->SetFeetPosition(init->mpPlayer->GetCharacterBody()->GetFeetPosition()+cVector3f(0.6f,0,0));
+        remotePlayer->GetCharacterBody()->SetCollideCharacter(false); init->mpPlayer->GetCharacterBody()->SetCollideCharacter(false);
+        remotePlayer->GetCamera()->SetYaw(init->mpPlayer->GetCamera()->GetYaw());
+        remotePlayer->GetCamera()->SetPitch(init->mpPlayer->GetCamera()->GetPitch());
+        remotePlayer->GetCharacterBody()->SetYaw(remotePlayer->GetCamera()->GetYaw());
+        if(session.Connected()) session.SendMap(map);
+    } else {
+        init->mpPlayer->SetActive(false); init->mpFadeHandler->FadeIn(0); session.SendMapReady(map.epoch);
+    }
+    Log("[COOP/MAP] Loaded epoch=%u map=%s role=%s\n",map.epoch,file.c_str(),IsHost()?"host":"client");
+}
+bool cCoopNetwork::ClientAction(online::PlayerAction action, bool pressed,const std::string& item) {
+    if(!IsClient()) return false;
+    if(action==online::PlayerAction::Interact) interactHeld=pressed;
+    online::ActionRequest request; request.epoch=map.epoch; request.sequence=++actionSequence; request.action=action; request.pressed=pressed; request.item=item;
+    if(action==online::PlayerAction::Interact && pressed && init->mpPlayer->GetState()==ePlayerState_UseItem && init->mpPlayer->GetCurrentItem())
+        request.item=init->mpPlayer->GetCurrentItem()->GetName();
+    if(Ready()) session.SendAction(request);
+    if(action==online::PlayerAction::Interact && pressed && !request.item.empty()) init->mpPlayer->ChangeState(ePlayerState_Normal);
+    if(action==online::PlayerAction::Interact && pressed && init->mpGameMessageHandler->HasMessage()) init->mpGameMessageHandler->ShowNext();
+    return true;
+}
+bool cCoopNetwork::ClientLook(float yaw,float pitch) {
+    if(!IsClient()) return false;
+    lookYaw+=yaw; lookPitch+=pitch;
+    return interactHeld && (latest.players[1].flags&16);
+}
+bool cCoopNetwork::RelayMessage(const tWString& text) {
+    if(!IsHost()) return false;
+    online::Presentation e; e.kind=online::PresentationKind::Message; e.target=IsRemoteContext()?2:0; e.text[0]=cString::To8Char(text); pendingPresentation.push_back(e);
+    return IsRemoteContext();
+}
+void cCoopNetwork::RelayFade(bool out,float seconds) {
+    if(!IsHost()) return;
+    online::Presentation e; e.kind=online::PresentationKind::Fade; e.values[0]=out?1:0; e.values[1]=int32_t(std::max(0.0f,seconds)*1000); pendingPresentation.push_back(e);
+}
+void cCoopNetwork::RelayGuiSound(const std::string& file,float volume) {
+    if(!IsHost()) return;
+    online::Presentation e; e.kind=online::PresentationKind::GuiSound; e.target=IsRemoteContext()?2:0; e.text[0]=file; e.values[0]=int32_t(std::clamp(volume,0.0f,1.0f)*1000); pendingPresentation.push_back(e);
+}
+void cCoopNetwork::Update(float dt) {
+    if(!IsOnline()) return;
+    steam.Update();
+    session.Poll();
+    RunQA(dt);
+    if(session.Connected() && generation!=session.Generation()) {
+        generation=session.Generation(); baselineSent=false; positioned=false; published.clear(); motion.clear(); prediction.Clear();
+        if(IsHost() && map.epoch) { ++map.epoch; session.SendMap(map); }
+        hadConnection=true;
+    }
+    if(!session.Connected()) {
+        if(IsClient()) init->mpPlayer->SetActive(false);
+        if(hadConnection && IsClient() && !session.AttemptActive() && session.RetryAllowed()) session.StartClient(session.RemoteAddress(),session.RemotePort(),true);
+        if(remotePlayer && remotePlayer->GetCharacterBody()) { remotePlayer->GetCharacterBody()->SetMoveSpeed(eCharDir_Forward,0); remotePlayer->GetCharacterBody()->SetMoveSpeed(eCharDir_Right,0); }
+        return;
+    }
+    if(IsHost()) UpdateHost(dt); else UpdateClient(dt);
+}
+void cCoopNetwork::UpdateHost(float dt) {
+    if(!map.epoch || !remotePlayer->GetCharacterBody()) return;
+    const bool canPlay=Ready() && init->mpGame->GetUpdater()->GetCurrentContainerName()=="Default";
+    online::PlayerInput input; const bool hasInput=canPlay && session.ReadInput(input) && input.epoch==map.epoch && !(getenv("PENUMBRA_COOP_QA") && ((qaTime>4 && qaTime<6) || (qaTime>15 && qaTime<18) || (qaTime>24 && qaTime<26)));
+    {
+        PlayerScope scope(init,remotePlayer,remoteHands);
+        remotePlayer->SetActive((latest.players[0].flags&4)!=0);
+        // Local UI and camera effects belong to their owner; remote physics has its own state.
+        if(hasInput) {
+            if(remotePlayer->GetState()==ePlayerState_Move) {
+                if(input.sequence!=lastInput) { remotePlayer->AddYaw(input.lookYaw/10000.0f); remotePlayer->AddPitch(input.lookPitch/10000.0f); }
+            } else if(!(getenv("PENUMBRA_COOP_QA") && qaStage==2 && qaTime<8.6f && remotePlayer->GetState()==ePlayerState_Normal)) {
+                remotePlayer->GetCamera()->SetYaw(input.yaw/1000.0f); remotePlayer->GetCamera()->SetPitch(input.pitch/1000.0f); remotePlayer->GetCharacterBody()->SetYaw(input.yaw/1000.0f);
+            }
+            if((input.buttons&4) && !(remoteButtons&4)) remotePlayer->StartRun();
+            if(!(input.buttons&4) && (remoteButtons&4)) remotePlayer->StopRun();
+            if((input.buttons&2) && !(remoteButtons&2)) remotePlayer->StartCrouch();
+            if(!(input.buttons&2) && (remoteButtons&2)) remotePlayer->StopCrouch();
+            if((input.buttons&1) && !(remoteButtons&1)) remotePlayer->Jump();
+            remotePlayer->SetJumpButtonDown((input.buttons&1)!=0); remoteButtons=input.buttons; lastInput=input.sequence;
+            remotePlayer->MoveForwards(input.forward/1000.0f,dt); remotePlayer->MoveSideways(input.strafe/1000.0f,dt);
+        } else { remotePlayer->StopInteract(); remotePlayer->MoveForwards(0,dt); remotePlayer->MoveSideways(0,dt); remoteButtons=0; }
+        remotePlayer->Update(dt);
+    }
+    online::ActionRequest action;
+    while(session.ReadAction(action)) {
+        if(action.epoch!=map.epoch || !canPlay) continue;
+        if(action.action==online::PlayerAction::Interact && action.pressed && init->mpGameMessageHandler->HasMessage()) { init->mpGameMessageHandler->ShowNext(); continue; }
+        PlayerScope scope(init,remotePlayer,remoteHands);
+        if(action.action==online::PlayerAction::Interact) {
+            if(action.pressed && !action.item.empty()) {
+                auto* item=init->mpInventory->GetItem(action.item);
+                auto* body=remotePlayer->GetPickedBody();
+                auto* entity=body?static_cast<iGameEntity*>(body->GetUserData()):nullptr;
+                if(getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Item action name=%s target=%s distance=%.3f maximum=%.3f\n",action.item.c_str(),entity?entity->GetName().c_str():"none",remotePlayer->GetPickedDist(),entity?entity->GetMaxInteractDist():0);
+                if(item && entity && entity->IsActive() && remotePlayer->GetPickedDist()<=entity->GetMaxInteractDist())
+                    init->mpInventory->GetItemType(item->GetItemType())->OnUse(item,entity);
+            } else if(action.pressed) {
+                if(getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Native interact picked=%s distance=%.3f pitch=%.3f\n",remotePlayer->GetPickedBody()?remotePlayer->GetPickedBody()->GetName().c_str():"none",remotePlayer->GetPickedDist(),remotePlayer->GetCamera()->GetPitch());
+                remotePlayer->StartInteract();
+            } else remotePlayer->StopInteract();
+        }
+        if(action.action==online::PlayerAction::Attack) { if(action.pressed) remotePlayer->StartExamine(); else remotePlayer->StopExamine(); }
+        if(action.action==online::PlayerAction::Lantern) remotePlayer->GetFlashLight()->SetNetworkActive(action.pressed);
+    }
+    if(session.IsMapReady(map.epoch) && !baselineSent) {
+        if(PublishWorld(true) && session.SendWorldReady(map.epoch)) baselineSent=true;
+    }
+    if(session.IsMapReady(map.epoch)) {
+        PublishMedia();
+        online::InventoryState next; next.epoch=map.epoch;
+        for(const auto& pair:init->mpInventory->NetworkItems()) {
+            auto* item=pair.second; online::InventoryItem value; value.name=item->GetName(); value.image=item->GetEntityFile(); value.count=uint16_t(std::max(1,item->GetCount())); next.items.push_back(value);
+        }
+        auto bytes=online::EncodeInventory(next);
+        if(bytes!=inventoryBytes) {
+            next.revision=inventory.revision+1;
+            if(session.SendInventory(next)) { inventory=next; inventoryBytes=bytes; }
+        }
+        for(auto it=pendingPresentation.begin();it!=pendingPresentation.end();) { it->epoch=map.epoch; if(session.SendPresentation(*it)) it=pendingPresentation.erase(it); else break; }
+        worldTime+=dt; if(worldTime>=1.0f/30) { worldTime=0; PublishWorld(false); }
+        sendTime+=dt; backupTime+=dt;
+        if(sendTime>=1.0f/60) {
+            sendTime=0; latest.epoch=map.epoch; latest.sequence=++sequence; latest.acknowledgedInput=lastInput;
+            latest.players[0]=Capture(init->mpPlayer); latest.players[1]=Capture(remotePlayer);
+            latest.players[1].flags=(latest.players[1].flags&~4)|(canPlay?(latest.players[0].flags&4):0);
+            session.SendSnapshot(latest);
+            if(backupTime>=0.2f) { session.SendSnapshotBackup(latest); backupTime=0; }
+        }
+        UpdateAvatar(latest.players[1],dt);
+    }
+}
+void cCoopNetwork::UpdateClient(float dt) {
+    online::MapState received;
+    if(session.ReadMap(received) && received.epoch!=map.epoch) {
+        if(Fingerprint(received.file)!=received.fingerprint) { Log("[COOP/MAP] Data mismatch %s\n",received.file.c_str()); session.Stop(); return; }
+        map=received;
+        if(!init->mpMapHandler->Load(cString::GetFileName(map.file),"link1")) { session.Stop(); return; }
+    }
+    if(!map.epoch || !init->mpPlayer->GetCharacterBody()) return;
+    online::EntityState entity; while(session.ReadEntity(entity)) if(entity.epoch==map.epoch) ApplyEntity(entity);
+    online::MediaState media; while(session.ReadMedia(media)) if(media.epoch==map.epoch) ApplyMedia(media);
+    if(session.IsWorldReady(map.epoch)) session.SendWorldApplied(map.epoch);
+    online::Snapshot snapshot;
+    if(session.ReadSnapshot(snapshot) && snapshot.epoch==map.epoch) {
+        latest=snapshot;
+        if(snapshot.sequence!=lastSnapshot) {
+            auto* player=init->mpPlayer; auto* body=player->GetCharacterBody(); const auto& s=snapshot.players[1];
+            cVector3f target(s.x/1000.0f,s.y/1000.0f,s.z/1000.0f);
+            if(!positioned) {
+                body->SetFeetPosition(target); body->SetYaw(s.yaw/1000.0f); player->GetCamera()->SetYaw(s.yaw/1000.0f); player->GetCamera()->SetPitch(s.pitch/1000.0f);
+                positioned=true; Log("[COOP/STATE] First player baseline applied\n");
+            } else if((target-body->GetFeetPosition()).SqrLength()>4.0f) { body->SetFeetPosition(target); prediction.Clear(); }
+            player->SetActive((s.flags&4)!=0); player->SetHealth(s.health/100.0f);
+            if(s.flags&16) { player->GetCamera()->SetYaw(s.yaw/1000.0f); player->GetCamera()->SetPitch(s.pitch/1000.0f); }
+            lastSnapshot=snapshot.sequence;
+        }
+        if(positioned && (snapshot.players[1].flags&4) && !(snapshot.players[1].flags&(1|8))) {
+            auto* body=init->mpPlayer->GetCharacterBody(); auto* physics=init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld();
+            online::PredictionCollisionCache cache;
+            const float height=body->GetPosition().y;
+            auto collide=[&](online::PredictedPosition from,online::PredictedPosition to) {
+                const bool blocked=cache.Blocked(to.x,to.z,[&](float x,float z) {
+                    cMatrixf matrix=cMatrixf::Identity; matrix.SetTranslation(cVector3f(x,height,z));
+                    return physics->CheckShapeWorldCollision(nullptr,body->GetShape(),matrix,body->GetBody(),false,true,nullptr,false);
+                });
+                return blocked?from:to;
+            };
+            auto pos=prediction.ReconcileSmoothed(snapshot.players[1],snapshot.acknowledgedInput,snapshot.sequence,dt,collide);
+            cVector3f feet=body->GetFeetPosition(); feet.x=pos.x; feet.z=pos.z; body->SetFeetPosition(feet,true);
+        }
+        UpdateAvatar(snapshot.players[0],dt);
+    }
+    for(auto& pair:motion) {
+        auto* e=init->mpMapHandler->GetGameEntity(pair.first,false); if(!e) continue;
+        auto& m=pair.second; m.age+=dt; const float alpha=std::min(1.0f,m.age/(1.0f/30));
+        for(size_t n=0;n<m.state.bodies.size() && n<size_t(e->GetBodyNum());++n) e->GetBody(int(n))->SetMatrix(cMath::MatrixSlerp(alpha,m.from[n],Unpack(m.state.bodies[n]),true));
+    }
+    online::Presentation event;
+    while(session.ReadPresentation(event)) {
+        if(event.epoch!=map.epoch || event.target==1) continue;
+        if(event.kind==online::PresentationKind::Message) init->mpGameMessageHandler->Add(cString::To16Char(event.text[0]));
+        if(event.kind==online::PresentationKind::Fade) { if(event.values[0]) init->mpFadeHandler->FadeOut(event.values[1]/1000.0f); else init->mpFadeHandler->FadeIn(event.values[1]/1000.0f); }
+        if(event.kind==online::PresentationKind::GuiSound) init->mpGame->GetSound()->GetSoundHandler()->PlayGui(event.text[0],false,event.values[0]/1000.0f);
+        auto* renderer=init->mpGame->GetGraphics()->GetRenderer3D();
+        const cColor color(event.values[0]/1000.0f,event.values[1]/1000.0f,event.values[2]/1000.0f,event.values[3]/1000.0f);
+        if(event.kind==online::PresentationKind::FogColor) renderer->SetFogColor(color);
+        if(event.kind==online::PresentationKind::FogProperties) {
+            renderer->SetFogStart(event.values[0]/1000.0f); renderer->SetFogEnd(event.values[1]/1000.0f);
+            renderer->SetFogActive((event.values[3]&1)!=0); renderer->SetFogCulling((event.values[3]&2)!=0);
+        }
+        if(event.kind==online::PresentationKind::Light && event.text[0]=="coop_ambient") renderer->SetAmbientColor(color);
+        if(event.kind==online::PresentationKind::Light && event.text[0]=="coop_skybox") {
+            const auto& file=event.text[1];
+            if(file.find("..")!=std::string::npos || file.find(':')!=std::string::npos || (!file.empty() && (file[0]=='/' || file[0]=='\\'))) continue;
+            if(file!=currentSkybox) { renderer->SetSkyBox(file.empty()?nullptr:init->mpGame->GetResources()->GetTextureManager()->CreateCubeMap(file,false),!file.empty()); currentSkybox=file; }
+            renderer->SetSkyBoxColor(color); renderer->SetSkyBoxActive(event.values[4]!=0);
+        }
+    }
+    online::InventoryState items;
+    if(session.ReadInventory(items) && items.epoch==map.epoch && (items.revision!=inventory.revision || items.epoch!=inventory.epoch)) {
+        std::vector<cInventoryItem*> remove;
+        for(const auto& pair:init->mpInventory->NetworkItems()) {
+            bool present=false; for(const auto& value:items.items) if(value.name==pair.first) present=true;
+            if(!present) remove.push_back(pair.second);
+        }
+        for(auto* item:remove) {
+            if(init->mpInventory->IsActive()) init->mpInventory->SetActive(false);
+            if(init->mpPlayer->GetCurrentItem()==item) { init->mpPlayer->ChangeState(ePlayerState_Normal); init->mpPlayer->SetCurrentItem(nullptr); }
+            init->mpInventory->RemoveItem(item);
+        }
+        for(const auto& value:items.items) {
+            if(value.image.empty() || value.image.find("..")!=std::string::npos || value.image.find(':')!=std::string::npos || cString::GetFileExt(value.image)!="ent") continue;
+            auto* item=init->mpInventory->GetItem(value.name);
+            if(!item) { init->mpInventory->AddItemFromFile(value.name,value.image,-1); item=init->mpInventory->GetItem(value.name); }
+            if(item) item->SetCount(value.count);
+        }
+        inventory=items;
+    }
+    if(Ready()) {
+        online::PlayerInput input; input.epoch=map.epoch; input.sequence=++inputSequence;
+        auto* p=init->mpPlayer; auto* keys=init->mpGame->GetInput();
+        if(init->mpGame->GetUpdater()->GetCurrentContainerName()=="Default" && p->IsActive() && !init->mpGameMessageHandler->HasMessage()) {
+            input.forward=(keys->IsTriggerd("Forward")?1000:0)-(keys->IsTriggerd("Backward")?1000:0);
+            input.strafe=(keys->IsTriggerd("Right")?1000:0)-(keys->IsTriggerd("Left")?1000:0);
+            input.buttons=(keys->IsTriggerd("Jump")?1:0)|(p->GetMoveState()==ePlayerMoveState_Crouch?2:0)|(keys->IsTriggerd("Run")?4:0);
+        }
+        if(getenv("PENUMBRA_COOP_QA")) { input.forward=input.strafe=0; input.buttons=0; }
+        if(getenv("PENUMBRA_COOP_QA") && qaTime>2 && qaTime<3) {
+            input.forward=-1000; input.strafe=0; input.buttons=0; p->MoveForwards(-1,dt);
+        }
+        input.yaw=int16_t(Wrapped(p->GetCamera()->GetYaw())*1000); input.pitch=int16_t(p->GetCamera()->GetPitch()*1000);
+        input.lookYaw=int16_t(std::clamp(lookYaw*10000,-31420.0f,31420.0f)); input.lookPitch=int16_t(std::clamp(lookPitch*10000,-31420.0f,31420.0f)); lookYaw=lookPitch=0;
+        session.SendInput(input); prediction.Push(input,dt);
+    }
+}
+bool cCoopNetwork::PublishWorld(bool baseline) {
+    bool complete=true;
+    std::set<std::string> alive;
+    auto it=init->mpMapHandler->GetGameEntityIterator();
+    while(it.HasNext()) {
+        auto* entity=it.Next(); const auto& name=entity->GetName(); alive.insert(name);
+        online::EntityState e; e.epoch=map.epoch; e.id=EntityID(name); e.name=name; e.file=entity->GetFileName();
+        e.flags=entity->IsActive()?1:0; e.subtype=uint16_t(entity->GetType());
+        if(auto* mesh=entity->GetMeshEntity()) e.transform=Pack(mesh->GetWorldMatrix()); else e.transform=Pack(cMatrixf::Identity);
+        for(int n=0;n<entity->GetBodyNum() && n<32;++n) e.bodies.push_back(Pack(entity->GetBody(n)->GetLocalMatrix()));
+        const auto found=published.find(name);
+        const bool lifecycle=found==published.end() || found->second.flags!=e.flags;
+        const bool moved=found==published.end() || found->second.bodies!=e.bodies || found->second.transform!=e.transform;
+        if(lifecycle || moved) {
+            e.sequence=++sequence;
+            const bool sent=lifecycle?session.SendEntity(e):session.SendEntityMotion(e);
+            if(sent) published[name]=e; else complete=false;
+        }
+    }
+    for(auto it=published.begin();it!=published.end();) {
+        if(alive.count(it->first)) { ++it; continue; }
+        auto e=it->second; e.flags=4; e.sequence=++sequence;
+        if(session.SendEntity(e)) it=published.erase(it); else { complete=false; ++it; }
+    }
+    return complete;
+}
+void cCoopNetwork::ApplyEntity(const online::EntityState& s) {
+    auto* entity=init->mpMapHandler->GetGameEntity(s.name,false);
+    if(!entity && !(s.flags&4) && !s.file.empty()) {
+        init->mpGame->GetScene()->GetWorld3D()->CreateEntity(s.name,Unpack(s.transform),s.file,true);
+        entity=init->mpMapHandler->GetGameEntity(s.name,false);
+    }
+    if(!entity) return;
+    entity->SetActive((s.flags&1)!=0 && !(s.flags&4));
+    if(s.flags&4) { motion.erase(s.name); return; }
+    if(auto* mesh=entity->GetMeshEntity()) if(s.bodies.empty()) mesh->SetMatrix(Unpack(s.transform));
+    Motion m; m.state=s;
+    for(size_t n=0;n<s.bodies.size() && n<size_t(entity->GetBodyNum());++n) {
+        auto* body=entity->GetBody(int(n)); m.from.push_back(body->GetLocalMatrix());
+        if(!body->IsCharacter()) { body->SetMass(0); body->SetGravity(false); body->SetLinearVelocity(cVector3f(0)); body->SetAngularVelocity(cVector3f(0)); }
+        if(!s.liveMotion) body->SetMatrix(Unpack(s.bodies[n]));
+    }
+    if(s.liveMotion) motion[s.name]=m;
+}
+void cCoopNetwork::UpdateAvatar(const online::PlayerState& s,float dt) {
+    auto* world=init->mpGame->GetScene()->GetWorld3D(); if(!world) return;
+    if(!avatar[0]) {
+        // Procedural placeholder silhouette: no retail character model is distributed.
+        const cVector3f sizes[]={cVector3f(.4f,.65f,.22f),cVector3f(.23f,.23f,.23f),cVector3f(.12f,.55f,.12f),cVector3f(.12f,.55f,.12f),cVector3f(.15f,.7f,.15f),cVector3f(.15f,.7f,.15f)};
+        for(int n=0;n<6;++n) {
+            std::string name="CoopAvatar_"+std::to_string(n); auto* mesh=init->mpGame->GetGraphics()->GetMeshCreator()->CreateBox(name,sizes[n],"player_gui_hand.mat");
+            avatar[n]=world->CreateMeshEntity(name,mesh); avatar[n]->SetIsSaved(false); avatar[n]->SetCastsShadows(true);
+        }
+        remoteLight=world->CreateLightSpot("CoopPartnerFlashlight","player_flashlight_gobo.tga");
+        remoteLight->SetIsSaved(false); remoteLight->SetDiffuseColor(cColor(1,1,.85f,1)); remoteLight->SetFarAttenuation(15); remoteLight->SetFOV(cMath::ToRad(50)); remoteLight->SetCastShadows(true);
+        Log("[COOP/AVATAR] Created partner silhouette\n");
+    }
+    cVector3f target(s.x/1000.0f,s.y/1000.0f,s.z/1000.0f);
+    if(!hasAvatarPosition || (avatarPosition-target).SqrLength()>4) avatarPosition=target;
+    else avatarPosition+=(target-avatarPosition)*std::min(1.0f,dt*20);
+    hasAvatarPosition=true;
+    const float crouch=(s.flags&1)?0.7f:1;
+    const cVector3f offsets[]={cVector3f(0,1.1f,0),cVector3f(0,1.58f,0),cVector3f(-.27f,1.1f,0),cVector3f(.27f,1.1f,0),cVector3f(-.11f,.35f,0),cVector3f(.11f,.35f,0)};
+    for(int n=0;n<6;++n) { auto m=cMath::MatrixRotateY(s.yaw/1000.0f); auto offset=offsets[n]; offset.y*=crouch; m.SetTranslation(avatarPosition+cMath::MatrixMul(m,offset)); avatar[n]->SetMatrix(m); avatar[n]->SetVisible(session.Connected() && !(s.flags&8)); }
+    auto lightMatrix=cMath::MatrixRotate(cVector3f(-s.pitch/1000.0f,-s.yaw/1000.0f,0),eEulerRotationOrder_YXZ); lightMatrix.SetTranslation(avatarPosition+cVector3f(0,s.eyeHeight/1000.0f,0));
+    remoteLight->SetMatrix(lightMatrix); remoteLight->SetVisible((s.flags&2)!=0);
+}
+void cCoopNetwork::RunQA(float dt) {
+    if(!getenv("PENUMBRA_COOP_QA") || (!Ready() && qaTime<=0)) return;
+    qaTime+=dt;
+    if(std::string(getenv("PENUMBRA_COOP_QA"))=="intro") {
+        auto* song=init->mpGame->GetSound()->GetMusicHandler()->GetCurrentSong();
+        if(qaTime>15 && Ready() && init->mpPlayer->IsActive() && song && song->msFileName.find("penumbra_music_E1_A6")!=std::string::npos) qaPuzzle=true;
+        const int phase=int(qaTime/2);
+        if(qaTime>7 && phase!=qaStage && init->mpGameMessageHandler->HasMessage()) {
+            if(IsHost()) init->mpPlayer->StartInteract(); else ClientAction(online::PlayerAction::Interact,true);
+            qaStage=phase;
+        }
+        if(qaTime>22) {
+            const bool ok=qaPuzzle;
+            Log("[COOP/QA] %s native intro unlock and campaign music role=%s\n",ok?"PASS":"FAIL",IsHost()?"host":"client"); init->mpGame->Exit();
+        }
+        return;
+    }
+    const bool full=std::string(getenv("PENUMBRA_COOP_QA"))=="full";
+    if(IsHost()) {
+        init->mpGameMessageHandler->Reset(); init->mpPlayer->SetActive(true);
+        if(qaStage>=2 && qaTime<15) {
+            qaGrabbed=qaGrabbed || remotePlayer->GetState()==ePlayerState_Grab;
+            if(auto* e=init->mpMapHandler->GetGameEntity(qaObject,false))
+                qaObjectMaxDistance=std::max(qaObjectMaxDistance,(e->GetBody(0)->GetLocalPosition()-qaObjectPosition).Length());
+        }
+        if(qaStage==2 && qaTime<8.6f && remotePlayer->GetState()==ePlayerState_Normal) {
+            auto* e=init->mpMapHandler->GetGameEntity(qaObject,false);
+            if(e) { auto angles=AimAngles(remotePlayer->GetCamera()->GetPosition(),e->GetBody(0)->GetBV()->GetWorldCenter()); remotePlayer->GetCamera()->SetYaw(angles.y); remotePlayer->GetCamera()->SetPitch(angles.x); remotePlayer->GetCharacterBody()->SetYaw(angles.y); }
+        }
+        if(qaTime<1) { init->mpFadeHandler->FadeIn(0); init->mpPlayer->GetLookAt()->SetActive(false); init->mpEffectHandler->GetDepthOfField()->SetActive(false,0); }
+        if(qaStage==0) { qaInitialPosition=remotePlayer->GetCharacterBody()->GetFeetPosition(); qaStage=1; }
+        if(qaStage==1 && qaTime>4) {
+            qaMoved=(remotePlayer->GetCharacterBody()->GetFeetPosition()-qaInitialPosition).SqrLength()>.01f && lastInput>30;
+            Log("[COOP/QA] Remote movement distance=%.3f input=%u\n",(remotePlayer->GetCharacterBody()->GetFeetPosition()-qaInitialPosition).Length(),lastInput);
+            auto it=init->mpMapHandler->GetGameEntityIterator();
+            while(it.HasNext()) { auto* e=it.Next(); if(e->GetName().find("whiskey")!=std::string::npos && e->GetBodyNum()) { qaObject=e->GetName(); break; } }
+            if(qaObject.empty()) FatalError("[COOP/QA] Missing native whiskey bottle fixture\n");
+            auto* e=init->mpMapHandler->GetGameEntity(qaObject,false); qaObjectPosition=e->GetBody(0)->GetLocalPosition();
+            cVector3f feet=qaObjectPosition+cVector3f(0,0,1.3f); feet.y=init->mpPlayer->GetCharacterBody()->GetFeetPosition().y;
+            remotePlayer->GetCharacterBody()->SetFeetPosition(feet); remotePlayer->GetCharacterBody()->SetMoveSpeed(eCharDir_Forward,0); remotePlayer->GetCharacterBody()->SetMoveSpeed(eCharDir_Right,0);
+            auto from=feet+cVector3f(0,remotePlayer->GetSize().y+remotePlayer->GetCameraHeightAdd(),0);
+            auto angles=AimAngles(from,e->GetBody(0)->GetBV()->GetWorldCenter());
+            remotePlayer->GetCamera()->SetYaw(angles.y); remotePlayer->GetCamera()->SetPitch(angles.x); remotePlayer->GetCharacterBody()->SetYaw(angles.y);
+            qaStage=2;
+        }
+        if(qaStage==2 && qaTime>9) {
+            Log("[COOP/QA] Native grab state=%d picked=%s\n",int(remotePlayer->GetState()),remotePlayer->GetPickedBody()?remotePlayer->GetPickedBody()->GetName().c_str():"none");
+            qaStage=3;
+        }
+        if(qaStage==3 && qaTime>13) {
+            auto* e=init->mpMapHandler->GetGameEntity(qaObject,false);
+            qaReplicated=qaObjectMaxDistance>.08f;
+            Log("[COOP/QA] Native grabbed object maximum_distance=%.3f broken=%d released_state=%d\n",qaObjectMaxDistance,e?0:1,int(remotePlayer->GetState())); qaStage=4;
+        }
+        if(full && qaStage==4 && qaTime>15) {
+            auto* locker=init->mpMapHandler->GetGameEntity("padlockarea",false);
+            if(!locker || !locker->GetBodyNum()) FatalError("[COOP/QA] Missing locker fixture\n");
+            auto target=locker->GetBody(0)->GetLocalPosition();
+            auto feet=target+cVector3f(0,0,.8f); feet.y=init->mpPlayer->GetCharacterBody()->GetFeetPosition().y;
+            remotePlayer->GetCharacterBody()->SetFeetPosition(feet);
+            auto angles=AimAngles(feet+cVector3f(0,remotePlayer->GetSize().y+remotePlayer->GetCameraHeightAdd(),0),target);
+            remotePlayer->GetCamera()->SetYaw(angles.y); remotePlayer->GetCamera()->SetPitch(angles.x); remotePlayer->GetCharacterBody()->SetYaw(angles.y); qaStage=5;
+        }
+        if(full && qaStage==5 && qaTime>21) {
+            auto* lock=init->mpMapHandler->GetGameEntity("lock1",false);
+            qaPuzzle=init->mpInventory->GetItem("padlock_key")==nullptr && lock && !lock->IsActive();
+            Log("[COOP/QA] Native client key puzzle=%d\n",qaPuzzle?1:0); qaStage=6;
+        }
+        if(full && qaStage==6 && qaTime>24) {
+            auto* locker=init->mpMapHandler->GetGameEntity("locker1",false);
+            if(!locker || locker->GetBodyNum()<2) FatalError("[COOP/QA] Missing articulated locker fixture\n");
+            qaDoorMatrix=locker->GetBody(1)->GetLocalMatrix();
+            auto target=locker->GetBody(1)->GetBV()->GetWorldCenter();
+            auto feet=target+cVector3f(0,0,.8f); feet.y=init->mpPlayer->GetCharacterBody()->GetFeetPosition().y;
+            remotePlayer->GetCharacterBody()->SetFeetPosition(feet);
+            auto angles=AimAngles(feet+cVector3f(0,remotePlayer->GetSize().y+remotePlayer->GetCameraHeightAdd(),0),target);
+            remotePlayer->GetCamera()->SetYaw(angles.y); remotePlayer->GetCamera()->SetPitch(angles.x); remotePlayer->GetCharacterBody()->SetYaw(angles.y); qaStage=7;
+        }
+        if(full && qaStage==7 && remotePlayer->GetState()==ePlayerState_Move) qaDoorGrabbed=true;
+        if(full && qaStage==7 && qaTime>31) {
+            auto* locker=init->mpMapHandler->GetGameEntity("locker1",false); auto a=Pack(qaDoorMatrix), b=Pack(locker->GetBody(1)->GetLocalMatrix());
+            for(size_t n=0;n<a.size();++n) if(std::abs(a[n]-b[n])>100) qaDoorMoved=true;
+            Log("[COOP/QA] Native client door dragged=%d changed=%d\n",qaDoorGrabbed?1:0,qaDoorMoved?1:0); qaStage=8;
+        }
+        if(full && qaStage==8 && qaTime>34) {
+            init->mpMapHandler->ChangeMap("level01_01_outside.dae","link1","","",.1f,.1f,"",""); qaStage=9;
+        }
+        if(full && qaStage==9 && map.file=="maps/level01_01_outside.dae" && Ready()) {
+            qaTransition=true; Log("[COOP/QA] Native second-map barrier PASS epoch=%u\n",map.epoch); qaStage=10;
+        }
+    } else {
+        if(qaStage==0 && qaTime>5) {
+            const auto& s=latest.players[1]; init->mpPlayer->GetCharacterBody()->SetFeetPosition(cVector3f(s.x/1000.0f,s.y/1000.0f,s.z/1000.0f));
+            init->mpPlayer->GetCamera()->SetYaw(s.yaw/1000.0f); init->mpPlayer->GetCamera()->SetPitch(s.pitch/1000.0f); qaStage=1;
+            auto it=init->mpMapHandler->GetGameEntityIterator(); while(it.HasNext()) { auto* e=it.Next(); if(e->GetName().find("whiskey")!=std::string::npos && e->GetBodyNum()) { qaObject=e->GetName(); qaObjectPosition=e->GetBody(0)->GetLocalPosition(); break; } }
+        }
+        if(qaStage==1 && qaTime>8) { ClientAction(online::PlayerAction::Interact,true); qaStage=2; }
+        if(qaStage==2 && qaTime>9.5f && qaTime<10.5f) init->mpPlayer->GetCamera()->AddYaw(dt*.25f);
+        if(qaStage==2 && qaTime>11) { ClientAction(online::PlayerAction::Interact,false); qaStage=3; }
+        if(qaStage==3 && qaTime>14) {
+            auto* e=init->mpMapHandler->GetGameEntity(qaObject,false); const float distance=e?(e->GetBody(0)->GetLocalPosition()-qaObjectPosition).Length():0;
+            qaReplicated=distance>.08f; Log("[COOP/QA] Replica grabbed object distance=%.3f\n",distance); qaStage=4;
+        }
+        if(full && qaStage==4 && qaTime>17) {
+            auto& s=latest.players[1]; init->mpPlayer->GetCamera()->SetYaw(s.yaw/1000.0f); init->mpPlayer->GetCamera()->SetPitch(s.pitch/1000.0f); qaStage=5;
+        }
+        if(full && qaStage==5 && qaTime>19) {
+            auto* key=init->mpInventory->GetItem("padlock_key");
+            if(key) { init->mpPlayer->SetCurrentItem(key); init->mpPlayer->ChangeState(ePlayerState_UseItem); init->mpPlayer->StartInteract(); }
+            qaStage=6;
+        }
+        if(full && qaStage==6 && qaTime>23) {
+            auto* lock=init->mpMapHandler->GetGameEntity("lock1",false);
+            qaPuzzle=init->mpInventory->GetItem("padlock_key")==nullptr && lock && !lock->IsActive();
+            Log("[COOP/QA] Replica client key puzzle=%d\n",qaPuzzle?1:0); qaStage=7;
+        }
+        if(full && qaStage==7 && qaTime>25) {
+            auto* locker=init->mpMapHandler->GetGameEntity("locker1",false); qaDoorMatrix=locker->GetBody(1)->GetLocalMatrix();
+            auto& s=latest.players[1]; init->mpPlayer->GetCamera()->SetYaw(s.yaw/1000.0f); init->mpPlayer->GetCamera()->SetPitch(s.pitch/1000.0f); qaStage=8;
+        }
+        if(full && qaStage==8 && qaTime>27) { ClientAction(online::PlayerAction::Interact,true); qaStage=9; }
+        if(full && qaStage==9 && qaTime>28 && qaTime<29.5f) init->mpPlayer->AddPitch(dt*2.0f);
+        if(full && qaStage==9 && qaTime>30) { ClientAction(online::PlayerAction::Interact,false); qaStage=10; }
+        if(full && qaStage==10 && qaTime>32) {
+            auto* locker=init->mpMapHandler->GetGameEntity("locker1",false); auto a=Pack(qaDoorMatrix),b=Pack(locker->GetBody(1)->GetLocalMatrix());
+            for(size_t n=0;n<a.size();++n) if(std::abs(a[n]-b[n])>100) qaDoorMoved=true;
+            Log("[COOP/QA] Replica client door changed=%d\n",qaDoorMoved?1:0); qaStage=11;
+        }
+        if(full && qaStage==11 && map.file=="maps/level01_01_outside.dae" && Ready() && init->mpGame->GetGraphics()->GetRenderer3D()->GetFogActive() && init->mpGame->GetGraphics()->GetRenderer3D()->GetSkyBoxActive()) {
+            qaTransition=true; Log("[COOP/QA] Replica second-map barrier PASS epoch=%u\n",map.epoch); qaStage=12;
+        }
+    }
+    if(qaTime>(full?45:20)) {
+        const bool ok=qaReplicated && (!IsHost() || (qaMoved && qaGrabbed)) && (!full || (qaPuzzle && qaTransition && qaDoorMoved && (!IsHost() || qaDoorGrabbed)));
+        Log("[COOP/QA] %s connected baseline, movement, native grab and replica object map=%s\n",ok?"PASS":"FAIL",map.file.c_str()); init->mpGame->Exit();
+    }
+}
+
+void cCoopNetwork::OnStart(cSoundEntity* sound) {
+    if(!IsHost() || !session.Connected() || !sound || !sound->GetData()) return;
+    online::MediaState s; s.kind=online::MediaKind::Sound; s.id=EntityID(sound->GetName()); s.name=sound->GetName(); s.file=sound->GetData()->GetName(); s.flags=1;
+    s.transform=Pack(sound->GetWorldMatrix()); s.values[0]=int32_t(sound->GetVolume()*1000);
+    if(pendingMedia.size()<256) pendingMedia.push_back(s);
+}
+void cCoopNetwork::PublishMedia() {
+    PublishEnvironment();
+    for(auto it=pendingMedia.begin();it!=pendingMedia.end();) {
+        it->epoch=map.epoch;
+        if(session.SendMedia(*it)) it=pendingMedia.erase(it); else break;
+    }
+    auto* world=init->mpGame->GetScene()->GetWorld3D();
+    auto sounds=world->GetSoundEntityIterator();
+    while(sounds.HasNext()) {
+        auto* sound=sounds.Next(); online::MediaState s; s.epoch=map.epoch; s.id=EntityID(sound->GetName()); s.kind=online::MediaKind::Sound;
+        s.name=sound->GetName(); s.file=sound->GetData()->GetName(); s.flags=sound->IsStopped()?0:1;
+        s.transform=Pack(sound->GetWorldMatrix()); s.values[0]=int32_t(sound->GetVolume()*1000);
+        auto bytes=online::EncodeMedia(s); auto key="s/"+s.name;
+        if(mediaBytes[key]!=bytes && session.SendMedia(s)) mediaBytes[key]=bytes;
+    }
+    auto* song=init->mpGame->GetSound()->GetMusicHandler()->GetCurrentSong();
+    online::MediaState s; s.epoch=map.epoch; s.id=1; s.kind=online::MediaKind::Music; s.name="campaign_music";
+    if(song) { s.file=song->msFileName; s.flags=(song->mbLoop?2:0)|1; s.values[0]=int32_t(song->mfMaxVolume*1000); } else s.flags=128;
+    auto bytes=online::EncodeMedia(s);
+    if(mediaBytes["music"]!=bytes && session.SendMedia(s)) mediaBytes["music"]=bytes;
+}
+void cCoopNetwork::PublishEnvironment() {
+    auto* r=init->mpGame->GetGraphics()->GetRenderer3D();
+    auto send=[&](online::Presentation e,const std::string& key) {
+        e.epoch=map.epoch; auto bytes=online::EncodePresentation(e);
+        if(mediaBytes[key]!=bytes && session.SendPresentation(e)) mediaBytes[key]=bytes;
+    };
+    auto colored=[&](online::PresentationKind kind,const cColor& color,const std::string& key) {
+        online::Presentation e; e.kind=kind; e.text[0]=key;
+        e.values[0]=int32_t(color.r*1000); e.values[1]=int32_t(color.g*1000); e.values[2]=int32_t(color.b*1000); e.values[3]=int32_t(color.a*1000); return e;
+    };
+    auto sky=colored(online::PresentationKind::Light,r->GetSkyBoxColor(),"coop_skybox");
+    if(r->GetSkyBox()) sky.text[1]=r->GetSkyBox()->GetName(); sky.values[4]=r->GetSkyBoxActive()?1:0; send(sky,"env/sky");
+    send(colored(online::PresentationKind::Light,r->GetAmbientColor(),"coop_ambient"),"env/ambient");
+    send(colored(online::PresentationKind::FogColor,r->GetFogColor(),"coop_fog"),"env/fog");
+    online::Presentation fog; fog.kind=online::PresentationKind::FogProperties; fog.values[0]=int32_t(r->GetFogStart()*1000); fog.values[1]=int32_t(r->GetFogEnd()*1000); fog.values[3]=(r->GetFogActive()?1:0)|(r->GetFogCulling()?2:0); send(fog,"env/props");
+}
+void cCoopNetwork::ApplyMedia(const online::MediaState& s) {
+    auto* world=init->mpGame->GetScene()->GetWorld3D();
+    if(s.kind==online::MediaKind::Sound) {
+        auto* sound=world->GetSoundEntity(s.name);
+        if(!sound && (s.flags&1)) sound=world->CreateSoundEntity(s.name,s.file,false);
+        if(!sound) return;
+        sound->SetMatrix(Unpack(s.transform)); sound->SetVolume(s.values[0]/1000.0f);
+        if((s.flags&1) && sound->IsStopped()) sound->Play(false);
+        if(!(s.flags&1) && !sound->IsStopped()) sound->Stop(false);
+    }
+    if(s.kind==online::MediaKind::Music) {
+        auto* music=init->mpGame->GetSound()->GetMusicHandler();
+        if(s.flags&128) { music->Stop(1); currentMusic.clear(); }
+        else if(!s.file.empty() && currentMusic!=s.file) { music->Play(s.file,s.values[0]/1000.0f,1,(s.flags&2)!=0); currentMusic=s.file; }
+    }
+}
+void cCoopNetwork::OnPostSceneDraw() {
+    if(!getenv("PENUMBRA_COOP_QA") || !Ready() || qaTime<15) return;
+    const char* path=getenv("PENUMBRA_COOP_SCREENSHOT");
+    if(!path || !*path) return;
+    if(!(qaScreenshots&1)) { init->mpGame->GetGraphics()->GetLowLevel()->SaveScreenToBMP(path); qaScreenshots|=1; }
+    if(qaTime>32 && map.file=="maps/level01_01_outside.dae" && !(qaScreenshots&2) &&
+       (IsHost() || (init->mpGame->GetGraphics()->GetRenderer3D()->GetFogActive() && init->mpGame->GetGraphics()->GetRenderer3D()->GetSkyBoxActive()))) {
+        std::string second(path); second=second.substr(0,second.find_last_of('.'))+"_outside.bmp";
+        init->mpGame->GetGraphics()->GetLowLevel()->SaveScreenToBMP(second); qaScreenshots|=2;
+    }
+}
