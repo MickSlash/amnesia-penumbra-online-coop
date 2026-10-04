@@ -2054,6 +2054,7 @@ void cLuxMapHandler::Reset()
 
 	mMapChangeData.mbActive = false;
 
+	++mSavedMapRevision;
 	mpSavedGame->Reset();
 
 	gpBase->mpHelpFuncs->CleanupData();
@@ -2714,6 +2715,7 @@ void cLuxMapHandler::ResumeSoundsAndMusic()
 void cLuxMapHandler::ClearSaveMapCollection()
 {
 	mpSavedGameMutex->Lock();
+		++mSavedMapRevision;
 		mpSavedGame->Reset();
 	mpSavedGameMutex->Unlock();
 }
@@ -2724,6 +2726,7 @@ void cLuxMapHandler::SetSavedMapCollection(cLuxSavedGameMapCollection *apMaps)
 {
 	mpSavedGameMutex->Lock();
 	{
+		++mSavedMapRevision;
 		hplDelete(mpSavedGame);
 
 		mpSavedGame = apMaps;
@@ -2840,6 +2843,7 @@ void cLuxMapHandler::CheckMapChange(float afTimeStep)
 
 		//////////////////////
 		// Save old map
+		++mSavedMapRevision;
 		mpSavedGame->SaveMap(mpCurrentMap);
 
 		//////////////////////

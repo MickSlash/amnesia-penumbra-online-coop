@@ -18,6 +18,7 @@
  */
 
 #include "LuxProp.h"
+#include "LuxNetwork.h"
 
 #include "LuxMap.h"
 #include "LuxPlayer.h"
@@ -431,6 +432,8 @@ void iLuxProp::OnRenderSolid(cRendererCallbackFunctions* apFunctions)
 
 void iLuxProp::SetEffectsActive(bool abActive, bool abFadeAndPlaySounds)
 {
+	// Network media owns lifecycle/visibility/playback on replicas. Prop caches can be stale.
+	const bool replica = gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica();
 	if(abActive == mbEffectsActive) return;
 
 	mbEffectsActive = abActive;
@@ -443,7 +446,7 @@ void iLuxProp::SetEffectsActive(bool abActive, bool abFadeAndPlaySounds)
 	{
 		////////////////
 		// Create particle systems
-		for(size_t i=0; i<mvParticleSystems.size(); ++i)
+		for(size_t i=0; !replica && i<mvParticleSystems.size(); ++i)
 		{
 			cLuxProp_PSData *pPSData = &mvEffectPSData[i];
 			cParticleSystem *pPS = mpWorld->CreateParticleSystem(pPSData->msName, pPSData->msDataName,1);
@@ -471,13 +474,13 @@ void iLuxProp::SetEffectsActive(bool abActive, bool abFadeAndPlaySounds)
 			{
 				pLight->SetDiffuseColor(pLightData->mOnColor);
 				pLight->SetRadius(pLightData->mfOnRadius);
-				pLight->SetFlickerActive(pLightData->mbFlickering);
+				pLight->SetFlickerActive(!replica && pLightData->mbFlickering);
 			}
 		}
 
 		////////////////
 		// Sounds
-		for(size_t i=0; i<mvSoundEntities.size(); ++i)
+		for(size_t i=0; !replica && i<mvSoundEntities.size(); ++i)
 		{
 			cSoundEntity *pSound = mvSoundEntities[i];
 
@@ -495,7 +498,7 @@ void iLuxProp::SetEffectsActive(bool abActive, bool abFadeAndPlaySounds)
 	{
 		////////////////
 		// Kill / Destroy particle systems
-		for(size_t i=0; i<mvParticleSystems.size(); ++i)
+		for(size_t i=0; !replica && i<mvParticleSystems.size(); ++i)
 		{
 			cParticleSystem *pPS = mvParticleSystems[i];
 			mvParticleSystems[i] = NULL;
@@ -527,7 +530,7 @@ void iLuxProp::SetEffectsActive(bool abActive, bool abFadeAndPlaySounds)
 
 		////////////////
 		// Sounds
-		for(size_t i=0; i<mvSoundEntities.size(); ++i)
+		for(size_t i=0; !replica && i<mvSoundEntities.size(); ++i)
 		{
 			cSoundEntity *pSound = mvSoundEntities[i];
 
@@ -984,7 +987,10 @@ int iLuxProp::GetBodyIndexFromName(const tString& asName)
 //-----------------------------------------------------------------------
 
 void iLuxProp::OnSetActive(bool abX)
-{	
+{
+	// Network media owns lifecycle/visibility/playback on replicas. Prop caches can be stale.
+	const bool replica = gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica();
+
 	///////////////
 	//Bodies
 	for(size_t i=0; i<mvBodies.size(); ++i)
@@ -1010,7 +1016,7 @@ void iLuxProp::OnSetActive(bool abX)
 
 	///////////////////
 	//Particle systems
-	for(size_t i=0; i<mvParticleSystems.size(); ++i) 
+	for(size_t i=0; !replica && i<mvParticleSystems.size(); ++i)
 	{
 		cParticleSystem *pPS = mvParticleSystems[i];
 		if(pPS)
@@ -1038,7 +1044,7 @@ void iLuxProp::OnSetActive(bool abX)
 
 	///////////////////
 	//Sound entities
-	for(size_t i=0; i<mvSoundEntities.size(); ++i) 
+	for(size_t i=0; !replica && i<mvSoundEntities.size(); ++i)
 	{
 		cSoundEntity *pSoundEntity = mvSoundEntities[i];
 

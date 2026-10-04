@@ -639,7 +639,17 @@ void Session::SetLobbyReady(bool ready) {
     auto out = Header(Message::Peer); out.push_back(ready ? 1 : 0); U16(out, listenPort_); Send(out, 0, true);
 }
 bool Session::SendSnapshot(const Snapshot& s) { return role_ == Role::Host && ready_ && IsMapReady(s.epoch) && Send(EncodeSnapshot(s), 1, false); }
-bool Session::SendSnapshotBackup(const Snapshot& s) { return role_ == Role::Host && ready_ && IsMapReady(s.epoch) && Send(EncodeSnapshot(s), 0, true); }
+bool Session::SendSnapshotBackup(const Snapshot& s) {
+    if(role_ != Role::Host || !ready_ || !IsMapReady(s.epoch)) return false;
+    const auto bytes = EncodeSnapshot(s);
+    if(!Send(bytes,0,true)) return false;
+    // A lost channel-0 reliable command holds later reliable poses. A small
+    // unsequenced twin bypasses that hole; the application epoch/sequence guard
+    // still rejects stale/duplicate poses and never creates a life transition.
+    ENetPacket* twin = enet_packet_create(bytes.data(),bytes.size(),ENET_PACKET_FLAG_UNSEQUENCED);
+    if(twin && enet_peer_send(peer_,0,twin) != 0) enet_packet_destroy(twin);
+    return true;
+}
 bool Session::ReadSnapshot(Snapshot& s) const { if (!ready_ || !hasSnapshot_) return false; s = snapshot_; return true; }
 bool Session::SendLife(const Snapshot& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeLife(s), 2, true); }
 bool Session::ReadLife(Snapshot& s) {

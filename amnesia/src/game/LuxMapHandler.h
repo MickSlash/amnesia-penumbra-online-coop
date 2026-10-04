@@ -23,6 +23,7 @@
 //----------------------------------------------
 
 #include "LuxBase.h"
+#include <cstdint>
 
 //----------------------------------------------
 
@@ -294,6 +295,7 @@ public:
 
 	void ClearSaveMapCollection();
 	cLuxSavedGameMapCollection *GetSavedMapCollection(){ return mpSavedGame;}
+	uint64_t GetSavedMapRevision() const { return mSavedMapRevision; }
 	void SetSavedMapCollection(cLuxSavedGameMapCollection *apMaps);
 
 	tString FileToMapName(const tString& asFile);
@@ -503,6 +505,7 @@ private:
 	cLuxMapHandler_ChangeMap mMapChangeData;
 
 	cLuxSavedGameMapCollection *mpSavedGame;
+	uint64_t mSavedMapRevision = 0; // Invalidate incremental readers before replacing historical maps.
 };
 
 //----------------------------------------------

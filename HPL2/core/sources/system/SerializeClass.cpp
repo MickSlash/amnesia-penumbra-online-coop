@@ -140,8 +140,9 @@ namespace hpl {
 	//Define static variables
 	tSerializeSavedClassMap cSerializeClass::m_mapSavedClasses;
 	bool cSerializeClass::mbDataSetup = false;
-	tString cSerializeClass::msTempString = "";
-	char cSerializeClass::msTempCharArray[2048];
+	// Autosave and network checkpoint serialization can run concurrently.
+	thread_local tString cSerializeClass::msTempString = "";
+	thread_local char cSerializeClass::msTempCharArray[2048];
 
 	//-----------------------------------------------------------------------
 

@@ -3,8 +3,27 @@
 #include "NetSession.h"
 #include <algorithm>
 #include <cmath>
+#include <array>
 namespace online {
 struct PredictedPosition { float x = 0, z = 0; };
+// One reconciliation only: the collision world, shape and height are fixed.
+// Exact coordinates avoid changing contacts; never retain results across ticks.
+class PredictionCollisionCache {
+public:
+    template<class Query> bool Blocked(float x, float z, Query query) {
+        for(size_t i=0;i<size_;++i) if(entries_[i].x==x && entries_[i].z==z) { ++hits_; return entries_[i].blocked; }
+        ++queries_; const bool blocked=query(x,z);
+        if(size_<entries_.size()) entries_[size_++]={x,z,blocked};
+        return blocked;
+    }
+    unsigned Queries() const { return queries_; }
+    unsigned Hits() const { return hits_; }
+private:
+    struct Entry { float x, z; bool blocked; };
+    std::array<Entry,128> entries_;
+    size_t size_=0;
+    unsigned queries_=0, hits_=0;
+};
 class MovementPrediction {
 public:
     void Clear() { commands_.clear(); hasPrevious_ = false; correction_ = {}; }

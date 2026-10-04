@@ -782,7 +782,9 @@ namespace hpl {
 
 	void cWorld::DestroyParticleSystem(cParticleSystem* apPS)
 	{
-		if(apPS==NULL)return;
+		// Owners may retain a pointer after an emitter expires or is removed by replication.
+		// Check membership before dereferencing, as DestroySoundEntity already does.
+		if(apPS==NULL || !ParticleSystemExists(apPS))return;
 
 		for(int i=0; i< apPS->GetEmitterNum();++i)
 		{

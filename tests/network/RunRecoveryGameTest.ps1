@@ -5,6 +5,8 @@ param(
     [int]$Port = 27060,
     [switch]$SlowCheckpoint,
     [switch]$StaleCheckpoint,
+    [switch]$SerializationParity,
+    [switch]$CancelCapture,
     [string]$Executable = "$PSScriptRoot/../../amnesia/src/game/x64/Release/Lux.exe"
 )
 $ErrorActionPreference = 'Stop'
@@ -42,6 +44,8 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_RECOVERY',$Mode)
         if($SlowCheckpoint) { [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_SLOW_CHECKPOINT','1') }
         if($StaleCheckpoint) { [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_STALE_CHECKPOINT','1') }
+        if($SerializationParity) { [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_SERIALIZATION_PARITY','1') }
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_CANCEL_CAPTURE',$(if($CancelCapture -and $role -eq 'host') {'1'} else {$null}))
         $processes += Start-Process -FilePath $exe -WorkingDirectory $game -ArgumentList $path -WindowStyle Hidden -PassThru
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(95)
@@ -58,6 +62,9 @@ try {
     $client = [IO.File]::ReadAllText((Join-Path $run 'client.log')); $hostText = [IO.File]::ReadAllText((Join-Path $run 'host.log'))
     if(!$client.Contains('Complete campaign checkpoint received')) { throw 'Client never received validated campaign checkpoint' }
     if(!$hostText.Contains('Missing particle save clears stale/non-finite fields')) { throw 'Missing particle save regression did not run' }
+    if($SerializationParity -and !$hostText.Contains('Sliced checkpoint XML exactly matches native save serialization')) { throw 'Incremental serialization parity did not pass' }
+    if($SerializationParity -and !$hostText.Contains('Concurrent numeric and wide-string save formatting verified')) { throw 'Concurrent native save formatting did not pass' }
+    if($CancelCapture -and (!$hostText.Contains('Historical maps reset during sliced checkpoint capture') -or !$hostText.Contains('Obsolete sliced checkpoint capture discarded'))) { throw 'Capture revision guard did not discard a stale historical-map iterator' }
     if($StaleCheckpoint) {
         $invalidated = $client.IndexOf('Invalidated in-flight checkpoint context')
         $discarded = $client.IndexOf('Obsolete checkpoint worker result discarded')
@@ -78,6 +85,6 @@ try {
 } finally {
     foreach($role in @('host','client')) { if($logs.ContainsKey($role) -and (Test-Path -LiteralPath $logs[$role])) { Copy-Item -LiteralPath $logs[$role] -Destination (Join-Path $run "$role.log") -Force } }
     foreach($process in $processes) { if(!$process.HasExited) { Stop-Process -Id $process.Id } }
-    foreach($name in @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_SLOW_CHECKPOINT','AMNESIA_NET_TEST_STALE_CHECKPOINT')) { [Environment]::SetEnvironmentVariable($name,$null) }
+    foreach($name in @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_SLOW_CHECKPOINT','AMNESIA_NET_TEST_STALE_CHECKPOINT','AMNESIA_NET_TEST_SERIALIZATION_PARITY','AMNESIA_NET_TEST_CANCEL_CAPTURE')) { [Environment]::SetEnvironmentVariable($name,$null) }
     foreach($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name,$saved[$name]) }
 }

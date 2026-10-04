@@ -6,6 +6,15 @@ Questa build corregge anche la camminata continua del client dopo il rilascio de
 
 Riduce inoltre le pause periodiche: validazione dei checkpoint client e stampa/compressione host vengono eseguite in background. Sono ottimizzate le scansioni di audio/particelle e corretti i campi non inizializzati delle particelle assenti nei salvataggi. Misure e prove in `docs/qa_lag_cpu_2026-10-04.md` dentro `source.zip`; la scomparsa di ogni rallentamento sui PC remoti richiede ancora una prova con questa build.
 
+La costruzione XML dei checkpoint host viene ora distribuita su più frame con
+un budget di 1,5 ms per passaggio. Il client ripristina i precaricamenti letterali
+di suoni e particelle previsti dallo script durante il caricamento e distribuisce
+la replica del mondo in piccoli gruppi, conservando gli eventi in coda.
+Corregge un conflitto nella rimozione delle particelle sul client e aggiunge una
+copia dello stato di riserva che supera un pacchetto affidabile mancante,
+continuando a respingere stati vecchi e duplicati.
+Prove e limiti in `docs/qa_micro_scatti_2026-10-04.md` dentro `source.zip`.
+
 La versione 6 corregge la posizione della lanterna in prima persona sul client e l'applicazione delle lanterne autorevoli anche con permessi locali obsoleti. Invia snapshot a 60 Hz, aggiunge stati affidabili di riserva ogni 100 ms e quando una lanterna cambia stato, senza riavviare prediction o interpolazione. Audio ed entità restano a 20 Hz. Riassorbe gradualmente le piccole correzioni del movimento e rinvia i dati del mondo quando ci sono troppe informazioni in attesa o ritrasmissioni. Corregge inoltre il limite di ricezione di 256 KiB che poteva impedire il recupero dei pacchetti mancanti durante il cambio livello. **Aggiornare entrambi i PC**: le build del protocollo 5 vengono rifiutate alla connessione. Prove e limiti in `docs/qa_lanterne_snapshot_2026-10-04.md` dentro `source.zip`.
 
 Corregge anche il throttle ENet che, dopo picchi degli ACK, poteva scartare tutti gli snapshot ordinari pur con ping stabile. Il traffico voluminoso mantiene il controllo della congestione. I campi di fade degli effetti visivi vengono inizializzati e azzerati per evitare checkpoint non validi.

@@ -1387,7 +1387,7 @@ void cLuxDebugHandler::TestChangeMapSave()
 	//Save, reset, and the load the saved maps so the saved data format is tested too!
 	tWString sFile = _W("_debug_test_change_map.save");
 	cSerializeClass::SaveToFile(pSavedMaps,sFile,"SavedMaps");
-	pSavedMaps->Reset();
+	gpBase->mpMapHandler->ClearSaveMapCollection();
 	cSerializeClass::LoadFromFile(pSavedMaps, sFile);
 
 	pMap = gpBase->mpMapHandler->LoadMap(sMapFile,true);

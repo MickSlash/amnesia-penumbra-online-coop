@@ -299,6 +299,11 @@ public:
 	float GetHealth(){ return mfHealth;}
 
 	void SetEffectsActive(bool abActive, bool abFadeAndPlaySounds);
+	// The world retains these objects; replica media IDs own their lifecycle.
+	void UseReplicatedMedia() {
+		for(auto& ps : mvParticleSystems) ps = NULL;
+		for(auto& sound : mvSoundEntities) sound = NULL;
+	}
 
 	float GetEffectsAlpha(){ return mfEffectsAlpha;}
 

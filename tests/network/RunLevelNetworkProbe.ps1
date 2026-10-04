@@ -6,7 +6,8 @@ param(
     [ValidateRange(0,500)][int]$OneWayDelayMs = 35,
     [ValidateRange(2,1000)][int]$DropEvery = 1000,
     [ValidateRange(60,600)][int]$Seconds = 180,
-    [switch]$Visual
+    [switch]$Visual,
+    [switch]$DebugClient
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
@@ -81,12 +82,27 @@ Add-Type -Path $Source
     }
     [pscustomobject]@{map=$StartMap;executableSha256=(Get-FileHash $exe -Algorithm SHA256).Hash;nominalRttMs=2*$OneWayDelayMs;dropEvery=$DropEvery;seconds=$Seconds;visual=$Visual.IsPresent} | ConvertTo-Json | Set-Content -LiteralPath "$run/manifest.json"
     Write-Output "Running native level probe: $run"
+    if($DebugClient) {
+        $debugger = 'C:/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe'
+        if(!(Test-Path -LiteralPath $debugger)) {throw 'CDB debugger is unavailable'}
+        $loadDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        do { $state=Read-State 'client'; if($state -and $state.epoch -eq 1){break}; Start-Sleep -Milliseconds 100 } while([DateTime]::UtcNow -lt $loadDeadline)
+        if(!$state -or $state.epoch -ne 1){throw 'Client failed to load before debugger attachment'}
+        $debugCommands = Join-Path $run 'client-debugger.txt'
+        @"
+sxe -c ".ecxr; kv; r; .dump /ma $run/client-crash.dmp; q" av
+g
+"@ | Set-Content -LiteralPath $debugCommands -Encoding ascii
+        $debuggerProcess = Start-Process -FilePath $debugger -WorkingDirectory $game -ArgumentList @('-y',(Split-Path $exe),'-cf',$debugCommands,'-p',$processes[1].Id) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$run/client-debugger.log" -RedirectStandardError "$run/client-debugger.err"
+    }
     $start = [DateTime]::UtcNow; $goalAt = $start; $point = 0; $blocked = @(); $reached = @(); $movementStarted = $false
     # Ordinary engine input only: no teleports, direct script callbacks or injected fixtures.
     # This probes the opening corridors/events, rather than certifying the whole level.
     $route = @(@(-1,9),@(-1,13),@(-1,21),@(-8,21),@(-8,24),@(-1,21),@(8,21),@(8,23),@(8,27),@(8,19),@(8,12))
     $overridePath = Join-Path $run 'override.goal'; [IO.File]::WriteAllText($overridePath,'')
     while(@($processes | Where-Object {!$_.HasExited}).Count -and ([DateTime]::UtcNow-$start).TotalSeconds -lt ($Seconds+15)) {
+        foreach($process in $processes) { $process.Refresh(); if($process.HasExited -and $process.ExitCode -ne 0) {throw "Level QA process exited with code $($process.ExitCode)"} }
+        if($DebugClient -and $debuggerProcess.HasExited -and (Test-Path -LiteralPath "$run/client-crash.dmp")) {throw 'Client access violation captured by debugger'}
         $age = ([DateTime]::UtcNow-$start).TotalSeconds
         $state = Read-State 'client'; $hostState = Read-State 'host'
         if($state -and $hostState) {
@@ -131,13 +147,21 @@ Add-Type -Path $Source
     $intervals = @([regex]::Matches($clientLog,'Player state intervals average_ms=(\d+) max_ms=(\d+) samples=(\d+)') | ForEach-Object {
         [pscustomobject]@{averageMs=[int]$_.Groups[1].Value;maxMs=[int]$_.Groups[2].Value;samples=[int]$_.Groups[3].Value}
     })
-    [pscustomobject]@{transportPassed=$true;reachedWaypoints=$reached;obstructedWaypoints=$blocked;wholeLevelCompleted=$false;clientIntervalWindows=$intervals;clientCheckpointCount=[regex]::Matches($clientLog,'Complete campaign checkpoint received').Count} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$run/result.json"
+    $hostLog=[IO.File]::ReadAllText("$run/host.log")
+    $hostCheckpoints = @([regex]::Matches($hostLog,'Host checkpoint main_us=(\d+) capture_us=(\d+) serialize_us=(\d+) main_max_us=(\d+) slices=(\d+)') | ForEach-Object {
+        [pscustomobject]@{totalMainUs=[int]$_.Groups[1].Value;captureUs=[int]$_.Groups[2].Value;serializeUs=[int]$_.Groups[3].Value;maxFrameUs=[int]$_.Groups[4].Value;slices=[int]$_.Groups[5].Value}
+    })
+    $clientReplication = @([regex]::Matches($clientLog,'Replication role=client average_us=(\d+) max_us=(\d+)') | ForEach-Object {
+        [pscustomobject]@{averageUs=[int]$_.Groups[1].Value;maxUs=[int]$_.Groups[2].Value}
+    })
+    [pscustomobject]@{transportPassed=$true;nativeSha256=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash;reachedWaypoints=$reached;obstructedWaypoints=$blocked;wholeLevelCompleted=$false;clientIntervalWindows=$intervals;clientReplicationWindows=$clientReplication;hostCheckpoints=$hostCheckpoints;clientCheckpointCount=[regex]::Matches($clientLog,'Complete campaign checkpoint received').Count} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$run/result.json"
     if(!$relay.WaitForExit(30000)) {throw 'Relay timeout'}
     $relay.Refresh(); if($relay.ExitCode -ne 0){throw 'Relay failure'}
     Get-Content -LiteralPath "$run/relay.log"
     Write-Output "PASS: native level session, baseline and checkpoints; route coverage recorded separately: $run"
 } finally {
     foreach($process in $processes) {if(!$process.HasExited){Stop-Process -Id $process.Id; [void]$process.WaitForExit(3000)}}
+    if($DebugClient -and $debuggerProcess -and !$debuggerProcess.HasExited){Stop-Process -Id $debuggerProcess.Id}
     foreach($role in @('host','client')) {if($logs.ContainsKey($role) -and (Test-Path -LiteralPath $logs[$role])){Copy-Item -LiteralPath $logs[$role] -Destination "$run/$role.log" -Force}}
     if($relay -and !$relay.HasExited) {Stop-Process -Id $relay.Id; [void]$relay.WaitForExit(3000)}
     foreach($name in @([Environment]::GetEnvironmentVariables().Keys)) {if($name.StartsWith('AMNESIA_NET_')){[Environment]::SetEnvironmentVariable($name,$null)}}

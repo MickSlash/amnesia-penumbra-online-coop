@@ -30,6 +30,8 @@
 #include "../../../HPL2/dependencies/sources/zlib/zlib.h"
 #include <cstring>
 #include "resources/SoundEntityManager.h"
+#include "resources/ParticleManager.h"
+#include "network/ScriptPreloads.h"
 #include "sound/SoundEntityData.h"
 #include "sound/SoundChannel.h"
 #include "scene/Node3D.h"
@@ -41,6 +43,8 @@
 #include <future>
 #include <thread>
 #include <limits>
+#include <stdexcept>
+#include <atomic>
 namespace {
 bool TestFlag(const char* name) {
     const char* value = std::getenv(name);
@@ -106,6 +110,22 @@ uint64_t MapFingerprint(const std::string& name) {
         if(error) return 0;
     }
     return hash;
+}
+void PreloadReplicaAssets(const std::string& map) {
+    auto* resources = gpBase->mpEngine->GetResources();
+    const auto path = resources->GetFileSearcher()->GetFilePath(cString::SetFileExt(map,"hps"));
+    if(path.empty()) return;
+    FILE* input = cPlatform::OpenFile(path,_W("rb")); if(!input) return;
+    std::string script; char buffer[8192]; size_t count;
+    while((count = std::fread(buffer,1,sizeof(buffer),input)) != 0 && script.size() <= 2*1024*1024) script.append(buffer,count);
+    const bool error = std::ferror(input) != 0; std::fclose(input); if(error) return;
+    const auto start = std::chrono::steady_clock::now(); unsigned sounds = 0, particles = 0;
+    for(const auto& asset : online::ScriptPreloads(script)) {
+        if(asset.particle) { resources->GetParticleManager()->Preload(asset.file); ++particles; }
+        else { resources->GetSoundEntityManager()->Preload(asset.file); ++sounds; }
+    }
+    NetLog("[NET/MAP] Replica assets preloaded sounds=" + std::to_string(sounds) + " particles=" + std::to_string(particles) +
+        " load_us=" + std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count()));
 }
 }
 cLuxNetwork::cLuxNetwork() : iLuxUpdateable("LuxNetwork"), mSession(NetLog) {}
@@ -777,6 +797,9 @@ void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
     mHasClientLife = false; mClientDead = false;
     mPendingLookYaw = mPendingLookPitch = 0; mClientObjectLook = false;
     map->GetWorld()->SetPhysicsSimulationEnabled(false);
+    // Match the host's literal OnEnter preloads during the loading phase, before
+    // announcing readiness, so first-use effects need less disk/decoder work.
+    PreloadReplicaAssets(state.file);
     mSession.SendMapReady(mEpoch);
     NetLog("[NET/MAP] Replica loaded epoch=" + std::to_string(mEpoch) + " file=" + state.file);
 }
@@ -859,16 +882,33 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         }
         online::MediaState media;
         bool mediaIDsReady = false;
+        auto batchStart = std::chrono::steady_clock::now();
         for(int count = 0; count < 128 && mSession.ReadMedia(media); ++count) {
             if(!mediaIDsReady) { EnsureMediaIDs(map->GetWorld(),mNextMediaID); mediaIDsReady = true; }
+            const auto start = std::chrono::steady_clock::now();
             if(media.epoch == mEpoch) ApplyMedia(map, media);
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
+            if(us >= 2000) NetLog("[NET/PERF] Replica media kind=" + std::to_string(unsigned(media.kind)) + " item_us=" + std::to_string(us) + " file=" + media.file);
+            if(std::chrono::steady_clock::now()-batchStart >= std::chrono::microseconds(750)) break;
         }
         online::Presentation event;
-        for(int count = 0; count < 128 && mSession.ReadPresentation(event); ++count)
+        batchStart = std::chrono::steady_clock::now();
+        for(int count = 0; count < 128 && mSession.ReadPresentation(event); ++count) {
+            const auto start = std::chrono::steady_clock::now();
             if(event.epoch == mEpoch && event.target != 1) ApplyPresentation(map, event);
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
+            if(us >= 2000) NetLog("[NET/PERF] Replica presentation kind=" + std::to_string(unsigned(event.kind)) + " item_us=" + std::to_string(us) + " asset=" + event.text[0]);
+            if(std::chrono::steady_clock::now()-batchStart >= std::chrono::microseconds(750)) break;
+        }
         online::EntityState entity;
-        for(int count = 0; count < 128 && mSession.ReadEntity(entity); ++count)
+        batchStart = std::chrono::steady_clock::now();
+        for(int count = 0; count < 128 && mSession.ReadEntity(entity); ++count) {
+            const auto start = std::chrono::steady_clock::now();
             if(entity.epoch == mEpoch) ApplyWorldEntity(map, entity);
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
+            if(us >= 2000) NetLog("[NET/PERF] Replica entity item_us=" + std::to_string(us) + " name=" + entity.name);
+            if(std::chrono::steady_clock::now()-batchStart >= std::chrono::microseconds(750)) break;
+        }
         if(!mSession.Connected()) return;
         if(!mBaselineApplied && mSession.IsWorldReady(mEpoch)) {
             // Remove map-authored audio/particles absent from the host's roster.
@@ -970,19 +1010,24 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         if(mClientDead) local = mClientLife.players[1];
         auto* body = gpBase->mpPlayer->GetCharacterBody();
         if(body && mBaselineApplied) {
+            const auto predictionStart = std::chrono::steady_clock::now();
+            online::PredictionCollisionCache collisionCache;
             auto predicted = mPrediction.ReconcileSmoothed(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,[&](online::PredictedPosition from, online::PredictedPosition to) {
                 const float y = local.y/1000.0f + body->GetCurrentShape()->GetSize().y/2;
-                auto blocked = [&](float x,float z) {
+                auto query = [&](float x,float z) {
                     cVector3f push;
                     const bool collision = map->GetWorld()->GetPhysicsWorld()->CheckShapeWorldCollision(&push,body->GetCurrentShape(),cMath::MatrixTranslate(cVector3f(x,y,z)),body->GetCurrentBody(),false,true,NULL,false);
                     return collision && (std::fabs(push.x) > 0.00001f || std::fabs(push.z) > 0.00001f || push.y < 0 || push.y > 0.04f);
                 };
                 // Slide against walls; the host resolves slopes, jumps and props.
                 online::PredictedPosition result = from;
-                if(!blocked(to.x,from.z)) result.x = to.x;
-                if(!blocked(result.x,to.z)) result.z = to.z;
+                if(to.x != from.x && !collisionCache.Blocked(to.x,from.z,query)) result.x = to.x;
+                if(to.z != from.z && !collisionCache.Blocked(result.x,to.z,query)) result.z = to.z;
                 return result;
             });
+            const auto predictionUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-predictionStart).count();
+            if(predictionUs >= 5000) NetLog("[NET/PERF] Replica prediction item_us=" + std::to_string(predictionUs) +
+                " collision_queries=" + std::to_string(collisionCache.Queries()) + " reused=" + std::to_string(collisionCache.Hits()));
             local.x = int32_t(predicted.x*1000); local.z = int32_t(predicted.z*1000);
             if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_PREDICTION") && !mPredictionSmoothTestObserved && mPrediction.CorrectionDistance() > 0.002f) {
                 mPredictionSmoothTestObserved = true; NetLog("[NET/TEST] Small authoritative movement correction smoothed with collision checks");
@@ -1336,6 +1381,7 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
     if(state.type == eLuxEntityType_Prop) {
         iLuxProp* prop = static_cast<iLuxProp*>(entity);
         if(uint16_t(prop->GetPropType()) != state.subtype) return;
+        prop->UseReplicatedMedia();
         prop->SetEffectsActive((state.flags & 64) != 0, false);
         if(prop->GetPropType() == eLuxPropType_Lamp) static_cast<cLuxProp_Lamp*>(prop)->SetLit((state.flags & 8) != 0, false);
         if(prop->GetPropType() == eLuxPropType_SwingDoor) {
@@ -1554,6 +1600,11 @@ void cLuxNetwork::UpdateMediaTest(cLuxMap* map, float elapsed) {
             NetLog("[NET/TEST] Effect reset left invalid checkpoint fade speeds FAILED"); mSession.Stop(); return;
         }
         NetLog("[NET/TEST] Effect reset clears non-finite checkpoint fade speeds");
+        auto* expired = world->CreateParticleSystem("online_media_expired_pointer", "ps_dust_falling.ps", cVector3f(1), false);
+        if(!expired) { NetLog("[NET/TEST] FAIL: expired particle fixture could not load"); return; }
+        world->DestroyParticleSystem(expired);
+        world->DestroyParticleSystem(expired); // Deliberately stale owner cache; must not dereference or delete twice.
+        NetLog("[NET/TEST] Repeated particle destruction safely ignores stale owner pointer");
         auto* sound = world->CreateSoundEntity("online_media_fixture_sound", "ambience_wind_eerie.snt", false);
         auto* ps = world->CreateParticleSystem("online_media_fixture_particle", "ps_dust_falling.ps", cVector3f(1), false);
         if(!sound || !ps) { NetLog("[NET/TEST] Media fixture creation FAILED"); mSession.Stop(); return; }
@@ -1716,4 +1767,5 @@ void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& ev
     }
     }
 }
+#include "LuxNetwork_Serialize.inl"
 #include "LuxNetwork_Checkpoint.inl"

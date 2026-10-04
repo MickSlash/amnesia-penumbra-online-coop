@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../amnesia/src/game/network/NetSession.h"
 #include "../../amnesia/src/game/network/Prediction.h"
+#include "../../amnesia/src/game/network/ScriptPreloads.h"
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -11,6 +12,26 @@ static void Check(bool ok, const char* message) {
     if (!ok) { std::cerr << "FAIL: " << message << '\n'; std::exit(1); }
 }
 static void Log(const std::string& line) { std::cout << line << std::endl; }
+static void ScriptPreloadTest() {
+    auto assets = ScriptPreloads(R"hps(
+        // PreloadSound("comment");
+        /* PreloadParticleSystem("comment"); */
+        string text = "PreloadSound(\"inside_string\")";
+        PreloadSound /* comment */ ("sounds/wind.snt");
+        PreloadParticleSystem("particles\\dust.ps");
+        PreloadSound("sounds/wind.snt");
+        PreloadSound("sounds/" + dynamic);
+        PreloadSound(variable); PreloadSound("../escape");
+        PreloadSound("C:/absolute"); PreloadSound("/absolute");
+        PreloadSound("line\ncontrol"); PreloadSound("good");
+    )hps");
+    Check(assets.size() == 3 && !assets[0].particle && assets[0].file == "sounds/wind.snt" &&
+        assets[1].particle && assets[1].file == "particles/dust.ps" && assets[2].file == "good", "literal script preloads ignore comments, strings, expressions and unsafe paths");
+    std::string large; for(int i=0;i<300;++i) large += "PreloadSound(\"s" + std::to_string(i) + "\");";
+    Check(ScriptPreloads(large).size() == 256 && ScriptPreloads(std::string(2*1024*1024+1,' ')).empty(), "preload bounds");
+    Check(ScriptPreloads("/* unterminated").empty() && ScriptPreloads("PreloadSound(\"unterminated").empty(), "truncated preload source");
+    std::cout << "PASS: safe bounded literal script preloads\n";
+}
 template<class T, class Encoder, class Decoder>
 static void StressCodec(const T& seed, Encoder encode, Decoder decode) {
     const auto baseline = encode(seed);
@@ -230,6 +251,44 @@ static void PacketThrottleTest() {
     client.Stop(); enet_host_destroy(server); enet_deinitialize();
     std::cout << "PASS: negotiated throttle survives repeated ACK RTT spikes\n";
 }
+static void SnapshotReliableHoleTest() {
+    Check(enet_initialize()==0,"snapshot hole initialization");
+    ENetAddress address={}; address.host=ENET_HOST_ANY; address.port=27049;
+    ENetHost* server=enet_host_create(&address,1,4,0,0); Check(server!=nullptr,"snapshot hole server");
+    Session client(Log); Check(client.StartClient("127.0.0.1",27049),"snapshot hole client");
+    ENetPeer* peer=nullptr;
+    auto pump=[&](int ms) {
+        for(int i=0;i<ms;++i) {
+            client.Poll(); ENetEvent event;
+            while(enet_host_service(server,&event,0)>0) {
+                if(event.type==ENET_EVENT_TYPE_CONNECT) peer=event.peer;
+                if(event.type==ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(event.packet);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    pump(100); Check(peer!=nullptr,"raw peer connected");
+    auto send=[&](const std::vector<uint8_t>& bytes,uint8_t channel,uint32_t flags) {
+        Check(enet_peer_send(peer,channel,enet_packet_create(bytes.data(),bytes.size(),flags))==0,"raw server send");
+    };
+    Snapshot state; state.epoch=1;
+    auto welcome=EncodeSnapshot(state); welcome.resize(19); std::fill(welcome.begin()+5,welcome.end(),uint8_t(0));
+    welcome[4]=uint8_t(Message::Welcome); welcome[8]=2; welcome[16]=1; welcome[17]=uint8_t(27049>>8); welcome[18]=uint8_t(27049 & 0xff);
+    send(welcome,0,ENET_PACKET_FLAG_RELIABLE); pump(100); Check(client.Connected(),"raw host handshake accepted");
+    MapState map; map.epoch=1; map.file="maps/test.map"; map.fingerprint=1;
+    send(EncodeMap(map),0,ENET_PACKET_FLAG_RELIABLE); pump(50); Check(client.SendMapReady(1),"hole map ready"); pump(50);
+    // Deliberately leave a missing reliable sequence in channel 0. Later
+    // reliable data must wait, while unsequenced poses remain applicable.
+    ++peer->channels[0].outgoingReliableSequenceNumber;
+    state.sequence=2; state.players[1].x=1000; send(EncodeSnapshot(state),0,ENET_PACKET_FLAG_RELIABLE); pump(100);
+    Snapshot read; Check(!client.ReadSnapshot(read),"reliable pose held behind missing command");
+    state.sequence=3; state.players[1].x=2000; send(EncodeSnapshot(state),0,ENET_PACKET_FLAG_UNSEQUENCED); pump(100);
+    Check(client.ReadSnapshot(read) && read.sequence==3 && read.players[1].x==2000 && !client.ReadLife(read),"unsequenced backup bypasses reliable hole without life reset");
+    state.sequence=1; send(EncodeSnapshot(state),0,ENET_PACKET_FLAG_UNSEQUENCED); pump(50);
+    Check(client.ReadSnapshot(read) && read.sequence==3,"late unsequenced backup cannot rewind pose");
+    client.Stop(); enet_host_destroy(server); enet_deinitialize();
+    std::cout << "PASS: pose backup bypasses missing reliable command; epoch/sequence and life isolation retained\n";
+}
 static void LifeQueueLimitTest() {
     Session host(Log), client(Log);
     Check(host.StartHost(27046) && client.StartClient("127.0.0.1", 27046), "life queue startup");
@@ -252,6 +311,14 @@ static void LifeQueueLimitTest() {
     std::cout << "PASS: bounded life queue, overflow rejection and reconnect reset\n";
 }
 static void RecoveryTests() {
+    PredictionCollisionCache collisionCache; unsigned queries=0;
+    auto wall=[&](float x,float) { ++queries; return x>=1; };
+    Check(collisionCache.Blocked(1,0,wall) && collisionCache.Blocked(1,0,wall) && queries==1 && collisionCache.Hits()==1,"repeated contact reuses exact blocked result within one reconciliation");
+    Check(!collisionCache.Blocked(0.99999f,0,wall) && queries==2,"nearby free position is not rounded to blocked contact");
+    Check(collisionCache.Blocked(1,0.01f,wall) && queries==3,"different collision position is queried");
+    for(int i=0;i<140;++i) Check(collisionCache.Blocked(float(i+2),0,wall),"bounded collision cache keeps querying after capacity");
+    PredictionCollisionCache nextTick;
+    Check(!nextTick.Blocked(1,0,[](float,float){return false;}),"new reconciliation observes changed world geometry");
     JournalState journal; journal.epoch = 7; journal.revision = 42;
     for(unsigned i = 0; i < 5; ++i) {
         JournalEntry e; e.kind = uint8_t(i%3); e.name = "quest"; e.group = "Daniel"; e.nameEntry = "name";
@@ -341,6 +408,7 @@ static void RecoveryTests() {
     std::cout << "PASS: journal, checkpoint integrity, lobby, resume identity, role reversal and bounded prediction; 20000 additional codec stress cases\n";
 }
 int main(int argc, char** argv) {
+    ScriptPreloadTest();
     MediaCodecTest();
     PlayerInput input; input.sequence = 0x12345678; input.tick = 42;
     input.forward = -1000; input.strafe = 500; input.yaw = -3141; input.pitch = 1570; input.buttons = 15;
@@ -417,7 +485,7 @@ int main(int argc, char** argv) {
     story.values[0] = 1; story.values[1] = 350;
     auto fadeBytes = EncodePresentation(story);
     Check(DecodePresentation(fadeBytes.data(), fadeBytes.size(), storyRead) && storyRead.values[1] == 350, "fade roundtrip");
-    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); BulkFlowControlTest(); PacketThrottleTest(); LifeQueueLimitTest(); RecoveryTests(); return 0; }
+    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); BulkFlowControlTest(); PacketThrottleTest(); SnapshotReliableHoleTest(); LifeQueueLimitTest(); RecoveryTests(); return 0; }
     const bool host = std::string(argv[1]) == "host";
     const bool badVersion = std::string(argv[1]) == "bad-version";
     const bool malformed = std::string(argv[1]) == "malformed";

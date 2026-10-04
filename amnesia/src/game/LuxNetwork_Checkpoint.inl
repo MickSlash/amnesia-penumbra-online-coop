@@ -2,6 +2,28 @@
 // Native save validation before deserializing a network checkpoint. The old
 // disk loader trusts field types and array lengths, which is unsafe on the wire.
 namespace {
+bool TestConcurrentCheckpointFormatting() {
+    std::atomic<bool> start(false);
+    auto check = [&](bool worker) {
+        cVector3f vector = worker ? cVector3f(-4.5f,5.25f,6.75f) : cVector3f(1.25f,-2.5f,3.75f);
+        tWString wide = worker ? _W("CD") : _W("AB");
+        const char* expectedVector = worker ? "-4.500000 5.250000 6.750000" : "1.250000 -2.500000 3.750000";
+        const char* expectedWide = worker ? "67 68 " : "65 66 ";
+        while(!start.load()) std::this_thread::yield();
+        for(unsigned i=0;i<10000;++i) {
+            const char* text = cSerializeClass::ValueToString(&vector,0,eSerializeType_Vector3f);
+            std::this_thread::yield();
+            if(std::strcmp(text,expectedVector)) return false;
+            text = cSerializeClass::ValueToString(&wide,0,eSerializeType_WString);
+            std::this_thread::yield();
+            if(std::strcmp(text,expectedWide)) return false;
+        }
+        return true;
+    };
+    auto future = std::async(std::launch::async,[&]() { return check(true); });
+    start.store(true); const bool mainValid = check(false);
+    return future.get() && mainValid;
+}
 bool CompressCheckpoint(const char* text, size_t size, std::vector<uint8_t>& output) {
     if(!size || size > online::MaxCheckpointBytes) return false;
     output = {'Z','C','P','1',uint8_t(size >> 24),uint8_t(size >> 16),uint8_t(size >> 8),uint8_t(size)};
@@ -269,12 +291,89 @@ struct cLuxCheckpointCapture {
     };
     std::shared_ptr<Work> work;
     std::future<bool> future;
+    cLuxSaveGame_SaveData* snapshot = NULL;
+    std::unique_ptr<CheckpointSerializer> serializer;
+    cLuxSavedGameMapCollection* history = NULL;
+    uint64_t historyRevision = 0;
+    unsigned stage = 0, slices = 0;
+    bool cancelled = false;
     uint32_t generation = 0;
     uint64_t context = 0;
-    int64_t captureUs = 0, serializeUs = 0, mainUs = 0;
+    int64_t captureUs = 0, serializeUs = 0, mainUs = 0, mainMaxUs = 0;
+    void ReleaseSnapshot() {
+        // Iterators are released on the game thread before their source data.
+        serializer.reset();
+        if(snapshot) { snapshot->mpSavedMaps = NULL; hplDelete(snapshot); snapshot = NULL; }
+    }
+    ~cLuxCheckpointCapture() { ReleaseSnapshot(); }
 };
 void cLuxNetwork::UpdateCheckpoint(float timeStep) {
-    if(mCheckpointCapture && mCheckpointCapture->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    if(mCheckpointCapture && mCheckpointCapture->stage == 0) {
+        const auto start = std::chrono::steady_clock::now();
+        auto& job = *mCheckpointCapture;
+        // The current map snapshot is owned and frozen. Historical maps are
+        // borrowed; never advance an iterator after reset, map change or rejoin.
+        bool current = mSession.GetRole() == online::Role::Host && mSession.Connected() &&
+            job.context == mCheckpointContext && job.generation == mSession.Generation() && job.work->checkpoint.epoch == mEpoch;
+        static bool captureCancelTestTriggered = false;
+        if(mSmokeSeconds && !captureCancelTestTriggered && TestFlag("AMNESIA_NET_TEST_CANCEL_CAPTURE") && job.slices == 1) {
+            captureCancelTestTriggered = true;
+            gpBase->mpMapHandler->ClearSaveMapCollection();
+            NetLog("[NET/TEST] Historical maps reset during sliced checkpoint capture");
+        }
+        current = current && job.history == gpBase->mpMapHandler->GetSavedMapCollection() &&
+            job.historyRevision == gpBase->mpMapHandler->GetSavedMapRevision();
+        bool complete = !current;
+        try {
+            if(current) {
+                complete = job.serializer->Step(std::chrono::microseconds(1500)); ++job.slices;
+                job.serializeUs += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
+                if(complete && TestFlag("AMNESIA_NET_TEST_SERIALIZATION_PARITY")) {
+                    static bool formattingTested = false;
+                    if(!formattingTested) {
+                        formattingTested = true;
+                        const bool safe = TestConcurrentCheckpointFormatting();
+                        NetLog(safe ? "[NET/TEST] Concurrent numeric and wide-string save formatting verified" : "[NET/TEST] FAIL: concurrent save formatting corrupted values");
+                        if(!safe) throw std::runtime_error("concurrent checkpoint formatting failed");
+                    }
+                    TiXmlDocument expected; auto* root = new TiXmlElement("SaveGame"); expected.LinkEndChild(root);
+                    cSerializeClass::SaveToElement(job.snapshot,"",root);
+                    TiXmlPrinter a, b; expected.Accept(&a); job.work->doc.Accept(&b);
+                    current = a.Size() == b.Size() && !std::memcmp(a.CStr(),b.CStr(),a.Size());
+                    NetLog(current ? "[NET/TEST] Sliced checkpoint XML exactly matches native save serialization" :
+                        "[NET/TEST] FAIL: sliced checkpoint serialization differs from native save");
+                }
+            }
+        } catch(const std::exception&) { current = false; complete = true; }
+        if(complete) {
+            job.cancelled = !current; job.ReleaseSnapshot();
+            const auto work = job.work;
+            try {
+                job.future = std::async(std::launch::async,[work,current]() {
+                    const auto start = std::chrono::steady_clock::now();
+                    bool valid = false;
+                    if(current) {
+                        TiXmlPrinter printer; work->doc.Accept(&printer);
+                        valid = CompressCheckpoint(printer.CStr(),printer.Size(),work->checkpoint.bytes);
+                        if(valid) work->hash = online::CheckpointHash(work->checkpoint.bytes);
+                    }
+                    // Large completed or cancelled XML trees are freed here.
+                    work->doc.Clear();
+                    work->workerMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
+                    return valid;
+                });
+                job.stage = 1;
+            } catch(const std::exception&) {
+                NetLog("[NET/RECOVERY] Host checkpoint worker unavailable; previous checkpoint retained");
+                mCheckpointCapture.reset();
+            }
+        }
+        if(mCheckpointCapture) {
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
+            job.mainUs += us; job.mainMaxUs = std::max(job.mainMaxUs,int64_t(us));
+        }
+    }
+    if(mCheckpointCapture && mCheckpointCapture->stage == 1 && mCheckpointCapture->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         auto& job = *mCheckpointCapture;
         bool valid = false;
         try { valid = job.future.get(); } catch(const std::exception&) {}
@@ -284,9 +383,10 @@ void cLuxNetwork::UpdateCheckpoint(float timeStep) {
             mSendingCheckpoint = std::move(job.work->checkpoint);
             mCheckpointOffset = 0; mCheckpointHash = job.work->hash;
             NetLog("[NET/RECOVERY] Captured campaign checkpoint bytes=" + std::to_string(mSendingCheckpoint.bytes.size()));
-        } else NetLog(current ? "[NET/RECOVERY] Campaign checkpoint compression failed or exceeded size limit" : "[NET/RECOVERY] Obsolete host checkpoint worker result discarded");
+        } else NetLog(job.cancelled ? "[NET/RECOVERY] Obsolete sliced checkpoint capture discarded" : current ? "[NET/RECOVERY] Campaign checkpoint compression failed or exceeded size limit" : "[NET/RECOVERY] Obsolete host checkpoint worker result discarded");
         NetLog("[NET/PERF] Host checkpoint main_us=" + std::to_string(job.mainUs) + " capture_us=" + std::to_string(job.captureUs) +
-            " serialize_us=" + std::to_string(job.serializeUs) + " worker_print_compress_ms=" + std::to_string(job.work->workerMs));
+            " serialize_us=" + std::to_string(job.serializeUs) + " main_max_us=" + std::to_string(job.mainMaxUs) +
+            " slices=" + std::to_string(job.slices) + " worker_print_compress_ms=" + std::to_string(job.work->workerMs));
         mCheckpointCapture.reset();
     }
     if(mCheckpointValidation) {
@@ -373,31 +473,16 @@ void cLuxNetwork::UpdateCheckpoint(float timeStep) {
         auto job = std::make_shared<cLuxCheckpointCapture>();
         job->work = std::make_shared<cLuxCheckpointCapture::Work>();
         job->generation = mSession.Generation(); job->context = mCheckpointContext;
-        auto* save = gpBase->mpSaveHandler->CreateSaveGameData(); save->mpSavedMaps = gpBase->mpMapHandler->GetSavedMapCollection();
-        const auto capturedAt = std::chrono::steady_clock::now();
+        job->snapshot = gpBase->mpSaveHandler->CreateSaveGameData();
+        job->history = gpBase->mpMapHandler->GetSavedMapCollection();
+        job->historyRevision = gpBase->mpMapHandler->GetSavedMapRevision();
+        job->snapshot->mpSavedMaps = job->history;
+        job->captureUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
         auto* root = new TiXmlElement("SaveGame"); job->work->doc.LinkEndChild(root);
-        // Snapshot all engine data on the game thread, including borrowed saved
-        // maps. The worker receives an owning XML tree with no engine pointers.
-        cSerializeClass::SaveToElement(save,"",root);
-        save->mpSavedMaps = NULL; hplDelete(save);
-        const auto serializedAt = std::chrono::steady_clock::now();
-        job->captureUs = std::chrono::duration_cast<std::chrono::microseconds>(capturedAt-start).count();
-        job->serializeUs = std::chrono::duration_cast<std::chrono::microseconds>(serializedAt-capturedAt).count();
+        job->serializer.reset(new CheckpointSerializer(job->snapshot,root));
         job->work->checkpoint.epoch = mEpoch; job->work->checkpoint.id = ++mCheckpointID;
-        const auto work = job->work;
-        try {
-            job->future = std::async(std::launch::async,[work]() {
-                const auto start = std::chrono::steady_clock::now();
-                TiXmlPrinter printer; work->doc.Accept(&printer);
-                const bool valid = CompressCheckpoint(printer.CStr(),printer.Size(),work->checkpoint.bytes);
-                if(valid) work->hash = online::CheckpointHash(work->checkpoint.bytes);
-                work->doc.Clear();
-                work->workerMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
-                return valid;
-            });
-            job->mainUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
-            mCheckpointCapture = std::move(job);
-        } catch(const std::exception&) { NetLog("[NET/RECOVERY] Host checkpoint worker unavailable"); }
+        job->mainUs = job->mainMaxUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
+        mCheckpointCapture = std::move(job);
         mLastCheckpointEpoch = mEpoch; mCheckpointTimer = 0;
     }
     // One non-fragmented 1 KiB chunk per 60 Hz tick, on its own bulk channel.
@@ -469,6 +554,14 @@ void cLuxNetwork::UpdateRecoveryTest() {
         gpBase->mpJournal->DisableQuestNote("online_recovery_done");
         map->GetVar("online_recovery_test")->msVal = "campaign_progress_42";
         gpBase->mpPlayer->SetHealth(99); gpBase->mpPlayer2->SetHealth(73);
+        if(TestFlag("AMNESIA_NET_TEST_SERIALIZATION_PARITY")) {
+            // Cover both the owned current-map snapshot and a populated borrowed
+            // historical-map collection, not just an empty class pointer.
+            gpBase->mpMapHandler->mpSavedGameMutex->Lock();
+            gpBase->mpMapHandler->GetSavedMapCollection()->SaveMap(map);
+            gpBase->mpMapHandler->mpSavedGameMutex->Unlock();
+            NetLog("[NET/TEST] Populated historical map included in serialization parity fixture");
+        }
         mLastCheckpointEpoch = 0;
         NetLog("[NET/TEST] Recovery fixture created with journal, campaign variable and distinct player states");
     }

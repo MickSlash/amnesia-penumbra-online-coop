@@ -328,6 +328,13 @@ namespace hpl {
 
 		static cSerializeMemberFieldIterator GetMemberFieldIterator(iSerializable* apData);
 
+        // Incremental serializers use these on the engine thread only. The
+        // iterator must not outlive or race mutations of its source container.
+        static iContainerIterator* CreateContainerIterator(iContainer* container) { return container->CreateIteratorPtr(); }
+        static bool ContainerHasNext(iContainerIterator* iterator) { return iterator->HasNext(); }
+        static void* ContainerNext(iContainerIterator* iterator) { return iterator->NextPtr(); }
+        static size_t ValueTypeSize(eSerializeType type) { return SizeOfType(type); }
+
 		static const char* ValueToString(void* apData, size_t alOffset, eSerializeType aType);
 		static void StringToValue(void* apData, size_t alOffset, eSerializeType aType,
 										const char* asVal);
@@ -352,8 +359,8 @@ namespace hpl {
 
 		static void SetUpData();
 
-		static tString msTempString;
-		static char msTempCharArray[2048];
+		static thread_local tString msTempString;
+		static thread_local char msTempCharArray[2048];
 
 		static bool mbDataSetup;
 		static tSerializeSavedClassMap m_mapSavedClasses;
