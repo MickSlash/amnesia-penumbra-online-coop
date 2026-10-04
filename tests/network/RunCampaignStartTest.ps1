@@ -4,6 +4,8 @@ param(
     [int]$Port = 27082,
     [ValidateRange(0,200)][int]$OneWayDelayMs = 35,
     [ValidateRange(2,1000)][int]$DropEvery = 20,
+    [ValidateRange(576,1200)][int]$MaxDatagramBytes = 1200,
+    [switch]$ExpectMtuRecovery,
     [switch]$Visual
 )
 $ErrorActionPreference = 'Stop'
@@ -39,12 +41,12 @@ try {
     $relaySource = Join-Path $run 'relay.cs'; [IO.File]::WriteAllText($relaySource,$relayMatch.Groups[1].Value)
     $relayScript = Join-Path $run 'relay.ps1'
     @'
-param([string]$Source,[int]$Port,[int]$Delay,[int]$DropEvery)
+param([string]$Source,[int]$Port,[int]$Delay,[int]$DropEvery,[int]$Ceiling)
 $ErrorActionPreference='Stop'
 Add-Type -Path $Source
-[CoopUdpRelay]::Run($Port,$Delay,$DropEvery,205,1200)
+[CoopUdpRelay]::Run($Port,$Delay,$DropEvery,205,$Ceiling)
 '@ | Set-Content -LiteralPath $relayScript -Encoding utf8
-    $relay = Start-Process -FilePath (Get-Process -Id $PID).Path -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-File',$relayScript,'-Source',$relaySource,'-Port',$Port,'-Delay',$OneWayDelayMs,'-DropEvery',$DropEvery) -RedirectStandardOutput "$run/relay.log" -RedirectStandardError "$run/relay.err"
+    $relay = Start-Process -FilePath (Get-Process -Id $PID).Path -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-File',$relayScript,'-Source',$relaySource,'-Port',$Port,'-Delay',$OneWayDelayMs,'-DropEvery',$DropEvery,'-Ceiling',$MaxDatagramBytes) -RedirectStandardOutput "$run/relay.log" -RedirectStandardError "$run/relay.err"
     Start-Sleep -Seconds 2
     foreach($role in @('host','client')) {
         $profile = "OnlineCampaignStart_${tag}_$role"
@@ -75,7 +77,7 @@ Add-Type -Path $Source
         $processes += $process
         [pscustomobject]@{role=$role;pid=$process.Id;log=$logs[$role]} | ConvertTo-Json | Set-Content -LiteralPath "$run/$role-process.json"
     }
-    [pscustomobject]@{executableSha256=(Get-FileHash $exe -Algorithm SHA256).Hash;nominalRttMs=2*$OneWayDelayMs;dropEvery=$DropEvery;clientExtraLoadSeconds=6;start='OnlineNewCampaign';visual=$Visual.IsPresent} | ConvertTo-Json | Set-Content -LiteralPath "$run/manifest.json"
+    [pscustomobject]@{executableSha256=(Get-FileHash $exe -Algorithm SHA256).Hash;nominalRttMs=2*$OneWayDelayMs;dropEvery=$DropEvery;clientExtraLoadSeconds=6;datagramCeiling=$MaxDatagramBytes;expectMtuRecovery=$ExpectMtuRecovery.IsPresent;start='OnlineNewCampaign';visual=$Visual.IsPresent} | ConvertTo-Json | Set-Content -LiteralPath "$run/manifest.json"
     Write-Output "Running native lobby/intro regression: $run"
     $deadline = [DateTime]::UtcNow.AddSeconds(155)
     do {
@@ -111,11 +113,14 @@ Add-Type -Path $Source
             $asset='CH01L00_DanielsMind{0:d2}_01' -f $voice
             if(!($log -match ('Campaign intro voice playing asset='+[regex]::Escape($asset)+' subtitles=1'))) { throw "$role missing native intro audio/subtitle proof: $asset" }
         }
-        if(([regex]::Matches($log,'Protocol handshake accepted')).Count -ne 1 -or $log.Contains('Connection lost') -or $log.Contains('Rejected:') -or $log.Contains('FAILED') -or $log.Contains('readiness timed out')) { throw "$role disconnected or failed during intro" }
+        $connections=([regex]::Matches($log,'Protocol handshake accepted')).Count
+        $expectedConnections=if($ExpectMtuRecovery){2}else{1}
+        if($connections -ne $expectedConnections -or (!$ExpectMtuRecovery -and $log.Contains('Connection lost')) -or $log.Contains('Rejected:') -or $log.Contains('FAILED') -or $log.Contains('readiness timed out') -or $log.Contains('Socket service failed')) { throw "$role disconnected or failed during intro (connections=$connections expected=$expectedConnections)" }
+        if($ExpectMtuRecovery -and (!$log.Contains('UDP payload cap=576 bytes') -or !$log.Contains('Partner reconnected; rebuilding authoritative baseline'))) { throw "$role missing MTU recovery proof" }
         $checkpointProof=if($role -eq 'host'){'Captured campaign checkpoint'}else{'Complete campaign checkpoint received'}
         if(!$log.Contains('Complete host entity baseline') -or !$log.Contains($checkpointProof)) { throw "$role missing campaign baseline/checkpoint" }
         if($role -eq 'client' -and !$log.Contains('Client shares original intro camera with host; companion avatars suppressed')) { throw 'Client did not share the original intro camera' }
-        Write-Output "PASS: $role four original intro voices/subtitles, baseline, checkpoint and single uninterrupted connection"
+        Write-Output "PASS: $role four original intro voices/subtitles, baseline, checkpoint and expected connection count $expectedConnections"
     }
     if(!$relay.WaitForExit(30000)) { throw 'Relay did not finish on its timer' }
     Get-Content -LiteralPath "$run/relay.log"

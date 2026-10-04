@@ -1043,7 +1043,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             if(!mSession.SendWorldApplied(mEpoch)) { NetLog("[NET/MAP] Cannot confirm applied world; closing session"); mSession.Stop(); return; }
             NetLog("[NET/MAP] Full replica world acknowledged epoch=" + std::to_string(mEpoch));
         }
-        mClientSharedIntro = (local.flags & 64) != 0;
+        mClientSharedIntro = mSession.IsWorldApplied(mEpoch) && (local.flags & 64) != 0;
         if(mClientSharedIntro) mPrediction.Clear();
         if(body && mBaselineApplied && !mClientSharedIntro) {
             const auto predictionStart = std::chrono::steady_clock::now();
@@ -1165,15 +1165,8 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
     // Native scripts/physics wait for application of the full client world.
     // Replication must continue between MapReady and WorldApplied, otherwise
     // the baseline needed to release that barrier would never be sent.
-    if(!mSession.IsWorldApplied(mEpoch) && now-mMapWaitStart > std::chrono::seconds(30)) {
-        NetLog("[NET/MAP] Client world readiness timed out"); mSession.Stop(); return;
-    }
-    if(mRecovering || mInputLeasePaused || !mSession.IsMapReady(mEpoch)) {
-        if(!mSession.IsMapReady(mEpoch) && now - mMapWaitStart > std::chrono::seconds(30)) {
-            NetLog("[NET/MAP] Client map readiness timed out"); mSession.Stop();
-        }
-        return;
-    }
+    // Session owns the bounded loading timeout and retains its host listener on recovery.
+    if(mRecovering || mInputLeasePaused || !mSession.IsMapReady(mEpoch)) return;
     if(!gpBase->mpPlayer2 || !gpBase->mpPlayer2->GetCharacterBody()) return;
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) UpdateMediaTest(map, std::chrono::duration<float>(now - mSmokeStart).count());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_ENEMY")) {

@@ -327,6 +327,33 @@ enet_socket_send (ENetSocket socket,
 {
     struct sockaddr_in sin;
     DWORD sentLength = 0;
+    enet_uint8 datagram [ENET_PROTOCOL_MAXIMUM_MTU];
+    size_t datagramLength = 0, index;
+    WSABUF sendBuffer;
+
+    /* Submit one bounded UDP buffer, including for a many-command baseline.
+       Some Winsock providers/filter layers handle gather sends differently.
+       This also avoids relying on the ENetBuffer/WSABUF structure cast. */
+    for (index = 0; index < bufferCount; ++ index)
+    {
+        if (buffers [index].dataLength > sizeof (datagram) - datagramLength)
+        {
+            WSASetLastError (WSAEMSGSIZE);
+            return -1;
+        }
+        if (buffers [index].dataLength != 0)
+        {
+            if (buffers [index].data == NULL)
+            {
+                WSASetLastError (WSAEINVAL);
+                return -1;
+            }
+            memcpy (datagram + datagramLength, buffers [index].data, buffers [index].dataLength);
+            datagramLength += buffers [index].dataLength;
+        }
+    }
+    sendBuffer.buf = (CHAR *) datagram;
+    sendBuffer.len = (ULONG) datagramLength;
 
     if (address != NULL)
     {
@@ -338,8 +365,8 @@ enet_socket_send (ENetSocket socket,
     }
 
     if (WSASendTo (socket, 
-                   (LPWSABUF) buffers,
-                   (DWORD) bufferCount,
+                   & sendBuffer,
+                   1,
                    & sentLength,
                    0,
                    address != NULL ? (struct sockaddr *) & sin : NULL,

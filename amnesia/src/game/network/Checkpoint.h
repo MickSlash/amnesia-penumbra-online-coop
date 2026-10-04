@@ -4,7 +4,7 @@
 #include <vector>
 namespace online {
 constexpr uint32_t MaxCheckpointBytes = 32 * 1024 * 1024;
-constexpr uint32_t CheckpointChunkBytes = 16384;
+constexpr uint32_t CheckpointChunkBytes = 1024;
 inline uint64_t CheckpointHash(const std::vector<uint8_t>& bytes) {
     uint64_t hash = 14695981039346656037ull;
     for(uint8_t byte : bytes) { hash ^= byte; hash *= 1099511628211ull; }

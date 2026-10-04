@@ -2,6 +2,7 @@
 #include "NetSession.h"
 #include <enet/enet.h>
 #include <random>
+#include <cerrno>
 namespace online {
 namespace {
 void U16(std::vector<uint8_t>& out, uint16_t v) { out.push_back(uint8_t(v >> 8)); out.push_back(uint8_t(v)); }
@@ -349,21 +350,21 @@ bool Session::Initialize() {
     initialized_ = true; return true;
 }
 bool Session::StartHost(uint16_t port, bool resume) {
-    Stop(); fatal_ = false; if(!resume) { expectedIdentity_ = 0; checkpointAck_ = 0; } listenPort_ = port; if (!port || !Initialize()) return false;
+    Stop(); fatal_ = false; if(!resume) { expectedIdentity_ = 0; checkpointAck_ = 0; transportDatagramBytes_ = TransportDatagramBytes; } listenPort_ = port; if (!port || !Initialize()) return false;
     ENetAddress address = {}; address.host = ENET_HOST_ANY; address.port = port;
     host_ = enet_host_create(&address, 1, 4, 0, 0);
     if (!host_) { log_("[NET/CONNECTION] Cannot bind host socket"); Stop(); return false; }
     host_->maximumPacketSize = 65536; host_->maximumWaitingData = TransportWaitingDataBytes;
-    host_->mtu = TransportDatagramBytes;
+    host_->mtu = transportDatagramBytes_;
     role_ = Role::Host;
     log_("[NET/CONNECTION] Listening on 0.0.0.0:" + std::to_string(port)); return true;
 }
 bool Session::StartClient(const std::string& name, uint16_t port, bool resume) {
-    Stop(); fatal_ = false; if(!resume) { expectedIdentity_ = 0; checkpointAck_ = 0; } if (name.empty() || !port || !Initialize()) return false;
+    Stop(); fatal_ = false; if(!resume) { expectedIdentity_ = 0; checkpointAck_ = 0; transportDatagramBytes_ = TransportDatagramBytes; } if (name.empty() || !port || !Initialize()) return false;
     host_ = enet_host_create(nullptr, 1, 4, 0, 0);
     if (!host_) { Stop(); return false; }
     host_->maximumPacketSize = 65536; host_->maximumWaitingData = TransportWaitingDataBytes;
-    host_->mtu = TransportDatagramBytes;
+    host_->mtu = transportDatagramBytes_;
     ENetAddress address = {}; address.port = port;
     if (enet_address_set_host(&address, name.c_str()) != 0) { log_("[NET/CONNECTION] Invalid host address"); Stop(); return false; }
     peer_ = enet_host_connect(host_, &address, 4, ProtocolVersion);
@@ -381,7 +382,7 @@ void Session::Stop() {
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
     closing_ = partnerLeftVoluntarily_ = false;
-    loading_ = false; loadingStarted_ = worldAppliedEpoch_ = 0;
+    loading_ = false; loadingStarted_ = worldAppliedEpoch_ = mapReadyAt_ = oldestBulkQueue_ = oldestBulkAt_ = lastSocketError_ = 0;
 }
 void Session::SetLoading(bool loading) {
     if(loading && !loading_) loadingStarted_ = enet_time_get();
@@ -414,20 +415,25 @@ bool Session::BulkReady(size_t bytes) const {
     for(auto it = enet_list_begin(&peer_->outgoingSendReliableCommands);
         it != enet_list_end(&peer_->outgoingSendReliableCommands); it = enet_list_next(it)) {
         outstanding += reinterpret_cast<ENetOutgoingCommand*>(it)->fragmentLength;
-        if(outstanding > 32768) return false;
+        if(outstanding > 8192) return false;
     }
-    if(outstanding > 32768) return false;
-    const uint32_t now = enet_time_get();
-    for(auto it = enet_list_begin(&peer_->sentReliableCommands);
-        it != enet_list_end(&peer_->sentReliableCommands); it = enet_list_next(it)) {
-        const auto* command = reinterpret_cast<const ENetOutgoingCommand*>(it);
-        if(command->packet && (command->sendAttempts > 1 || uint32_t(now - command->sentTime) > 250)) return false;
-    }
-    // Timed-out commands are requeued before sending; retain the gate until ACK.
-    for(auto it = enet_list_begin(&peer_->outgoingSendReliableCommands);
-        it != enet_list_end(&peer_->outgoingSendReliableCommands); it = enet_list_next(it))
-        if(reinterpret_cast<const ENetOutgoingCommand*>(it)->sendAttempts > 1) return false;
+    if(outstanding > 8192) return false;
     return true;
+}
+void Session::BoundReliableRetries() {
+    if(!peer_ || !ready_) return;
+    // Map loading can inflate the RTT estimator by several seconds. Limit the
+    // retry deadline of the bounded 8-KiB window instead of letting one missing
+    // fragment back off for tens of seconds while other traffic is healthy.
+    const uint32_t cap = uint32_t(std::max<uint64_t>(200,std::min<uint64_t>(1000,
+        uint64_t(peer_->roundTripTime)*2+uint64_t(peer_->roundTripTimeVariance)*4)));
+    bool first = true;
+    for(auto it=enet_list_begin(&peer_->sentReliableCommands); it!=enet_list_end(&peer_->sentReliableCommands); it=enet_list_next(it)) {
+        auto* command=reinterpret_cast<ENetOutgoingCommand*>(it);
+        if(command->roundTripTimeout>cap) command->roundTripTimeout=cap;
+        const uint32_t deadline=command->sentTime+command->roundTripTimeout;
+        if(first || int32_t(deadline-peer_->nextTimeout)<0) { peer_->nextTimeout=deadline; first=false; }
+    }
 }
 bool Session::Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reliable, bool bulk) {
     if (!peer_ || bytes.empty()) return false;
@@ -437,14 +443,22 @@ bool Session::Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reli
     if (enet_peer_send(peer_, channel, packet) != 0) { enet_packet_destroy(packet); return false; }
     return true;
 }
-void Session::Reject(const char* why) { fatal_ = true;
-    log_(std::string("[NET/CONNECTION] Rejected: ") + why);
-    if (peer_) enet_peer_disconnect_now(peer_, 1);
+void Session::ClearPeerState() {
     peer_ = nullptr; ready_ = hasInput_ = false;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
-    loading_ = false; worldAppliedEpoch_ = 0;
+    loading_ = false; worldAppliedEpoch_ = mapReadyAt_ = oldestBulkQueue_ = oldestBulkAt_ = 0;
+}
+void Session::Reject(const char* why) { fatal_ = true;
+    log_(std::string("[NET/CONNECTION] Rejected: ") + why);
+    if (peer_) enet_peer_disconnect_now(peer_, 1);
+    ClearPeerState();
+}
+void Session::RecoverConnection(const char* why) {
+    log_(std::string("[NET/RECOVERY] Resetting peer; listener and campaign retained: ") + why);
+    if(peer_) enet_peer_disconnect_now(peer_, 0);
+    ClearPeerState(); fatal_ = false;
 }
 void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
     if (!ValidHeader(p, n)) { Reject("malformed packet or incompatible protocol"); return; }
@@ -562,7 +576,9 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         return;
     }
     if (ready_ && role_ == Role::Host && channel == 0 && n == 9 && p[4] == uint8_t(Message::MapReady)) {
-        if (hasMap_ && R32(p + 5) == map_.epoch) readyEpoch_ = map_.epoch;
+        if (hasMap_ && R32(p + 5) == map_.epoch && readyEpoch_ != map_.epoch) {
+            readyEpoch_ = map_.epoch; mapReadyAt_ = enet_time_get();
+        }
         return;
     }
     if (ready_ && role_ == Role::Client && channel == 0 && p[4] == uint8_t(Message::Map)) {
@@ -605,14 +621,30 @@ void Session::Poll() {
     if(lastPoll_ && uint32_t(now - lastPoll_) > 250)
         log_("[NET/DIAG] Transport service paused on game thread for " + std::to_string(uint32_t(now - lastPoll_)) + " ms");
     lastPoll_ = now;
+    BoundReliableRetries();
     ENetEvent e;
     // Bound work per logic tick; malformed peers cannot monopolize the game loop.
-    for (int count = 0; count < 64 && enet_host_service(host_, &e, 0) > 0; ++count) {
+    for (int count = 0; count < 64; ++count) {
+        const int serviced = enet_host_service(host_, &e, 0);
+        if(serviced < 0) {
+#ifdef _WIN32
+            const int socketError = WSAGetLastError();
+#else
+            const int socketError = errno;
+#endif
+            if(!lastSocketError_ || uint32_t(now-lastSocketError_) >= 1000) {
+                lastSocketError_ = now;
+                log_("[NET/TRANSPORT] Socket service failed os_error=" + std::to_string(socketError) +
+                    " datagram_bytes=" + std::to_string(host_->packetSize) + " buffers=" + std::to_string(host_->bufferCount));
+            }
+            break;
+        }
+        if(!serviced) break;
         if (e.type == ENET_EVENT_TYPE_CONNECT) {
             partnerLeftVoluntarily_ = false;
             char address[64] = {}; enet_address_get_host_ip(&e.peer->address, address, sizeof(address)); remoteAddress_ = address; remoteReady_ = false;
             peer_ = e.peer; ready_ = hasInput_ = hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; started_ = enet_time_get();
-            loading_ = false; worldAppliedEpoch_ = 0;
+            loading_ = false; worldAppliedEpoch_ = mapReadyAt_ = 0;
             entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
             enet_peer_timeout(peer_, 8, 3000, 10000);
@@ -641,8 +673,29 @@ void Session::Poll() {
         }
     }
     if (peer_ && !ready_ && uint32_t(enet_time_get() - started_) > 5000) { Reject("handshake timeout"); fatal_ = false; }
+    bool hasOldest = false; uint32_t oldestQueue = 0;
+    if(peer_ && ready_ && loading_ && role_ == Role::Host && readyEpoch_)
+        for(auto* queue : {&peer_->sentReliableCommands,&peer_->outgoingSendReliableCommands})
+            for(auto it=enet_list_begin(queue); it!=enet_list_end(queue); it=enet_list_next(it)) {
+                const auto* command=reinterpret_cast<const ENetOutgoingCommand*>(it);
+                if(!command->packet || command->command.header.channelID < 2) continue;
+                if(!hasOldest || int32_t(command->queueTime-oldestQueue)<0) { oldestQueue=command->queueTime; hasOldest=true; }
+            }
+    if(!hasOldest) oldestBulkAt_=0;
+    else if(!oldestBulkAt_ || oldestBulkQueue_!=oldestQueue) { oldestBulkQueue_=oldestQueue; oldestBulkAt_=now; }
+    if(peer_ && ready_ && loading_ && role_ == Role::Host && readyEpoch_ &&
+        peer_->reliableDataInTransit && peer_->mtu > ConservativeDatagramBytes &&
+        uint32_t(now-mapReadyAt_) >= 3000 && (uint32_t(now-peer_->lastReceiveTime) >= 3000 ||
+            (oldestBulkAt_ && uint32_t(now-oldestBulkAt_) >= 5000))) {
+        // Negotiate a smaller MTU on a fresh peer. Changing it while fragments
+        // are queued would leave old, oversized fragments permanently stuck.
+        transportDatagramBytes_ = ConservativeDatagramBytes;
+        host_->mtu = transportDatagramBytes_;
+        log_("[NET/TRANSPORT] Baseline ACK stall; retrying with UDP payload cap=576 bytes");
+        RecoverConnection("baseline transport stalled");
+    }
     if(peer_ && ready_ && loading_ && uint32_t(enet_time_get()-loadingStarted_) > 45000) {
-        Reject("map loading barrier timeout"); fatal_ = false;
+        RecoverConnection("map loading barrier timeout");
     }
     enet_host_flush(host_);
     if(peer_ && ready_ && (!lastDiagnostic_ || uint32_t(now - lastDiagnostic_) >= 5000)) {
@@ -660,7 +713,8 @@ void Session::Poll() {
             " receive_waiting_bytes=" + std::to_string(peer_->totalWaitingData) + " bulk_paused=" + std::to_string(!BulkReady(0)) +
             " loading=" + std::to_string(loading_) + " map_ready_epoch=" + std::to_string(readyEpoch_) + " world_applied_epoch=" + std::to_string(worldAppliedEpoch_) +
             " application_age_ms=" + std::to_string(uint32_t(now - lastPacket_)) +
-            " ack_age_ms=" + std::to_string(uint32_t(now - peer_->lastReceiveTime)));
+            " ack_age_ms=" + std::to_string(uint32_t(now - peer_->lastReceiveTime)) +
+            " udp_sent_packets=" + std::to_string(host_->totalSentPackets) + " udp_received_packets=" + std::to_string(host_->totalReceivedPackets));
     }
 }
 bool Session::SendInput(const PlayerInput& input) { return role_ == Role::Client && ready_ && Send(EncodeInput(input), 1, false); }
@@ -678,12 +732,23 @@ bool Session::SendSnapshot(const Snapshot& s) { return role_ == Role::Host && re
 bool Session::SendSnapshotBackup(const Snapshot& s) {
     if(role_ != Role::Host || !ready_ || !IsMapReady(s.epoch)) return false;
     const auto bytes = EncodeSnapshot(s);
-    if(!Send(bytes,0,true)) return false;
+    if(bytes.empty()) return false;
+    bool pending = false;
+    for(auto* queue : {&peer_->outgoingSendReliableCommands, &peer_->sentReliableCommands})
+        for(auto it=enet_list_begin(queue); it!=enet_list_end(queue); it=enet_list_next(it)) {
+            const auto* command=reinterpret_cast<const ENetOutgoingCommand*>(it);
+            if(command->command.header.channelID == 0 && command->packet && command->packet->dataLength >= 5 &&
+                command->packet->data[4] == uint8_t(Message::Snapshot)) pending = true;
+        }
+    // Keep at most one reliable fallback pending. Fresh ordinary and
+    // unsequenced poses continue without building a replay of old movement.
+    if(!pending && !Send(bytes,0,true)) return false;
     // A lost channel-0 reliable command holds later reliable poses. A small
     // unsequenced twin bypasses that hole; the application epoch/sequence guard
     // still rejects stale/duplicate poses and never creates a life transition.
     ENetPacket* twin = enet_packet_create(bytes.data(),bytes.size(),ENET_PACKET_FLAG_UNSEQUENCED);
-    if(twin && enet_peer_send(peer_,0,twin) != 0) enet_packet_destroy(twin);
+    if(!twin) return false;
+    if(enet_peer_send(peer_,0,twin) != 0) { enet_packet_destroy(twin); return false; }
     return true;
 }
 bool Session::ReadSnapshot(Snapshot& s) const { if (!ready_ || !hasSnapshot_) return false; s = snapshot_; return true; }

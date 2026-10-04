@@ -1,8 +1,16 @@
 # Installare e giocare ad Amnesia Online Co-op
 
-Build sperimentale Windows x64, protocollo 8, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono in `docs/qa_recovery_2026-10-03.md` dentro `source.zip`.
+Build sperimentale Windows x64, protocollo 9, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono in `docs/qa_recovery_2026-10-03.md` dentro `source.zip`.
 
-La versione 8 corregge l'avvio della campagna: avvisa il partner prima del
+La versione 9 corregge il recupero dopo il blocco dell'avvio riscontrato nella
+versione 8: l'host mantiene la campagna in pausa e il listener aperto. Se il
+trasferimento iniziale resta bloccato, la riconnessione automatica negozia
+datagrammi più piccoli. Le copie affidabili del movimento non si accumulano;
+i checkpoint viaggiano in porzioni più piccole. Gli avatar vengono nascosti
+solo durante l'intro già sincronizzata. Prove e limiti in
+`docs/qa_blocco_remoto_2026-10-04.md` dentro `source.zip`.
+
+L'avvio della campagna avvisa il partner prima del
 caricamento e concede una finestra di rete dedicata, poi attende che il client
 abbia applicato il mondo completo prima di avviare i timer della storia.
 Durante l'intro del primo livello il client condivide la telecamera dell'host,
@@ -67,7 +75,7 @@ Entrare nella stessa LAN o rete virtuale. Nel campo IP usare l'IPv4 LAN, Hamachi
 
 Consentire `bin\Lux.exe` nel firewall e la porta UDP scelta **su entrambi i PC**, perché il client può diventare host durante il recupero. Lasciare il firewall attivo. Usare la stessa porta e dati identici. Non sono inclusi ricerca automatica dei server, matchmaking, relay o NAT traversal. Per Internet diretto serve una porta raggiungibile; per la migrazione anche il precedente client deve essere raggiungibile dall'altro PC.
 
-Questa build limita i datagrammi ENet a **1200 byte** per lasciare spazio all'incapsulamento delle VPN. Il limite è negoziato durante la connessione; i messaggi più grandi vengono frammentati da ENet. Nei test locali la correzione permette di trasferire lo stato iniziale e i checkpoint anche quando la rete scarta tutti i datagrammi sopra 1200 byte. Non è una misura della MTU effettiva di Radmin o Hamachi, né una garanzia su ogni tunnel. Per aggiornare, estrarre il nuovo ZIP in una cartella nuova e avviare il launcher da lì **su entrambi i PC**; non eliminare i profili o i salvataggi. Diagnosi e confronto prima/dopo in `docs/qa_radmin_diagnosi_2026-10-03.md` dentro `source.zip`.
+I datagrammi ENet partono con un limite di **1200 byte**. Se, dopo il caricamento del client, mancano ACK per tre secondi o lo stesso comando del mondo resta senza conferma per cinque secondi, l'host riapre il peer e negozia **576 byte** alla riconnessione automatica. Il listener rimane aperto e la campagna resta in pausa fino all'applicazione del mondo. Il limite viene modificato soltanto su una connessione nuova, per evitare frammenti già accodati troppo grandi. Questa è una modalità di recupero, non una misura della MTU effettiva di Radmin o Hamachi. Per aggiornare, estrarre il nuovo ZIP in una cartella nuova e avviare il launcher da lì **su entrambi i PC**; conservare profili e salvataggi. Diagnosi e prove in `docs/qa_blocco_remoto_2026-10-04.md` dentro `source.zip`.
 
 ## Salvataggi, journal e recupero
 
@@ -81,7 +89,7 @@ se sei l'host; il client non salva una copia locale incompleta del mondo.
 Se esce il client, l'host tiene la campagna in pausa e aspetta che si ricolleghi,
 senza migrazione automatica. Se esce l'host, il client torna al menu principale.
 Le cadute involontarie conservano il recupero automatico già implementato.
-Aggiornare entrambi i PC: anche il protocollo 8 distingue questi casi.
+Aggiornare entrambi i PC: anche il protocollo 9 distingue questi casi.
 
 La perdita di connessione mette la campagna in pausa e avvia tentativi automatici di riconnessione. Se l'host resta assente e il client ha un checkpoint completo e validato, il client può diventare host dopo circa 12 secondi. Ripristina il salvataggio nativo, inverte correttamente i giocatori, esegue un autosalvataggio e **aspetta il partner**. Non prosegue da solo.
 

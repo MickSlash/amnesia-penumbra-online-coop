@@ -271,6 +271,131 @@ static void MapLoadingPauseTest() {
     Check(!host.IsWorldApplied(1) && !host.IsWorldApplied(2) && !client.SendWorldApplied(1), "map change clears old application acknowledgement");
     std::cout << "PASS: synchronous 6.5-second map load retains connection and completes baseline/application barrier\n";
 }
+static void DatagramSendTest() {
+    Check(enet_initialize()==0,"datagram send initialization");
+    const ENetSocket receiver=enet_socket_create(ENET_SOCKET_TYPE_DATAGRAM);
+    const ENetSocket sender=enet_socket_create(ENET_SOCKET_TYPE_DATAGRAM);
+    Check(receiver!=ENET_SOCKET_NULL && sender!=ENET_SOCKET_NULL,"datagram sockets");
+    ENetAddress target={}; Check(enet_address_set_host_ip(&target,"127.0.0.1")==0,"datagram loopback address"); target.port=27051;
+    Check(enet_socket_bind(receiver,&target)==0,"datagram receiver bind");
+    enet_socket_set_option(receiver,ENET_SOCKOPT_NONBLOCK,1);
+    std::vector<uint8_t> payload(ENET_PROTOCOL_MAXIMUM_MTU+1);
+    for(size_t i=0;i<payload.size();++i) payload[i]=uint8_t(i*17);
+    ENetBuffer gather[65];
+    size_t offset=0;
+    for(size_t i=0;i<65;++i) {
+        gather[i].data=payload.data()+offset;
+        gather[i].dataLength=i==64 ? ENET_PROTOCOL_MAXIMUM_MTU-offset : 63;
+        offset+=gather[i].dataLength;
+    }
+    Check(enet_socket_send(sender,&target,gather,65)==ENET_PROTOCOL_MAXIMUM_MTU,"many-buffer datagram send");
+    std::vector<uint8_t> received(payload.size()); ENetBuffer input={}; input.dataLength=received.size(); input.data=received.data(); ENetAddress source={};
+    int n=0;
+    for(int i=0;i<100 && !n;++i) { n=enet_socket_receive(receiver,&source,&input,1); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+    Check(n==ENET_PROTOCOL_MAXIMUM_MTU && std::equal(received.begin(),received.begin()+n,payload.begin()),"gather coalescing preserves every byte and a single datagram");
+#ifdef _WIN32
+    ENetBuffer oversized={}; oversized.dataLength=payload.size(); oversized.data=payload.data();
+    Check(enet_socket_send(sender,&target,&oversized,1)<0 && WSAGetLastError()==WSAEMSGSIZE,"oversized coalescing is rejected without buffer overflow");
+#endif
+    enet_socket_destroy(sender); enet_socket_destroy(receiver); enet_deinitialize();
+    std::cout << "PASS: bounded single-buffer Windows UDP submission preserves 65-buffer datagram\n";
+}
+static void BaselineMtuRecoveryTest() {
+    Check(enet_initialize()==0,"MTU relay initialization");
+    ENetSocket front=enet_socket_create(ENET_SOCKET_TYPE_DATAGRAM), back=enet_socket_create(ENET_SOCKET_TYPE_DATAGRAM);
+    Check(front!=ENET_SOCKET_NULL && back!=ENET_SOCKET_NULL,"MTU relay sockets");
+    ENetAddress relayAddress={}; Check(enet_address_set_host_ip(&relayAddress,"127.0.0.1")==0,"MTU relay loopback address"); relayAddress.port=27053;
+    Check(enet_socket_bind(front,&relayAddress)==0,"MTU relay bind");
+    enet_socket_set_option(front,ENET_SOCKOPT_NONBLOCK,1); enet_socket_set_option(back,ENET_SOCKOPT_NONBLOCK,1);
+    Session host(Log),client(Log); Check(host.StartHost(27052) && client.StartClient("127.0.0.1",27053),"MTU recovery start");
+    ENetAddress server=relayAddress,clientAddress={}; server.port=27052;
+    unsigned oversized=0,announced=0,ready=0; bool retry=false,listenerRetained=false,applied=false;
+    auto relay=[&]() {
+        uint8_t data[65536]; ENetBuffer buffer={}; buffer.dataLength=sizeof(data); buffer.data=data;
+        for(int side=0;side<2;++side) for(int count=0;count<64;++count) {
+            ENetAddress source={}; const int n=enet_socket_receive(side ? back : front,&source,&buffer,1);
+            if(n<=0) break;
+            if(!side) clientAddress=source;
+            if(n>900) { ++oversized; continue; }
+            buffer.dataLength=size_t(n);
+            Check(enet_socket_send(side ? front : back,side ? &clientAddress : &server,&buffer,1)>=0,"MTU relay forward");
+            buffer.dataLength=sizeof(data);
+        }
+    };
+    const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    while(std::chrono::steady_clock::now()<end && !applied) {
+        relay(); client.Poll(); host.Poll();
+        if(announced && !host.Connected()) listenerRetained=host.GetRole()==Role::Host && host.RetryAllowed();
+        if(client.Generation() && !client.Connected() && !client.AttemptActive()) {
+            Check(client.StartClient("127.0.0.1",27053,true),"MTU client automatic reconnect"); retry=true;
+        }
+        if(host.Connected() && announced!=host.Generation()) {
+            MapState map; map.epoch=host.Generation(); map.fingerprint=1; map.file="maps/test.map";
+            Check(host.SendMap(map),"MTU announce new baseline epoch"); announced=host.Generation();
+        }
+        MapState map;
+        if(client.ReadMap(map) && ready!=map.epoch) { Check(client.SendMapReady(map.epoch),"MTU map ready"); ready=map.epoch; }
+        if(host.IsMapReady(announced)) {
+            EntityState entity; entity.epoch=announced; entity.id=1; entity.name="box"; entity.file="entities/box.ent";
+            entity.transform[0]=entity.transform[5]=entity.transform[10]=10000; entity.bodies.assign(32,entity.transform);
+            if(host.SendEntity(entity)) host.SendWorldReady(announced);
+            Snapshot pose; pose.epoch=announced; pose.sequence=uint32_t(enet_time_get());
+            Check(host.SendSnapshotBackup(pose),"MTU reserved pose backup");
+        }
+        EntityState entity; while(client.ReadEntity(entity)) {}
+        if(client.IsWorldReady(announced) && !client.IsWorldApplied(announced)) Check(client.SendWorldApplied(announced),"MTU rebuilt world applied");
+        applied=announced>=2 && host.IsWorldApplied(announced);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Check(oversized>0 && retry && listenerRetained && applied,"oversized baseline recovers with fresh negotiated MTU and retained listener");
+    host.RecoverConnection("test loading barrier expiry");
+    Check(host.GetRole()==Role::Host && !host.Connected() && host.RetryAllowed(),"readiness failure must preserve host listener and recovery permission");
+    client.Stop(); host.Stop(); enet_socket_destroy(front); enet_socket_destroy(back); enet_deinitialize();
+    std::cout << "PASS: baseline MTU blackhole resets peer, negotiates conservative datagrams and applies rebuilt world\n";
+}
+static void LoadingExpiryRecoveryTest() {
+    Session host(Log),client(Log);
+    Check(host.StartHost(27054) && client.StartClient("127.0.0.1",27054),"loading expiry start");
+    auto pump=[&](int ms) { for(int i=0;i<ms;++i) { client.Poll(); host.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    pump(100); host.BeginMapLoad(); pump(100);
+    const uint32_t clockBefore=enet_time_get();
+    // Exercise the actual session expiry branch without a 45-second wall wait.
+    enet_time_set(clockBefore+45001); host.Poll();
+    Check(!host.Connected() && host.GetRole()==Role::Host && host.RetryAllowed(),"actual loading expiry keeps host listener and permits retry");
+    pump(100); Check(client.StartClient("127.0.0.1",27054,true),"loading expiry same-identity retry"); pump(200);
+    Check(host.Connected() && client.Connected() && host.Generation()==2,"listener accepts reconnection after actual loading expiry");
+    client.Stop(); host.Stop(); enet_time_set(clockBefore+400);
+    std::cout << "PASS: actual 45-second loading expiry retains listener and accepts same-identity reconnect\n";
+}
+static void HighRetryCountTest() {
+    Check(enet_initialize()==0,"high retry initialization");
+    ENetAddress address={}; address.host=ENET_HOST_ANY; address.port=27055;
+    ENetHost* server=enet_host_create(&address,1,4,0,0);
+    ENetHost* client=enet_host_create(nullptr,1,4,0,0);
+    Check(server && client,"high retry hosts"); enet_address_set_host_ip(&address,"127.0.0.1");
+    Check(enet_host_connect(client,&address,4,ProtocolVersion)!=nullptr,"high retry connect");
+    ENetPeer* remote=nullptr;
+    for(int i=0;i<200;++i) {
+        ENetEvent event;
+        while(enet_host_service(client,&event,0)>0) if(event.type==ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(event.packet);
+        while(enet_host_service(server,&event,0)>0) {
+            if(event.type==ENET_EVENT_TYPE_CONNECT) remote=event.peer;
+            if(event.type==ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(event.packet);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Check(remote && remote->state==ENET_PEER_STATE_CONNECTED,"high retry peer connected");
+    ENetPacket* packet=enet_packet_create("retry",5,ENET_PACKET_FLAG_RELIABLE);
+    Check(packet && enet_peer_send(remote,2,packet)==0,"high retry reliable payload"); enet_host_flush(server);
+    Check(!enet_list_empty(&remote->sentReliableCommands),"high retry command in flight");
+    auto* command=reinterpret_cast<ENetOutgoingCommand*>(enet_list_begin(&remote->sentReliableCommands));
+    command->sendAttempts=40; command->sentTime=enet_time_get()-4000; command->roundTripTimeout=1;
+    remote->nextTimeout=command->sentTime+1; remote->earliestTimeout=0; enet_peer_timeout(remote,8,3000,10000);
+    ENetEvent event={};
+    Check(enet_host_service(server,&event,0)==1 && event.type==ENET_EVENT_TYPE_DISCONNECT,"retry count above 31 retains defined timeout behavior");
+    enet_host_destroy(client); enet_host_destroy(server); enet_deinitialize();
+    std::cout << "PASS: 40-attempt reliable timeout stays defined and disconnects the failed peer\n";
+}
 static void PacketThrottleTest() {
     Check(enet_initialize()==0, "throttle test initialization");
     ENetAddress address = {}; address.host=ENET_HOST_ANY; address.port=27045;
@@ -533,7 +658,7 @@ int main(int argc, char** argv) {
     story.values[0] = 1; story.values[1] = 350;
     auto fadeBytes = EncodePresentation(story);
     Check(DecodePresentation(fadeBytes.data(), fadeBytes.size(), storyRead) && storyRead.values[1] == 350, "fade roundtrip");
-    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); BulkFlowControlTest(); MapLoadingPauseTest(); PacketThrottleTest(); SnapshotReliableHoleTest(); LifeQueueLimitTest(); RecoveryTests(); return 0; }
+    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); BulkFlowControlTest(); MapLoadingPauseTest(); DatagramSendTest(); BaselineMtuRecoveryTest(); LoadingExpiryRecoveryTest(); HighRetryCountTest(); PacketThrottleTest(); SnapshotReliableHoleTest(); LifeQueueLimitTest(); RecoveryTests(); return 0; }
     const bool host = std::string(argv[1]) == "host";
     const bool badVersion = std::string(argv[1]) == "bad-version";
     const bool malformed = std::string(argv[1]) == "malformed";

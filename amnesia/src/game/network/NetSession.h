@@ -10,11 +10,12 @@
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 8;
+constexpr uint16_t ProtocolVersion = 9;
 constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
 constexpr uint32_t TransportDatagramBytes = 1200;
+constexpr uint32_t ConservativeDatagramBytes = 576;
 // Baselines plus out-of-order checkpoint chunks must leave room for a missing
 // reliable packet. A 256 KiB cap can reject the very retransmit that drains it.
 constexpr uint32_t TransportWaitingDataBytes = 4 * 1024 * 1024;
@@ -126,6 +127,7 @@ public:
     void Poll(); // non-blocking; caller owns scheduling
     // Notify the partner before synchronous native loading blocks the game loop.
     void BeginMapLoad();
+    void RecoverConnection(const char* reason);
     bool SendInput(const PlayerInput& input);
     bool ReadInput(PlayerInput& input) const; // expires after 250 ms
     bool SendSnapshot(const Snapshot& snapshot);
@@ -182,6 +184,8 @@ private:
     void Receive(const uint8_t* data, size_t size, uint8_t channel);
     void Reject(const char* reason);
     void SetLoading(bool loading);
+    void ClearPeerState();
+    void BoundReliableRetries();
     Logger log_;
     _ENetHost* host_ = nullptr;
     _ENetPeer* peer_ = nullptr;
@@ -190,6 +194,7 @@ private:
     uint32_t started_ = 0, lastInput_ = 0;
     uint32_t lastPoll_ = 0, lastPacket_ = 0;
     uint32_t lastDiagnostic_ = 0;
+    uint32_t transportDatagramBytes_ = TransportDatagramBytes, lastSocketError_ = 0;
     PlayerInput input_;
     Snapshot snapshot_;
     MapState map_;
@@ -200,7 +205,7 @@ private:
     uint32_t lastAction_ = 0;
     bool hasAction_ = false;
     uint32_t worldReadyEpoch_ = 0;
-    uint32_t worldAppliedEpoch_ = 0, loadingStarted_ = 0;
+    uint32_t worldAppliedEpoch_ = 0, loadingStarted_ = 0, mapReadyAt_ = 0, oldestBulkQueue_ = 0, oldestBulkAt_ = 0;
     bool loading_ = false;
     InventoryState inventory_;
     bool hasInventory_ = false;

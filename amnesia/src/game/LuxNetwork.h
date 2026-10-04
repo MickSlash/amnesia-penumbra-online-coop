@@ -27,7 +27,7 @@ public:
     bool UpdateQADrive(float timeStep);
     bool IsClientReplica() const { return mSession.GetRole() == online::Role::Client; }
     bool ClientObjectControlsLook() const { return IsClientReplica() && mClientObjectLook; }
-    bool SharedIntroView() const { return IsClientReplica() ? mClientSharedIntro : mSession.GetRole() == online::Role::Host && mHasHostLife && (mHostLife.players[1].flags & 64); }
+    bool SharedIntroView() const { return mSession.IsWorldApplied(mEpoch) && (IsClientReplica() ? mClientSharedIntro : mSession.GetRole() == online::Role::Host && mHasHostLife && (mHostLife.players[1].flags & 64)); }
     bool OwnsPlayerInput(const cLuxPlayer* player) const { return mSession.GetRole() == online::Role::Host && mRemotePlayer2 && player == mRemotePlayer2; }
     bool RemoteRotateHeld() const { return mRemoteRotate; }
     bool HasNetworkPlayers() const { return mSession.GetRole() != online::Role::Offline && OwnsRemotePlayer2(); }

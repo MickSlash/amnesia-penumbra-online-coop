@@ -1,5 +1,11 @@
 # Avvio campagna online e intro del primo livello
 
+**Rapporto storico della build 8.** La successiva prova sui PC reali ha ancora
+fallito: MapReady raggiunge l'host, ma il trasferimento iniziale si blocca e il
+timeout dell'host chiude il listener. Le prove locali sotto non certificavano
+quel percorso. La diagnosi e le correzioni successive sono in
+`docs/qa_blocco_remoto_2026-10-04.md`.
+
 Build Windows x64, protocollo **8**. SHA-256 dell'eseguibile verificato:
 `F096FAAA3111E1746C0E8BCF5F88FE27F8B3905783DFE4F5808030F017EEC010`.
 
