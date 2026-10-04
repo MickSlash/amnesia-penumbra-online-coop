@@ -9,6 +9,7 @@ param(
     [switch]$Prediction,
     [switch]$SnapshotBlackout,
     [switch]$OnlineMenu,
+    [switch]$VisibilityProps,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
@@ -19,6 +20,7 @@ if ($Media) { $Campaign = $true }
 if ($Campaign) { $Replication = $true }
 if ($Enemy) { $MapOnly = $true }
 if ($OnlineMenu) { $MapOnly = $true }
+if ($VisibilityProps) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $repoPath = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
@@ -36,7 +38,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -55,6 +57,7 @@ try {
         $initPath = Join-Path $runPath "$role-init.cfg"
         $init | Set-Content -LiteralPath $initPath -Encoding utf8
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ROLE', $role)
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_VISIBILITY_PROPS', $(if ($VisibilityProps) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_MENU', $(if ($OnlineMenu) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DRIVE_FILE', $null)
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$(if ($role -eq 'client' -and $ClientPort -gt 0) { $ClientPort } else { $Port }))
@@ -143,6 +146,14 @@ try {
             Write-Output "PASS: $role sound/particle lifecycle, music, effects, saved media and independent lanterns"
         }
         if ($MapOnly) {
+            if($VisibilityProps) {
+                $visibilityMarkers = @('Full starting oil verified on local and remote player','Original eye adaptation emits local ambient light in darkness')
+                if($role -eq 'host') { $visibilityMarkers += 'Authoritative box and door motion fixtures created' }
+                else { $visibilityMarkers += @('Prop rendered between authoritative poses: online_test_motion_box','Prop rendered between authoritative poses: online_test_motion_door','Settled authoritative prop pose verified: online_test_motion_box','Settled authoritative prop pose verified: online_test_motion_door') }
+                foreach($marker in $visibilityMarkers) { if(!$log.Contains($marker)) { throw "Missing $role visibility/prop proof: $marker" } }
+                if($log.Contains('FAILED')) { throw "$role visibility/prop check failed" }
+                Write-Output "PASS: $role starting oil, darkness adaptation and authoritative moving props"
+            }
             if($role -eq 'client' -and (!$log.Contains('Complete campaign checkpoint received') -or $log.Contains('Invalid native save schema'))) {
                 throw 'Map replica did not receive valid native campaign checkpoints'
             }

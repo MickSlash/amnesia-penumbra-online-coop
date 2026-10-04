@@ -36,6 +36,7 @@ public:
     void SendLocalAction(online::PlayerAction action, bool pressed);
     void SendInventoryAction(online::PlayerAction action, const std::string& item, const std::string& secondItem = "");
     void OnMapEnter(cLuxMap* map);
+    void OnGameStart();
     void QueuePresentation(online::Presentation event);
     void MusicChanged(int priority, float fadeTime);
     bool Host(uint16_t port);
@@ -89,7 +90,26 @@ private:
     bool mRemoteInteractHeld = false, mLoggedWorldReplica = false;
     std::map<uint32_t, std::vector<uint8_t>> mEntityBytes;
     std::map<uint32_t, online::EntityState> mEntityStates;
+    uint32_t mEntitySequence = 0;
+    std::map<uint32_t, std::chrono::steady_clock::time_point> mEntityMotionAt;
+    std::map<uint32_t, bool> mEntityMotionSettled;
     std::map<uint32_t, int> mReplicaIDs;
+    struct PropMotion {
+        online::EntityState target;
+        std::vector<cMatrixf> from;
+        cMatrixf fromMesh;
+        float elapsed = 0;
+    };
+    std::map<uint32_t, PropMotion> mPropMotion;
+    void UpdatePropMotion(cLuxMap* map, float timeStep);
+    bool mFillRemoteStartingOil = false;
+    bool mTestDarknessStarted = false, mTestDarknessObserved = false;
+    bool mTestDarknessDiagnostic = false;
+    bool mTestPropsStarted = false, mTestPropMotionObserved = false;
+    unsigned mTestPropInterpolated = 0, mTestPropSettled = 0;
+    std::map<std::string, std::vector<cMatrixf>> mTestPropBase;
+    bool mTestStartingOilObserved = false;
+    void UpdateVisibilityPropsTest(cLuxMap* map);
     void ReplicateWorld(cLuxMap* map);
     void ApplyWorldEntity(cLuxMap* map, const online::EntityState& entity);
     bool mBaselineSent = false, mBaselineApplied = false;

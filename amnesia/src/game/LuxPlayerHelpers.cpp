@@ -3731,6 +3731,10 @@ void cLuxPlayerLightLevel::Update(float afTimeStep)
 		//Get lights to skip
 		std::vector<iLight*> vSkipLights;
 		vSkipLights.push_back(mpPlayer->GetHelperInDarkness()->GetAmbientLight());
+        // Eye adaptation is a viewing aid, never illumination for the other
+        // player's darkness/sanity/stealth calculations.
+        cLuxPlayer* other = mpPlayer->CoopGetOtherPlayer();
+        if(other) vSkipLights.push_back(other->GetHelperInDarkness()->GetAmbientLight());
 		
 		////////////////////////////////
 		//Get light level at all positions and then calculate median.
@@ -3835,7 +3839,7 @@ void cLuxPlayerInDarkness::Reset()
 
 void cLuxPlayerInDarkness::Update(float afTimeStep)
 {
-	if (!mbActive) return;
+	if (!mbActive || !mpAmbientLight) return;
 
 	///////////////////////
 	// Get light level
@@ -3910,7 +3914,8 @@ void cLuxPlayerInDarkness::Update(float afTimeStep)
 
 		////////////////////////////
 		//Lower sanity
-		if(	mpPlayer->GetHelperFlashback()->IsActive()==false && mpPlayer->GetSanityDrainDisabled()==false && 
+		if(!(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) &&
+            mpPlayer->GetHelperFlashback()->IsActive()==false && mpPlayer->GetSanityDrainDisabled()==false &&
 			gpBase->mpEffectHandler->GetEmotionFlash()->IsActive()==false)
 		{
 			mpPlayer->LowerSanity(mfSanityLossPerSecond*afTimeStep*mfSanityLossMul, true);

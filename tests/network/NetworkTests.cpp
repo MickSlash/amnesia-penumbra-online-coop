@@ -574,7 +574,52 @@ static void RecoveryTests() {
     Check(host.Connected() && client.Connected() && client.GetRole() == Role::Host && host.GetRole() == Role::Client, "host migration transport role reversal");
     std::cout << "PASS: journal, checkpoint integrity, lobby, resume identity, role reversal and bounded prediction; 20000 additional codec stress cases\n";
 }
+static void PropMotionTransportTest() {
+    Session host(Log), client(Log);
+    Check(host.StartHost(27056) && client.StartClient("127.0.0.1",27056), "prop pose connect");
+    auto pump = [&](int ticks) { for(int i=0;i<ticks;++i) { host.Poll(); client.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    pump(100); Check(host.Connected() && client.Connected(), "prop pose handshake");
+    MapState map; map.epoch=1; map.fingerprint=1; map.file="maps/test.map";
+    Check(host.SendMap(map), "prop pose map"); pump(20);
+    Check(client.SendMapReady(1), "prop pose loaded"); pump(20);
+    EntityState box; box.epoch=1; box.id=1; box.sequence=1; box.name="box"; box.file="entities/box.ent";
+    box.transform[0]=box.transform[5]=box.transform[10]=10000; box.bodies.push_back(box.transform);
+    Check(!host.SendEntityMotion(box), "no transient poses before full applied world");
+    Check(host.SendEntity(box) && host.SendWorldReady(1), "prop pose baseline"); pump(20);
+    EntityState read; Check(client.ReadEntity(read) && read.sequence==1 && !read.liveMotion, "reliable baseline received");
+    Check(client.IsWorldReady(1) && client.SendWorldApplied(1), "prop pose world applied"); pump(20);
+    // A superseded reliable correction must not rewind a newer transient pose.
+    box.sequence=2; box.bodies[0][3]=100;
+    Check(host.SendEntity(box), "older reliable pose sent");
+    for(unsigned i=3;i<=25;++i) { box.sequence=i; box.bodies[0][3]=int32_t(i*100); Check(host.SendEntityMotion(box), "live pose sent"); }
+    pump(20);
+    Check(client.ReadEntity(read) && read.sequence==25 && read.bodies[0][3]==2500 && read.liveMotion && !client.ReadEntity(read), "replaceable poses coalesce without reliable rewind");
+    box.sequence=24; Check(host.SendEntityMotion(box), "late pose sent"); pump(20);
+    Check(!client.ReadEntity(read), "late reordered prop pose ignored");
+    // Filling the reliable bulk budget never blocks the motion API.
+    EntityState bulk=box; bulk.id=2; bulk.name="bulk"; bulk.sequence=0; bulk.bodies.assign(32,box.transform);
+    unsigned queued=0; while(queued<200 && host.SendEntity(bulk)) ++queued;
+    Check(queued>0 && queued<200, "reliable prop backpressure exercised");
+    box.sequence=26; box.bodies[0][3]=2600;
+    Check(host.SendEntityMotion(box), "live pose bypasses reliable bulk backpressure"); pump(30);
+    bool found=false; while(client.ReadEntity(read)) if(read.id==1 && read.sequence==26) found=true;
+    Check(found, "live pose delivered alongside congested reliable traffic");
+    box.sequence=27; box.flags|=4; Check(host.SendEntity(box), "authoritative removal"); pump(30);
+    Check(client.ReadEntity(read) && (read.flags&4) && read.sequence==27, "reliable removal delivered");
+    box.sequence=26; box.flags&=~4; Check(host.SendEntityMotion(box), "late pre-removal pose"); pump(20);
+    Check(!client.ReadEntity(read), "late pose cannot resurrect removed prop");
+    box.sequence=28; box.bodies.assign(32,box.transform); box.bodies[31][3]=2800;
+    Check(host.SendEntityMotion(box), "articulated unreliable fragments sent"); pump(30);
+    Check(client.ReadEntity(read) && read.sequence==28 && read.bodies.size()==32 && read.bodies[31][3]==2800, "large articulated pose roundtrip");
+    // Serial wrap is accepted; old epoch data is discarded.
+    box.id=3; box.name="wrap"; box.sequence=0xfffffffeu; Check(host.SendEntityMotion(box), "pre-wrap pose"); pump(20); Check(client.ReadEntity(read), "pre-wrap received");
+    box.sequence=1; Check(host.SendEntityMotion(box), "post-wrap pose"); pump(20); Check(client.ReadEntity(read) && read.sequence==1, "prop serial wrap accepted");
+    map.epoch=2; Check(host.SendMap(map), "prop epoch transition"); pump(20);
+    Check(!client.ReadEntity(read) && !host.SendEntityMotion(box), "prop motion discarded across map transition");
+    std::cout << "PASS: live prop coalescing, reliable backpressure bypass, stale pose rejection, removal, articulated fragments and sequence wrap\n";
+}
 int main(int argc, char** argv) {
+    if(argc == 1) PropMotionTransportTest();
     ScriptPreloadTest();
     MediaCodecTest();
     PlayerInput input; input.sequence = 0x12345678; input.tick = 42;

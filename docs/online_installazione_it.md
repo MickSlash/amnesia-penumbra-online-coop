@@ -1,6 +1,6 @@
 # Installare e giocare ad Amnesia Online Co-op
 
-Build sperimentale Windows x64, protocollo 9, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono in `docs/qa_recovery_2026-10-03.md` dentro `source.zip`.
+Build sperimentale Windows x64, protocollo 10, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono nei documenti QA dentro `source.zip`.
 
 La versione 9 corregge il recupero dopo il blocco dell'avvio riscontrato nella
 versione 8: l'host mantiene la campagna in pausa e il listener aperto. Se il
@@ -89,13 +89,15 @@ se sei l'host; il client non salva una copia locale incompleta del mondo.
 Se esce il client, l'host tiene la campagna in pausa e aspetta che si ricolleghi,
 senza migrazione automatica. Se esce l'host, il client torna al menu principale.
 Le cadute involontarie conservano il recupero automatico già implementato.
-Aggiornare entrambi i PC: anche il protocollo 9 distingue questi casi.
+Aggiornare entrambi i PC: anche il protocollo 10 distingue questi casi.
 
 La perdita di connessione mette la campagna in pausa e avvia tentativi automatici di riconnessione. Se l'host resta assente e il client ha un checkpoint completo e validato, il client può diventare host dopo circa 12 secondi. Ripristina il salvataggio nativo, inverte correttamente i giocatori, esegue un autosalvataggio e **aspetta il partner**. Non prosegue da solo.
 
 I checkpoint sono catturati ogni 20 secondi, oltre al primo stato completo e ai cambi mappa. Si possono perdere i progressi successivi all'ultimo checkpoint ricevuto, con ritardo aggiuntivo dovuto al trasferimento. Il vecchio host ancora aperto prova a raggiungere il nuovo automaticamente. Dopo un crash e riavvio, collegarsi all'IP del nuovo host con lo stesso profilo per conservare l'identità. Non eliminare configurazioni/profili durante la sessione. La migrazione richiede checkpoint valido e raggiungibilità in entrambe le direzioni; non è senza pausa.
 
-Inventario e progressione sono condivisi. Olio e attivazione della lanterna sono individuali nella campagna originale. Il partner vede luce e posa dell'avatar; non è incluso un modello dettagliato della lanterna in terza persona. I nemici possono scegliere entrambi, inseguono un bersaglio per volta e verificano separatamente la visibilità. Nascondersi rompe la visuale, ma possono cercare nell'ultima posizione conosciuta.
+Inventario e progressione sono condivisi. Nelle nuove campagne online entrambi partono con olio al 100%, anche nel primo livello che originalmente azzera quello di Daniel. Olio e attivazione restano individuali e l'olio si consuma normalmente. Caricamento, cambio livello e riconnessione conservano l'olio salvato. La lanterna richiede ancora di raccogliere l'oggetto nella campagna. Il client aggiorna anche l'adattamento originale degli occhi al buio, separatamente dalla luce della lanterna. Il partner vede luce e posa dell'avatar; non è incluso un modello dettagliato della lanterna in terza persona. I nemici possono scegliere entrambi, inseguono un bersaglio per volta e verificano separatamente la visibilità. Nascondersi rompe la visuale, ma possono cercare nell'ultima posizione conosciuta.
+
+Il protocollo 10 trasferisce le posizioni dei prop in movimento a 20 Hz senza attendere le ritrasmissioni del mondo e interpola i corpi sul client su 50 ms. Le posizioni vecchie vengono scartate; la posizione finale, creazione, distruzione e cambi di proprietà restano affidabili. Porte e casse restano simulate dall'host: l'interazione conserva il tempo di andata e ritorno della rete. Aggiornare entrambi i PC; protocollo 9 e 10 non sono compatibili.
 
 ## Limiti ancora aperti
 

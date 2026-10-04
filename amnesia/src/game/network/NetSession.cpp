@@ -237,15 +237,16 @@ std::vector<uint8_t> EncodeEntity(const EntityState& e) {
     for(const auto& t : e.bodies) for(int32_t v : t) U32(out, uint32_t(v));
     out.push_back(uint8_t(e.animations.size()));
     for(const auto& a : e.animations) { U16(out, a.index); U16(out, a.weight); U32(out, a.time); }
+    U32(out, e.sequence);
     return out;
 }
 bool DecodeEntity(const uint8_t* p, size_t n, EntityState& entity) {
-    if(!ValidHeader(p, n) || n < 83 || p[4] != uint8_t(Message::Entity)) return false;
+    if(!ValidHeader(p, n) || n < 87 || p[4] != uint8_t(Message::Entity)) return false;
     const unsigned names = R16(p + 17), files = R16(p + 19), bodies = p[21];
     const size_t animationsOffset = 82 + names + files + bodies * 48;
     if(names > 128 || files > 240 || bodies > 32 || n <= animationsOffset) return false;
     const unsigned animations = p[animationsOffset];
-    if(animations > 32 || n != animationsOffset + 1 + animations * 8) return false;
+    if(animations > 32 || n != animationsOffset + 5 + animations * 8) return false;
     EntityState e; e.epoch = R32(p + 5); e.id = R32(p + 9); e.type = p[13]; e.flags = p[14]; e.subtype = R16(p + 15);
     for(unsigned i = 0; i < 3; ++i) e.scale[i] = Signed32(p + 22 + i * 4);
     for(unsigned i = 0; i < 12; ++i) e.transform[i] = Signed32(p + 34 + i * 4);
@@ -259,6 +260,7 @@ bool DecodeEntity(const uint8_t* p, size_t n, EntityState& entity) {
         const uint8_t* a = p + animationsOffset + 1 + i * 8;
         e.animations[i].index = R16(a); e.animations[i].weight = R16(a + 2); e.animations[i].time = R32(a + 4);
     }
+    e.sequence = R32(p + n - 4);
     if(!ValidEntity(e)) return false;
     entity = std::move(e); return true;
 }
@@ -379,7 +381,7 @@ void Session::Stop() {
     host_ = nullptr; peer_ = nullptr; initialized_ = ready_ = hasInput_ = false; role_ = Role::Offline;
     lastPoll_ = lastPacket_ = lastDiagnostic_ = 0;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = snapshotBackups_ = 0; map_ = MapState();
-    entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
+    entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
     closing_ = partnerLeftVoluntarily_ = false;
     loading_ = false; loadingStarted_ = worldAppliedEpoch_ = mapReadyAt_ = oldestBulkQueue_ = oldestBulkAt_ = lastSocketError_ = 0;
@@ -446,7 +448,7 @@ bool Session::Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reli
 void Session::ClearPeerState() {
     peer_ = nullptr; ready_ = hasInput_ = false;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
-    entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
+    entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
     loading_ = false; worldAppliedEpoch_ = mapReadyAt_ = oldestBulkQueue_ = oldestBulkAt_ = 0;
 }
@@ -559,10 +561,23 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         }
         return;
     }
-    if(ready_ && role_ == Role::Client && channel == 2 && p[4] == uint8_t(Message::Entity)) {
+    if(ready_ && role_ == Role::Client && (channel == 2 || channel == 1) && p[4] == uint8_t(Message::Entity)) {
         EntityState entity;
         if(!DecodeEntity(p, n, entity)) { Reject("invalid world entity"); return; }
         if(!hasMap_ || entity.epoch != map_.epoch) return;
+        entity.liveMotion = channel == 1;
+        if(channel == 1 && (!IsWorldApplied(entity.epoch) || entity.type != 0 || (entity.flags & 4))) return;
+        if(entity.sequence) {
+            auto previous = entitySequences_.find(entity.id);
+            if(previous != entitySequences_.end() &&
+                (entity.sequence - previous->second == 0 || entity.sequence - previous->second >= 0x80000000u)) return;
+            if(previous == entitySequences_.end() && entitySequences_.size() >= 16384) { Reject("world entity ID limit exceeded"); return; }
+            entitySequences_[entity.id] = entity.sequence;
+        }
+        if(channel == 1) {
+            if(!entityMotion_.count(entity.id) && entityMotion_.size() >= 1024) { Reject("world motion queue exceeded"); return; }
+            entityMotion_[entity.id] = std::move(entity); return;
+        }
         if(entities_.size() >= 1024) { Reject("world entity queue exceeded"); return; }
         entities_.push_back(std::move(entity)); return;
     }
@@ -585,7 +600,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         MapState map;
         if (!DecodeMap(p, n, map)) { Reject("invalid map path or epoch"); return; }
         if (!hasMap_ || (map.epoch - map_.epoch != 0 && map.epoch - map_.epoch < 0x80000000u)) {
-            map_ = map; hasMap_ = true; hasSnapshot_ = false; entities_.clear(); worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
+            map_ = map; hasMap_ = true; hasSnapshot_ = false; entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
             worldAppliedEpoch_ = 0; SetLoading(true);
         }
@@ -645,7 +660,7 @@ void Session::Poll() {
             char address[64] = {}; enet_address_get_host_ip(&e.peer->address, address, sizeof(address)); remoteAddress_ = address; remoteReady_ = false;
             peer_ = e.peer; ready_ = hasInput_ = hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; started_ = enet_time_get();
             loading_ = false; worldAppliedEpoch_ = mapReadyAt_ = 0;
-            entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
+            entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
             enet_peer_timeout(peer_, 8, 3000, 10000);
             // BulkReady regulates the large reliable stream. RTT spikes during
@@ -668,7 +683,7 @@ void Session::Poll() {
                 "; last received application packet age=" + std::to_string(uint32_t(now - lastPacket_)) + " ms");
             hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
             loading_ = false; worldAppliedEpoch_ = 0;
-            entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
+            entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
         }
     }
@@ -770,7 +785,28 @@ bool Session::SendMapReady(uint32_t epoch) {
 }
 bool Session::IsMapReady(uint32_t epoch) const { return ready_ && hasMap_ && epoch && readyEpoch_ == epoch; }
 bool Session::SendEntity(const EntityState& e) { return role_ == Role::Host && IsMapReady(e.epoch) && Send(EncodeEntity(e), 2, true, true); }
-bool Session::ReadEntity(EntityState& e) { if(entities_.empty()) return false; e = std::move(entities_.front()); entities_.pop_front(); return true; }
+bool Session::SendEntityMotion(const EntityState& e) {
+    if(role_ != Role::Host || !IsWorldApplied(e.epoch) || e.type != 0 || (e.flags & 4) || !peer_) return false;
+    auto bytes = EncodeEntity(e); if(bytes.empty()) return false;
+    // Small packets are unsequenced. Large articulated props use unreliable
+    // fragments; a missing part is replaced by the next complete pose.
+    auto* packet = enet_packet_create(bytes.data(),bytes.size(),ENET_PACKET_FLAG_UNSEQUENCED | ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT);
+    if(!packet) return false;
+    if(enet_peer_send(peer_,1,packet) != 0) { enet_packet_destroy(packet); return false; }
+    return true;
+}
+bool Session::ReadEntity(EntityState& e) {
+    while(!entities_.empty()) {
+        e = std::move(entities_.front()); entities_.pop_front();
+        auto newest = entitySequences_.find(e.id);
+        if(!e.sequence || newest == entitySequences_.end() || newest->second == e.sequence) return true;
+    }
+    if(entityMotion_.empty()) return false;
+    auto it = entityMotion_.begin(); e = std::move(it->second); entityMotion_.erase(it);
+    auto newest = entitySequences_.find(e.id);
+    if(newest != entitySequences_.end() && newest->second != e.sequence) return ReadEntity(e);
+    return true;
+}
 bool Session::SendAction(const ActionRequest& a) {
     if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 6 || a.item.size() > 128 || a.secondItem.size() > 128) return false;
     auto out = Header(Message::Action); U32(out, a.epoch); U32(out, a.sequence); out.push_back(uint8_t(a.action)); out.push_back(a.pressed ? 1 : 0);

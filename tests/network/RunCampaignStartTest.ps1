@@ -120,6 +120,7 @@ Add-Type -Path $Source
         $checkpointProof=if($role -eq 'host'){'Captured campaign checkpoint'}else{'Complete campaign checkpoint received'}
         if(!$log.Contains('Complete host entity baseline') -or !$log.Contains($checkpointProof)) { throw "$role missing campaign baseline/checkpoint" }
         if($role -eq 'client' -and !$log.Contains('Client shares original intro camera with host; companion avatars suppressed')) { throw 'Client did not share the original intro camera' }
+        if(!$log.Contains('Original first level starts with full oil on both players')) { throw "$role first-level starting oil did not pass" }
         Write-Output "PASS: $role four original intro voices/subtitles, baseline, checkpoint and expected connection count $expectedConnections"
     }
     if(!$relay.WaitForExit(30000)) { throw 'Relay did not finish on its timer' }

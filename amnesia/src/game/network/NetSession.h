@@ -6,11 +6,12 @@
 #include <vector>
 #include <array>
 #include <deque>
+#include <map>
 #include "Checkpoint.h"
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 9;
+constexpr uint16_t ProtocolVersion = 10;
 constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
@@ -91,6 +92,8 @@ bool DecodeMedia(const uint8_t* data, size_t size, MediaState& state);
 struct Animation { uint16_t index = 0, weight = 0; uint32_t time = 0; };
 struct EntityState {
     uint32_t epoch = 0, id = 0;
+    uint32_t sequence = 0; // shared serial across reliable lifecycle and live poses
+    bool liveMotion = false; // local receive metadata, excluded from the wire
     std::string name, file;
     uint8_t type = 0, flags = 0; // active, interaction disabled, destroyed, lit, locked, closed, effects
     uint16_t subtype = 0;
@@ -142,6 +145,8 @@ public:
     bool SendMapReady(uint32_t epoch);
     bool IsMapReady(uint32_t epoch) const;
     bool SendEntity(const EntityState& entity);
+    // Complete replaceable poses; never wait behind reliable world/media data.
+    bool SendEntityMotion(const EntityState& entity);
     bool ReadEntity(EntityState& entity);
     bool SendAction(const ActionRequest& action);
     bool ReadAction(ActionRequest& action);
@@ -201,6 +206,8 @@ private:
     bool hasSnapshot_ = false, hasMap_ = false;
     uint32_t readyEpoch_ = 0, snapshotBackups_ = 0;
     std::deque<EntityState> entities_;
+    std::map<uint32_t, EntityState> entityMotion_;
+    std::map<uint32_t, uint32_t> entitySequences_;
     std::deque<ActionRequest> actions_;
     uint32_t lastAction_ = 0;
     bool hasAction_ = false;

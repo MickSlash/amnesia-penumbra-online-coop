@@ -267,6 +267,7 @@ void cLuxNetwork::Update(float timeStep) {
             mReplicationStatsAt = replicationEnd; mReplicationTotalUs = mReplicationMaxUs = mReplicationSamples = 0;
         }
     }
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_VISIBILITY_PROPS")) UpdateVisibilityPropsTest(gpBase->mpMapHandler->GetCurrentMap());
     UpdateRecoveryTest();
     UpdateMenuTest();
     UpdateCampaignStartTest();
@@ -294,6 +295,10 @@ void cLuxNetwork::Update(float timeStep) {
         if (!gpBase->mpPlayer2 && !gpBase->mpMapHandler->GetCoopMode()) {
             gpBase->mpMapHandler->CreatePlayer2(map);
             mRemotePlayer2 = gpBase->mpPlayer2;
+            if(!IsClientReplica() && mFillRemoteStartingOil) {
+                mRemotePlayer2->SetLampOil(100); mFillRemoteStartingOil = false;
+                NetLog("[NET/LANTERN] New campaign Player 2 starts with oil=100");
+            }
             if (!IsClientReplica() && !PlaceRemotePlayer2()) {
                 gpBase->mpMapHandler->DestroyPlayer2(map);
                 mRemotePlayer2 = NULL;
@@ -336,6 +341,7 @@ void cLuxNetwork::Update(float timeStep) {
     if (mSmokeSeconds && std::chrono::steady_clock::now() - mSmokeStart >= std::chrono::seconds(mSmokeSeconds)) {
         mSmokeSeconds = 0;
         NetLog("[NET/TEST] Smoke test finished; exiting cleanly");
+        mSession.CloseVoluntarily(); // QA timer completion is an intentional exit, not a simulated crash.
         gpBase->mpEngine->Exit();
     }
 }
@@ -437,6 +443,12 @@ void cLuxNetwork::UpdateCampaignStartTest() {
         NetLog("[NET/TEST] Campaign started through online lobby new campaign button");
     }
     if(!map || !mSession.IsWorldApplied(mEpoch)) return;
+    if(!mTestStartingOilObserved) {
+        const bool full = gpBase->mpPlayer->GetLampOil() > 99.99f &&
+            (IsClientReplica() || (gpBase->mpPlayer2 && gpBase->mpPlayer2->GetLampOil() > 99.99f));
+        NetLog(full ? "[NET/TEST] Original first level starts with full oil on both players" : "[NET/TEST] First-level starting oil FAILED");
+        mTestStartingOilObserved = true;
+    }
     if(!IsClientReplica() && mCampaignStartTestStage == 1) {
         const auto* step = map->GetVar("BlackoutStep");
         if(step && cString::ToInt(step->msVal.c_str(),0) >= 18 && gpBase->mpPlayer->IsActive()) {
@@ -561,6 +573,8 @@ void cLuxNetwork::Reset() {
     mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0; mLastSnapshotAt = {};
     mPrediction.Clear();
     mEntityBytes.clear(); mEntityStates.clear(); mReplicaIDs.clear(); mLoggedWorldReplica = false;
+    mEntityMotionAt.clear(); mEntityMotionSettled.clear(); mPropMotion.clear();
+    mFillRemoteStartingOil = false;
     mBaselineApplied = false; mBaselineSent = false; mClientMoved = false;
     mAppliedInventory = false; mInventoryBytes.clear();
     mAppliedJournal = false; mJournalBytes.clear();
@@ -697,6 +711,15 @@ void cLuxNetwork::SendInventoryAction(online::PlayerAction action, const std::st
     online::ActionRequest request; request.epoch = mEpoch; request.sequence = ++mActionSequence;
     request.action = action; request.pressed = true; request.item = item; request.secondItem = secondItem; mSession.SendAction(request);
 }
+void cLuxNetwork::OnGameStart() {
+    if(mSession.GetRole() != online::Role::Host) return;
+    // Runs after native OnStart/OnEnter, including Rainy Hall's SetLampOil(0).
+    // Save load, reconnect and later map transitions do not invoke OnGameStart.
+    gpBase->mpPlayer->SetLampOil(100);
+    mFillRemoteStartingOil = gpBase->mpPlayer2 == NULL;
+    if(gpBase->mpPlayer2) gpBase->mpPlayer2->SetLampOil(100);
+    NetLog("[NET/LANTERN] New campaign host starts with oil=100");
+}
 void cLuxNetwork::OnMapEnter(cLuxMap*) {
     if(mSession.GetRole() == online::Role::Host) { mMapAnnounced = false; mPendingPresentation.clear(); }
 }
@@ -785,6 +808,7 @@ std::string cLuxNetwork::ConnectionStatus() const {
     return "Entrambi pronti. L'host puo avviare la campagna. Ping: " + std::to_string(mSession.Ping()) + " ms";
 }
 void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
+    mPropMotion.clear();
     if(MapFingerprint(state.file) != state.fingerprint) {
         NetLog("[NET/MAP] Map/script content mismatch; both PCs need identical game files");
         mSession.Stop(); return;
@@ -939,6 +963,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             if(std::chrono::steady_clock::now()-batchStart >= std::chrono::microseconds(750)) break;
         }
         if(!mSession.Connected()) return;
+        UpdatePropMotion(map,timeStep);
         if(!mBaselineApplied && mSession.IsWorldReady(mEpoch)) {
             // Remove map-authored audio/particles absent from the host's roster.
             cWorld* world = map->GetWorld();
@@ -1149,7 +1174,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         // applied. Start the input lease again after the first new input.
         mInputLeaseSeen = mInputLeasePaused = false;
         mSendingCheckpoint.bytes.clear(); mLastCheckpointEpoch = 0;
-        mEntityBytes.clear(); mEntityStates.clear();
+        mEntityBytes.clear(); mEntityStates.clear(); mEntityMotionAt.clear(); mEntityMotionSettled.clear();
         mBaselineSent = false;
         mHasHostLife = false; mSnapshotAccumulator = mSnapshotBackupAccumulator = mWorldReplicationAccumulator = 0;
         mHasLookSequence = false;
@@ -1390,14 +1415,33 @@ void cLuxNetwork::ReplicateWorld(cLuxMap* map) {
             mSession.Stop(); return;
         }
         auto old = mEntityBytes.find(state.id);
-        if(sent < 64 && !bytes.empty() && (old == mEntityBytes.end() || old->second != bytes) && mSession.SendEntity(state)) {
-            mEntityBytes[state.id] = std::move(bytes); mEntityStates[state.id] = state; ++sent;
-        }
+        const auto previous = mEntityStates.find(state.id);
+        const bool changed = old == mEntityBytes.end() || old->second != bytes;
+        const bool propertiesChanged = previous == mEntityStates.end() ||
+            previous->second.type != state.type || previous->second.flags != state.flags ||
+            previous->second.subtype != state.subtype || previous->second.name != state.name ||
+            previous->second.file != state.file || previous->second.scale != state.scale ||
+            previous->second.bodies.size() != state.bodies.size();
+        const auto now = std::chrono::steady_clock::now();
+        const bool liveProp = state.type == eLuxEntityType_Prop && mSession.IsWorldApplied(mEpoch);
+        const bool settling = liveProp && !changed && !mEntityMotionSettled[state.id] &&
+            now - mEntityMotionAt[state.id] >= std::chrono::milliseconds(250);
+        const bool repeat = liveProp && !changed && !mEntityMotionSettled[state.id] && !settling;
+        if(sent >= 64 || (!changed && !settling && !repeat)) continue;
+        state.sequence = ++mEntitySequence; if(!state.sequence) state.sequence = ++mEntitySequence;
+        const bool reliable = !liveProp || propertiesChanged || settling;
+        if(!(reliable ? mSession.SendEntity(state) : mSession.SendEntityMotion(state))) continue;
+        mEntityBytes[state.id] = std::move(bytes); mEntityStates[state.id] = state; ++sent;
+        if(changed) mEntityMotionAt[state.id] = now;
+        mEntityMotionSettled[state.id] = settling || (reliable && propertiesChanged);
+
     }
     for(auto it = mEntityStates.begin(); it != mEntityStates.end();) {
         if(present.find(it->first) != present.end() || sent >= 64) { ++it; continue; }
         online::EntityState removed = it->second; removed.flags |= 4; removed.bodies.clear(); removed.animations.clear();
+        removed.sequence = ++mEntitySequence; if(!removed.sequence) removed.sequence = ++mEntitySequence;
         if(!mSession.SendEntity(removed)) { ++it; continue; }
+        mEntityMotionAt.erase(removed.id); mEntityMotionSettled.erase(removed.id);
         ++sent; mEntityBytes.erase(it->first); it = mEntityStates.erase(it);
     }
     if(!mBaselineSent) {
@@ -1414,6 +1458,7 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
     if(!entity || entity->GetName() != state.name || uint8_t(entity->GetEntityType()) != state.type)
         entity = map->GetEntityByName(state.name, eLuxEntityType(state.type));
     if(state.flags & 4) {
+        mPropMotion.erase(state.id);
         if(entity) map->DestroyEntity(entity); mReplicaIDs.erase(state.id);
         if(mSmokeSeconds && state.name == "online_test_tinderbox") NetLog("[NET/TEST] Host pickup destruction replicated to client");
         return;
@@ -1428,6 +1473,7 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
         NetLog("[NET/WORLD] Cannot apply authoritative entity: " + state.name + "; closing incomplete replica");
         mSession.Stop(); return;
     }
+    const bool knownProp = mReplicaIDs.count(state.id) && state.type == eLuxEntityType_Prop && mBaselineApplied;
     mReplicaIDs[state.id] = entity->GetID();
     entity->SetActive((state.flags & 1) != 0); entity->SetInteractionDisabled((state.flags & 2) != 0);
     if(state.type == eLuxEntityType_Prop) {
@@ -1440,8 +1486,21 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
             auto* door = static_cast<cLuxProp_SwingDoor*>(prop);
             door->SetLocked((state.flags & 16) != 0, false); door->SetClosed((state.flags & 32) != 0, false);
         }
-        for(size_t i = 0; i < state.bodies.size() && i < size_t(prop->GetBodyNum()); ++i)
-            prop->GetBody(int(i))->SetMatrix(UnpackTransform(state.bodies[i]));
+        PropMotion motion; motion.target = state; motion.fromMesh = prop->GetMeshEntity() ? prop->GetMeshEntity()->GetWorldMatrix() : cMatrixf::Identity;
+        bool interpolate = knownProp && (state.flags & 1);
+        for(size_t i = 0; i < state.bodies.size() && i < size_t(prop->GetBodyNum()); ++i) {
+            const cMatrixf from = prop->GetBody(int(i))->GetLocalMatrix();
+            const cMatrixf to = UnpackTransform(state.bodies[i]);
+            cVector3f delta = to.GetTranslation() - from.GetTranslation();
+            if(delta.Length() > 5) interpolate = false; // teleports never slide across walls
+            motion.from.push_back(from);
+        }
+        if(interpolate && !motion.from.empty()) mPropMotion[state.id] = std::move(motion);
+        else {
+            mPropMotion.erase(state.id);
+            for(size_t i = 0; i < state.bodies.size() && i < size_t(prop->GetBodyNum()); ++i)
+                prop->GetBody(int(i))->SetMatrix(UnpackTransform(state.bodies[i]));
+        }
     } else if(state.type == eLuxEntityType_Enemy && !state.bodies.empty()) {
         iLuxEnemy* enemy = static_cast<iLuxEnemy*>(entity);
         if(enemy->GetCharacterBody()) enemy->GetCharacterBody()->SetPosition(UnpackTransform(state.bodies[0]).GetTranslation());
@@ -1462,6 +1521,100 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
         }
     }
     if(!mLoggedWorldReplica) { mLoggedWorldReplica = true; NetLog("[NET/WORLD] Authoritative entity state applied"); }
+}
+void cLuxNetwork::UpdateVisibilityPropsTest(cLuxMap* map) {
+    if(!map || !mSession.IsWorldApplied(mEpoch) || !gpBase->mpPlayer->GetCharacterBody()) return;
+    if(!mTestStartingOilObserved) {
+        const float oil = gpBase->mpPlayer->GetLampOil();
+        const bool full = oil > 99.99f && (IsClientReplica() || (gpBase->mpPlayer2 && gpBase->mpPlayer2->GetLampOil() > 99.99f));
+        NetLog(full ? "[NET/TEST] Full starting oil verified on local and remote player" : "[NET/TEST] Starting oil FAILED");
+        mTestStartingOilObserved = true;
+    }
+    if(!IsClientReplica() && !mTestDarknessStarted) {
+        auto lights = map->GetWorld()->GetLightIterator();
+        while(lights.HasNext()) {
+            auto* light = lights.Next();
+            if(light->GetName().find("Player") != 0) light->SetDiffuseColor(cColor(0,0));
+        }
+        gpBase->mpPlayer->GetHelperLantern()->SetActive(false,false,false,false);
+        if(gpBase->mpPlayer2) gpBase->mpPlayer2->GetHelperLantern()->SetActive(false,false,false,false);
+        mTestDarknessStarted = true;
+        NetLog("[NET/TEST] Unlit map fixture enabled without changing installed assets");
+    }
+    auto* ambient = gpBase->mpPlayer->GetHelperInDarkness()->GetAmbientLight();
+    if(!mTestDarknessDiagnostic && std::chrono::steady_clock::now()-mSmokeStart > std::chrono::seconds(20)) {
+        mTestDarknessDiagnostic = true;
+        NetLog("[NET/QA] Darkness local index=" + std::to_string(gpBase->mpPlayer->GetPlayerIndex()) +
+            " level=" + std::to_string(gpBase->mpPlayer->GetHelperLightLevel()->GetNormalLightLevel()) +
+            " ambient_r=" + std::to_string(ambient ? ambient->GetDiffuseColor().r : -1) +
+            " active=" + std::to_string(ambient && ambient->IsActive()) + " lantern=" + std::to_string(gpBase->mpPlayer->GetHelperLantern()->IsActive()) +
+            " container=" + gpBase->mpEngine->GetUpdater()->GetCurrentContainerName());
+    }
+    if(!mTestDarknessObserved && ambient && !gpBase->mpPlayer->GetHelperLantern()->IsActive() &&
+        gpBase->mpPlayer->GetHelperLightLevel()->GetNormalLightLevel() <= gpBase->mpGameCfg->GetFloat("Player_Darkness","AmbientLightMinLightLevel",0) && ambient->GetDiffuseColor().r > 0.001f) {
+        mTestDarknessObserved = true;
+        NetLog("[NET/TEST] Original eye adaptation emits local ambient light in darkness oil=" + std::to_string(gpBase->mpPlayer->GetLampOil()));
+    }
+    if(IsClientReplica()) return;
+    const float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now()-mSmokeStart).count();
+    if(!mTestPropsStarted) {
+        const cVector3f origin = gpBase->mpPlayer->GetCharacterBody()->GetFeetPosition() + cVector3f(3,1,0);
+        const char* names[] = {"online_test_motion_box","online_test_motion_door"};
+        const char* files[] = {"entities/container/wood_box01/wood_box01.ent","entities/door/mansion/mansion.ent"};
+        for(int k=0;k<2;++k) {
+            map->CreateEntity(names[k],files[k],cMath::MatrixTranslate(origin+cVector3f(float(k*2),0,0)),cVector3f(1));
+            auto* entity = map->GetEntityByName(names[k]);
+            if(!entity || entity->GetEntityType() != eLuxEntityType_Prop) { NetLog("[NET/TEST] Motion fixture FAILED"); return; }
+            auto* prop = static_cast<iLuxProp*>(entity);
+            if(k == 1) static_cast<cLuxProp_SwingDoor*>(prop)->SetClosed(false,false);
+            for(int i=0;i<prop->GetBodyNum();++i) { prop->GetBody(i)->SetMass(0); mTestPropBase[names[k]].push_back(prop->GetBody(i)->GetLocalMatrix()); }
+        }
+        mTestPropsStarted = true; NetLog("[NET/TEST] Authoritative box and door motion fixtures created");
+    }
+    for(const auto& fixture : mTestPropBase) {
+        auto* entity = map->GetEntityByName(fixture.first);
+        if(!entity || entity->GetEntityType() != eLuxEntityType_Prop) continue;
+        auto* prop = static_cast<iLuxProp*>(entity);
+        const float t = std::min(40.0f,elapsed);
+        for(size_t i=0;i<fixture.second.size();++i) {
+            cMatrixf matrix = fixture.second[i];
+            if(fixture.first == "online_test_motion_door") {
+                cVector3f position = matrix.GetTranslation(); matrix.SetTranslation(cVector3f(0));
+                matrix = cMath::MatrixMul(cMath::MatrixRotateY(std::sin(t)*0.5f),matrix); matrix.SetTranslation(position);
+            } else matrix.SetTranslation(matrix.GetTranslation()+cVector3f(std::sin(t)*0.5f,0,0));
+            prop->GetBody(int(i))->SetMatrix(matrix);
+        }
+    }
+}
+void cLuxNetwork::UpdatePropMotion(cLuxMap* map, float timeStep) {
+    for(auto it = mPropMotion.begin(); it != mPropMotion.end();) {
+        auto replica = mReplicaIDs.find(it->first);
+        iLuxEntity* entity = replica == mReplicaIDs.end() ? NULL : map->GetEntityByID(replica->second);
+        if(!entity || entity->GetDestroyMe() || entity->GetEntityType() != eLuxEntityType_Prop) { it = mPropMotion.erase(it); continue; }
+        auto* prop = static_cast<iLuxProp*>(entity); auto& motion = it->second;
+        motion.elapsed += std::max(0.0f,timeStep);
+        const float alpha = std::min(1.0f,motion.elapsed / 0.05f);
+        for(size_t i = 0; i < motion.from.size() && i < size_t(prop->GetBodyNum()); ++i)
+            prop->GetBody(int(i))->SetMatrix(cMath::MatrixSlerp(alpha,motion.from[i],UnpackTransform(motion.target.bodies[i]),true));
+        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_VISIBILITY_PROPS") && motion.target.name.find("online_test_motion_") == 0) {
+            const unsigned bit = motion.target.name == "online_test_motion_box" ? 1 : 2;
+            const auto from = PackTransform(motion.from[0]);
+            const auto shown = PackTransform(prop->GetBody(0)->GetLocalMatrix());
+            if(alpha > 0 && alpha < 1 && !(mTestPropInterpolated & bit) && shown != from && shown != motion.target.bodies[0]) {
+                mTestPropInterpolated |= bit;
+                NetLog("[NET/TEST] Prop rendered between authoritative poses: " + motion.target.name);
+            }
+            if(alpha >= 1 && !motion.target.liveMotion && !(mTestPropSettled & bit) && std::chrono::steady_clock::now()-mSmokeStart > std::chrono::seconds(35)) {
+                bool equal = true;
+                for(size_t i=0;i<motion.from.size();++i) {
+                    auto actual = PackTransform(prop->GetBody(int(i))->GetLocalMatrix());
+                    for(size_t j=0;j<actual.size();++j) if(std::abs(int64_t(actual[j])-motion.target.bodies[i][j]) > 2) equal = false;
+                }
+                if(equal) { mTestPropSettled |= bit; NetLog("[NET/TEST] Settled authoritative prop pose verified: " + motion.target.name); }
+            }
+        }
+        if(alpha >= 1) it = mPropMotion.erase(it); else ++it;
+    }
 }
 bool cLuxNetwork::ReplicateMedia(cLuxMap* map) {
     cWorld* world = map->GetWorld();
@@ -1713,7 +1866,7 @@ void cLuxNetwork::ReplicateLights(cLuxMap* map) {
     cLightListIterator it = map->GetWorld()->GetLightIterator();
     while(it.HasNext()) {
         iLight* light = it.Next();
-        if(light->GetName().find("PlayerLantern") == 0) continue; // ownership is swapped on the client
+        if((light->GetName().find("PlayerLantern") == 0 || light->GetName().find("PlayerDarknessAmbient") == 0)) continue; // ownership is swapped on the client
         online::Presentation event; event.epoch = mEpoch; event.kind = online::PresentationKind::Light; event.text[0] = light->GetName();
         const cColor& color = light->GetDiffuseColor(); const float values[] = {color.r, color.g, color.b, color.a};
         for(int i = 0; i < 4; ++i) event.values[i] = int32_t(std::max(0.0f, std::min(65.0f, values[i])) * 1000);
@@ -1788,7 +1941,7 @@ void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& ev
         map->GetWorld()->SetFogCulling((event.values[3] & 2) != 0); break;
     case online::PresentationKind::Light: {
         iLight* light = map->GetWorld()->GetLight(event.text[0]);
-        if(!light || event.text[0].find("PlayerLantern") == 0) break;
+        if(!light || (event.text[0].find("PlayerLantern") == 0 || event.text[0].find("PlayerDarknessAmbient") == 0)) break;
         light->SetFlickerActive(false); // replicate the host's actual flicker rather than a second random timer
         light->SetDiffuseColor(cColor(event.values[0] / 1000.0f, event.values[1] / 1000.0f, event.values[2] / 1000.0f, event.values[3] / 1000.0f));
         light->SetRadius(event.values[4] / 1000.0f); light->SetVisible((event.values[5] & 1) != 0); light->SetActive((event.values[5] & 2) != 0);

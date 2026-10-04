@@ -418,6 +418,12 @@ void cLuxPlayer::Update(float afTimeStep)
             if(mState == eLuxPlayerState_Normal || mState == eLuxPlayerState_UseItem) mvStates[mState]->Update(afTimeStep);
             if(mpLantern) mpLantern->Update(afTimeStep);
             if(mpHands) mpHands->Update(afTimeStep);
+            // The local replica still needs the original eye adaptation. The
+            // host owns sanity loss; remote ambient lights stay local to a view.
+            if(!IsPlayer2()) {
+                if(mpHelperLightLevel) mpHelperLightLevel->Update(afTimeStep);
+                if(mpHelperInDarkness) mpHelperInDarkness->Update(afTimeStep);
+            }
         }
         return;
     }
