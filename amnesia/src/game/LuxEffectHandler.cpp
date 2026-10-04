@@ -1534,6 +1534,12 @@ void cLuxEffect_PlayVoice::Update(float afTimeStep)
 	if(voiceData.msText != _W(""))
 		gpBase->mpDefaultFont->GetWordWrapRows(mfRowWidth,mvFontSize.y+2,mvFontSize, voiceData.msText, &mvCurrentTextRows);
 
+    const char* introQA = std::getenv("AMNESIA_NET_TEST_CAMPAIGN_START");
+    if(introQA && std::string(introQA) == "1" && gpBase->mpNetwork &&
+        mpSoundHandler->IsValid(mpVoiceEntry,mlVoiceEntryID) && mpVoiceEntry->GetChannel()->IsPlaying()) {
+        Log("[NET/TEST] Campaign intro voice playing asset=%s subtitles=%d\n",voiceData.msVoiceFile.c_str(),
+            !mvCurrentTextRows.empty() && gpBase->mpMessageHandler->ShowSubtitles() ? 1 : 0);
+    }
 	//////////////////////
 	//Pop!
 	mlstVoices.pop_front();

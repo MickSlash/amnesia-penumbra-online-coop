@@ -21,7 +21,7 @@ bool ValidPlayer(const PlayerState& p) {
     return p.x >= -100000000 && p.x <= 100000000 && p.y >= -100000000 && p.y <= 100000000 &&
         p.z >= -100000000 && p.z <= 100000000 && p.yaw >= -3142 && p.yaw <= 3142 &&
         p.pitch >= -1571 && p.pitch <= 1571 && p.health <= 10000 && p.sanity <= 10000 && p.oil <= 10000 &&
-        p.eyeHeight >= -5000 && p.eyeHeight <= 5000 && !(p.flags & ~63) &&
+        p.eyeHeight >= -5000 && p.eyeHeight <= 5000 && !(p.flags & ~127) &&
         p.roll >= -3142 && p.roll <= 3142 && p.cameraX >= -5000 && p.cameraX <= 5000 &&
         p.cameraZ >= -5000 && p.cameraZ <= 5000 && p.fov >= 10 && p.fov <= 3142 &&
         p.aspect >= 10 && p.aspect <= 20000 && p.lookSpeed <= 10000;
@@ -381,6 +381,23 @@ void Session::Stop() {
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
     closing_ = partnerLeftVoluntarily_ = false;
+    loading_ = false; loadingStarted_ = worldAppliedEpoch_ = 0;
+}
+void Session::SetLoading(bool loading) {
+    if(loading && !loading_) loadingStarted_ = enet_time_get();
+    loading_ = loading;
+    if(peer_) enet_peer_timeout(peer_, loading ? 32 : 8, loading ? 30000 : 3000, loading ? 45000 : 10000);
+}
+void Session::BeginMapLoad() {
+    if(!ready_) return;
+    const bool notify = role_ == Role::Host && !loading_;
+    SetLoading(true);
+    if(notify) {
+        Send(Header(Message::Loading),0,true);
+        // Flush the loading notice before entering code that can block for seconds.
+        enet_host_flush(host_);
+        log_("[NET/MAP] Loading barrier entered; transport grace enabled");
+    }
 }
 void Session::CloseVoluntarily() {
     if(!peer_ || peer_->state != ENET_PEER_STATE_CONNECTED) { Stop(); return; }
@@ -427,6 +444,7 @@ void Session::Reject(const char* why) { fatal_ = true;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+    loading_ = false; worldAppliedEpoch_ = 0;
 }
 void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
     if (!ValidHeader(p, n)) { Reject("malformed packet or incompatible protocol"); return; }
@@ -448,6 +466,17 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
     }
     if(ready_ && channel == 0 && n == 8 && p[4] == uint8_t(Message::Peer) && p[5] <= 1 && R16(p + 6)) {
         remoteReady_ = p[5] != 0; remotePort_ = R16(p + 6); return;
+    }
+    if(ready_ && role_ == Role::Client && channel == 0 && n == 5 && p[4] == uint8_t(Message::Loading)) {
+        SetLoading(true); return;
+    }
+    if(ready_ && role_ == Role::Host && channel == 0 && n == 9 && p[4] == uint8_t(Message::WorldApplied)) {
+        const auto epoch = R32(p+5);
+        if(IsMapReady(epoch) && worldAppliedEpoch_ != epoch) {
+            worldAppliedEpoch_ = epoch; SetLoading(false);
+            log_("[NET/MAP] Client world applied epoch=" + std::to_string(epoch) + "; campaign barrier released");
+        }
+        return;
     }
     if(ready_ && role_ == Role::Client && channel == 3 && p[4] == uint8_t(Message::Checkpoint)) {
         CheckpointChunk chunk;
@@ -542,6 +571,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         if (!hasMap_ || (map.epoch - map_.epoch != 0 && map.epoch - map_.epoch < 0x80000000u)) {
             map_ = map; hasMap_ = true; hasSnapshot_ = false; entities_.clear(); worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+            worldAppliedEpoch_ = 0; SetLoading(true);
         }
         return;
     }
@@ -582,6 +612,7 @@ void Session::Poll() {
             partnerLeftVoluntarily_ = false;
             char address[64] = {}; enet_address_get_host_ip(&e.peer->address, address, sizeof(address)); remoteAddress_ = address; remoteReady_ = false;
             peer_ = e.peer; ready_ = hasInput_ = hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; started_ = enet_time_get();
+            loading_ = false; worldAppliedEpoch_ = 0;
             entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
             enet_peer_timeout(peer_, 8, 3000, 10000);
@@ -604,11 +635,15 @@ void Session::Poll() {
             log_("[NET/CONNECTION] Peer disconnected or timed out; remote reason=" + std::to_string(e.data) +
                 "; last received application packet age=" + std::to_string(uint32_t(now - lastPacket_)) + " ms");
             hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
+            loading_ = false; worldAppliedEpoch_ = 0;
             entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
         }
     }
     if (peer_ && !ready_ && uint32_t(enet_time_get() - started_) > 5000) { Reject("handshake timeout"); fatal_ = false; }
+    if(peer_ && ready_ && loading_ && uint32_t(enet_time_get()-loadingStarted_) > 45000) {
+        Reject("map loading barrier timeout"); fatal_ = false;
+    }
     enet_host_flush(host_);
     if(peer_ && ready_ && (!lastDiagnostic_ || uint32_t(now - lastDiagnostic_) >= 5000)) {
         lastDiagnostic_ = now;
@@ -623,6 +658,7 @@ void Session::Poll() {
             " reliable_queued_bytes=" + std::to_string(queuedBytes) +
             " reliable_in_flight_bytes=" + std::to_string(peer_->reliableDataInTransit) +
             " receive_waiting_bytes=" + std::to_string(peer_->totalWaitingData) + " bulk_paused=" + std::to_string(!BulkReady(0)) +
+            " loading=" + std::to_string(loading_) + " map_ready_epoch=" + std::to_string(readyEpoch_) + " world_applied_epoch=" + std::to_string(worldAppliedEpoch_) +
             " application_age_ms=" + std::to_string(uint32_t(now - lastPacket_)) +
             " ack_age_ms=" + std::to_string(uint32_t(now - peer_->lastReceiveTime)));
     }
@@ -657,8 +693,10 @@ bool Session::ReadLife(Snapshot& s) {
     s = life_.front(); life_.pop_front(); return true;
 }
 bool Session::SendMap(const MapState& map) {
-    if (role_ != Role::Host || !ready_ || !Send(EncodeMap(map), 0, true)) return false;
-    map_ = map; hasMap_ = true; readyEpoch_ = 0; hasInput_ = false; actions_.clear(); return true;
+    if(role_ != Role::Host || !ready_) return false;
+    BeginMapLoad();
+    if(!Send(EncodeMap(map),0,true)) return false;
+    map_ = map; hasMap_ = true; readyEpoch_ = worldAppliedEpoch_ = 0; hasInput_ = false; actions_.clear(); return true;
 }
 bool Session::ReadMap(MapState& map) const { if (!ready_ || !hasMap_) return false; map = map_; return true; }
 bool Session::SendMapReady(uint32_t epoch) {
@@ -679,7 +717,14 @@ bool Session::SendWorldReady(uint32_t epoch) {
     if(role_ != Role::Host || !IsMapReady(epoch)) return false;
     auto out = Header(Message::WorldReady); U32(out, epoch); return Send(out, 2, true);
 }
-bool Session::IsWorldReady(uint32_t epoch) const { return ready_ && epoch && worldReadyEpoch_ == epoch && entities_.empty() && media_.empty(); }
+bool Session::IsWorldReady(uint32_t epoch) const { return ready_ && epoch && worldReadyEpoch_ == epoch && entities_.empty() && media_.empty() && presentation_.empty(); }
+bool Session::SendWorldApplied(uint32_t epoch) {
+    if(role_ != Role::Client || !IsWorldReady(epoch)) return false;
+    auto out = Header(Message::WorldApplied); U32(out,epoch);
+    if(!Send(out,0,true)) return false;
+    worldAppliedEpoch_ = epoch; SetLoading(false); return true;
+}
+bool Session::IsWorldApplied(uint32_t epoch) const { return ready_ && hasMap_ && epoch && worldAppliedEpoch_ == epoch && map_.epoch == epoch; }
 bool Session::SendInventory(const InventoryState& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeInventory(s), 2, true); }
 bool Session::ReadInventory(InventoryState& s) const { if(!ready_ || !hasInventory_) return false; s = inventory_; return true; }
 bool Session::SendPresentation(const Presentation& event) { return role_ == Role::Host && IsMapReady(event.epoch) && Send(EncodePresentation(event), 2, true, true); }

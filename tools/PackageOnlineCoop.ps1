@@ -29,7 +29,7 @@ Copy-Item -LiteralPath "$repo/docs/online_installazione_it.md" -Destination "$de
 Copy-Item -LiteralPath "$repo/LICENSE" -Destination "$destination/LICENSE"
 $commit = (& git -c "safe.directory=$($repo.Replace('\','/'))" -C $repo rev-parse HEAD).Trim()
 $manifest = [ordered]@{
-    protocol = 7
+    protocol = 8
     sourceCommit = $commit
     sourceRepository = 'https://github.com/TheBorn/Amnesia-The-Dark-Descent---Local-Co-op-Mod'
     builtExecutableSha256 = (Get-FileHash -LiteralPath "$destination/bin/Lux.exe" -Algorithm SHA256).Hash

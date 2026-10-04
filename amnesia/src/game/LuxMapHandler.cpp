@@ -200,6 +200,7 @@ static void SetAvatarVisibleForCamera(cLuxPlayer *apPlayer, cCamera *apViewCam)
 					apPlayer->GetCamera() != apViewCam &&
 					bMorphed == false;
 
+	if(gpBase->mpNetwork && gpBase->mpNetwork->SharedIntroView()) bVisible = false;
 	apPlayer->GetAvatar()->SetEntitiesVisible(bVisible);
 }
 
@@ -2387,6 +2388,8 @@ void cLuxMapHandler::ChangeMap(const tString& asMapName, const tString& asStartP
 
 cLuxMap* cLuxMapHandler::LoadMap(const tString& asFileName, bool abLoadEntities)
 {
+    if(gpBase->mpNetwork) gpBase->mpNetwork->GetSession().BeginMapLoad();
+
 	cLuxMap *pMap = hplNew( cLuxMap, ( FileToMapName(asFileName)) );
 	
 	pMap->LoadFromFile(msMapFolder+asFileName, abLoadEntities);

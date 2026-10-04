@@ -1,6 +1,15 @@
 # Installare e giocare ad Amnesia Online Co-op
 
-Build sperimentale Windows x64, protocollo 7, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono in `docs/qa_recovery_2026-10-03.md` dentro `source.zip`.
+Build sperimentale Windows x64, protocollo 8, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono in `docs/qa_recovery_2026-10-03.md` dentro `source.zip`.
+
+La versione 8 corregge l'avvio della campagna: avvisa il partner prima del
+caricamento e concede una finestra di rete dedicata, poi attende che il client
+abbia applicato il mondo completo prima di avviare i timer della storia.
+Durante l'intro del primo livello il client condivide la telecamera dell'host,
+con voce, sottotitoli ed effetti; gli avatar non coprono la scena. Al termine
+torna alla propria visuale e ai controlli indipendenti. Le due copie devono
+essere aggiornate: le build precedenti vengono rifiutate alla connessione.
+Prove e limiti in `docs/qa_avvio_campagna_2026-10-04.md` dentro `source.zip`.
 
 Questa build corregge anche la camminata continua del client dopo il rilascio dei tasti: aggiornare **entrambi**, incluso l'host. La prova dell'arresto avanti/laterale è documentata in `docs/qa_movimento_2026-10-03.md` dentro `source.zip`.
 
@@ -72,7 +81,7 @@ se sei l'host; il client non salva una copia locale incompleta del mondo.
 Se esce il client, l'host tiene la campagna in pausa e aspetta che si ricolleghi,
 senza migrazione automatica. Se esce l'host, il client torna al menu principale.
 Le cadute involontarie conservano il recupero automatico già implementato.
-Aggiornare entrambi i PC: il protocollo 7 distingue questi casi.
+Aggiornare entrambi i PC: anche il protocollo 8 distingue questi casi.
 
 La perdita di connessione mette la campagna in pausa e avvia tentativi automatici di riconnessione. Se l'host resta assente e il client ha un checkpoint completo e validato, il client può diventare host dopo circa 12 secondi. Ripristina il salvataggio nativo, inverte correttamente i giocatori, esegue un autosalvataggio e **aspetta il partner**. Non prosegue da solo.
 

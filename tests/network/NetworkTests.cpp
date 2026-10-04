@@ -229,6 +229,48 @@ static void BulkFlowControlTest() {
     std::cout << "PASS: bounded bulk backlog, control reservation and retry after drain\n";
     std::cout << "PASS: nonblocking voluntary close, peer reason and subsequent manual reconnect\n";
 }
+static void MapLoadingPauseTest() {
+    Session host(Log), client(Log);
+    Check(host.StartHost(27050) && client.StartClient("127.0.0.1",27050), "loading pause startup");
+    auto pump = [&](int ms, bool clientRuns = true, bool hostRuns = true) {
+        const auto end=std::chrono::steady_clock::now()+std::chrono::milliseconds(ms);
+        while(std::chrono::steady_clock::now()<end) {
+            if(clientRuns) client.Poll();
+            if(hostRuns) host.Poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    pump(1000); Check(host.Connected() && client.Connected(), "loading pause handshake");
+    host.BeginMapLoad(); pump(50);
+    pump(6500,true,false);
+    Check(client.Connected(), "client survives 6.5-second host load after loading notice");
+    pump(500);
+    MapState map; map.epoch=1; map.fingerprint=1; map.file="maps/test.map";
+    Check(host.SendMap(map), "loading pause map announcement"); pump(50);
+    MapState received; Check(client.ReadMap(received), "loading pause map received");
+    // A synchronous native map load stalls its caller, even with a healthy link.
+    pump(6500,false);
+    Check(host.Connected(), "host survives 6.5-second client map load without reconnect");
+    Check(client.SendMapReady(1), "loading pause readiness"); pump(500);
+    Check(host.IsMapReady(1) && client.Connected(), "loading pause readiness acknowledged");
+    EntityState entity; entity.epoch=1; entity.id=1; entity.name="box"; entity.file="entities/box.ent";
+    entity.transform[0]=entity.transform[5]=entity.transform[10]=10000;
+    bool sent=false;
+    for(int i=0;i<100 && !sent;++i) { sent=host.SendEntity(entity); pump(20); }
+    Check(sent, "loading pause bulk stream resumes after ACK");
+    Presentation startup; startup.epoch=1; startup.kind=PresentationKind::Message; startup.text[0]="startup";
+    Check(host.SendPresentation(startup), "loading pause startup presentation");
+    Check(host.SendWorldReady(1), "loading pause baseline completion"); pump(250);
+    Check(!client.IsWorldReady(1), "pending startup presentation holds application barrier");
+    Check(client.ReadPresentation(startup), "loading pause startup presentation applied");
+    Check(client.ReadEntity(entity) && client.IsWorldReady(1), "loading pause full baseline delivered");
+    Check(!host.IsWorldApplied(1) && !client.SendWorldApplied(2), "loading barrier rejects wrong epoch and holds scripts before world application");
+    Check(client.SendWorldApplied(1), "loading barrier world application"); pump(250);
+    Check(host.IsWorldApplied(1) && client.IsWorldApplied(1), "loading barrier released on both peers");
+    map.epoch=2; Check(host.SendMap(map), "next map loading barrier"); pump(50);
+    Check(!host.IsWorldApplied(1) && !host.IsWorldApplied(2) && !client.SendWorldApplied(1), "map change clears old application acknowledgement");
+    std::cout << "PASS: synchronous 6.5-second map load retains connection and completes baseline/application barrier\n";
+}
 static void PacketThrottleTest() {
     Check(enet_initialize()==0, "throttle test initialization");
     ENetAddress address = {}; address.host=ENET_HOST_ANY; address.port=27045;
@@ -437,6 +479,12 @@ int main(int argc, char** argv) {
     Check(DecodeLife(lifeBytes.data(), lifeBytes.size(), stateRead) && stateRead.players[1].roll == -1500 &&
         stateRead.players[1].cameraX == -200 && stateRead.players[1].aspect == 800 && stateRead.players[1].flags == 52, "camera and life roundtrip");
     Check(!DecodeSnapshot(lifeBytes.data(), lifeBytes.size(), stateRead), "life cannot masquerade as movement");
+    snapshot.players[1].flags |= 64;
+    const auto introBytes=EncodeSnapshot(snapshot);
+    Check(DecodeSnapshot(introBytes.data(),introBytes.size(),stateRead) && (stateRead.players[1].flags & 64), "shared intro camera flag survives snapshot codec");
+    snapshot.players[1].flags |= 128;
+    Check(EncodeSnapshot(snapshot).empty(), "unknown camera flags rejected");
+    snapshot.players[1].flags &= 127;
     for(size_t n = 0; n < lifeBytes.size(); ++n) Check(!DecodeLife(lifeBytes.data(), n, stateRead), "truncated life event");
     snapshot.players[1].fov = 0; Check(EncodeLife(snapshot).empty(), "life camera range");
     MapState map; map.epoch = 1; map.fingerprint = 0x123456789abcdef0ull; map.file = "maps/main/ch01/02_entrance_hall.map";
@@ -485,7 +533,7 @@ int main(int argc, char** argv) {
     story.values[0] = 1; story.values[1] = 350;
     auto fadeBytes = EncodePresentation(story);
     Check(DecodePresentation(fadeBytes.data(), fadeBytes.size(), storyRead) && storyRead.values[1] == 350, "fade roundtrip");
-    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); BulkFlowControlTest(); PacketThrottleTest(); SnapshotReliableHoleTest(); LifeQueueLimitTest(); RecoveryTests(); return 0; }
+    if (argc == 1) { std::cout << "PASS: protocol validation\n"; MalformedInputStressTest(); InputLifetimeTest(); BulkFlowControlTest(); MapLoadingPauseTest(); PacketThrottleTest(); SnapshotReliableHoleTest(); LifeQueueLimitTest(); RecoveryTests(); return 0; }
     const bool host = std::string(argv[1]) == "host";
     const bool badVersion = std::string(argv[1]) == "bad-version";
     const bool malformed = std::string(argv[1]) == "malformed";

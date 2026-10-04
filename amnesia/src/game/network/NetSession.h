@@ -10,7 +10,7 @@
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 7;
+constexpr uint16_t ProtocolVersion = 8;
 constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
@@ -19,7 +19,7 @@ constexpr uint32_t TransportDatagramBytes = 1200;
 // reliable packet. A 256 KiB cap can reject the very retransmit that drains it.
 constexpr uint32_t TransportWaitingDataBytes = 4 * 1024 * 1024;
 enum class Role { Offline, Host, Client };
-enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17 };
+enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17, Loading = 18, WorldApplied = 19 };
 struct JournalEntry {
     uint8_t kind = 0; // note, diary, quest
     bool active = true;
@@ -55,7 +55,7 @@ struct PlayerState {
     uint16_t tinderboxes = 0;
     int16_t roll = 0, cameraX = 0, cameraZ = 0; // radians *1000; head offsets in mm
     uint16_t fov = 1200, aspect = 1000, lookSpeed = 1000; // *1000; aspect multiplier
-    uint8_t flags = 4; // crouching, lantern, active, dead, scripted look, object-controlled look
+    uint8_t flags = 4; // crouching, lantern, active, dead, scripted look, object-controlled look, shared intro view
     int16_t forwardSpeed = 0, sideSpeed = 0; // current local-axis velocity, mm/s
     uint16_t forwardMax = 0, sideMax = 0, acceleration = 0, deceleration = 0, backwardMax = 0; // mm/s, mm/s^2
 };
@@ -124,6 +124,8 @@ public:
     // Fault injection used only by the opt-in QA driver. Retain session identity.
     void SuspendTransportForTest();
     void Poll(); // non-blocking; caller owns scheduling
+    // Notify the partner before synchronous native loading blocks the game loop.
+    void BeginMapLoad();
     bool SendInput(const PlayerInput& input);
     bool ReadInput(PlayerInput& input) const; // expires after 250 ms
     bool SendSnapshot(const Snapshot& snapshot);
@@ -143,6 +145,8 @@ public:
     bool ReadAction(ActionRequest& action);
     bool SendWorldReady(uint32_t epoch);
     bool IsWorldReady(uint32_t epoch) const;
+    bool SendWorldApplied(uint32_t epoch);
+    bool IsWorldApplied(uint32_t epoch) const;
     bool SendInventory(const InventoryState& inventory);
     bool ReadInventory(InventoryState& inventory) const;
     bool SendPresentation(const Presentation& event);
@@ -177,6 +181,7 @@ private:
     bool BulkReady(size_t bytes) const;
     void Receive(const uint8_t* data, size_t size, uint8_t channel);
     void Reject(const char* reason);
+    void SetLoading(bool loading);
     Logger log_;
     _ENetHost* host_ = nullptr;
     _ENetPeer* peer_ = nullptr;
@@ -195,6 +200,8 @@ private:
     uint32_t lastAction_ = 0;
     bool hasAction_ = false;
     uint32_t worldReadyEpoch_ = 0;
+    uint32_t worldAppliedEpoch_ = 0, loadingStarted_ = 0;
+    bool loading_ = false;
     InventoryState inventory_;
     bool hasInventory_ = false;
     std::deque<Presentation> presentation_;

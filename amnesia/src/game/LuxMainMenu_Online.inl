@@ -22,6 +22,7 @@ public:
             buttons[i] = mpGuiSet->CreateWidgetButton(cVector3f(x,y,0.1f), cVector2f(i < 4 ? 140.0f : 275.0f,32), labels[i], mpWindow);
             buttons[i]->SetUserValue(i); buttons[i]->AddCallback(eGuiMessage_ButtonPressed, this, kGuiCallback(Press));
             if(i == 2) buttons[i]->SetName("OnlineReconnect");
+            if(i == 4) buttons[i]->SetName("OnlineNewCampaign");
         }
         clearImage = mpGuiSet->CreateWidgetCheckBox(cVector3f(20,204,0.1f), cVector2f(570,24), L"Immagine nitida (riduci scie e blur)", mpWindow);
         clearImage->SetName("OnlineClearImage");

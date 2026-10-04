@@ -205,7 +205,8 @@ void cLuxNetwork::Update(float timeStep) {
     const auto connectionNow = std::chrono::steady_clock::now();
     online::PlayerInput freshInput;
     if(mSession.GetRole() == online::Role::Host && mSession.ReadInput(freshInput)) { mInputLeaseSeen = true; mInputLeaseAt = connectionNow; }
-    mInputLeasePaused = mSession.GetRole() == online::Role::Host && mInputLeaseSeen && connectionNow - mInputLeaseAt > std::chrono::seconds(1);
+    mInputLeasePaused = mSession.GetRole() == online::Role::Host && mSession.IsWorldApplied(mEpoch) &&
+        mInputLeaseSeen && connectionNow - mInputLeaseAt > std::chrono::seconds(1);
     if(mSession.Connected()) {
         if(mConnectionGeneration != mSession.Generation()) {
             mConnectionGeneration = mSession.Generation();
@@ -268,6 +269,7 @@ void cLuxNetwork::Update(float timeStep) {
     }
     UpdateRecoveryTest();
     UpdateMenuTest();
+    UpdateCampaignStartTest();
     UpdateCheckpoint(timeStep);
     if(IsClientReplica() && gpBase->mpEngine->GetUpdater()->GetCurrentContainerName() != "Default") {
         online::PlayerInput idle; auto* camera = gpBase->mpPlayer->GetCamera();
@@ -420,6 +422,29 @@ void cLuxNetwork::UpdateMenuTest() {
         mMenuTestStage = 9; NetLog("[NET/TEST] Online menu exit/reconnect regression completed");
     }
 }
+void cLuxNetwork::UpdateCampaignStartTest() {
+    if(!mSmokeSeconds || !TestFlag("AMNESIA_NET_TEST_CAMPAIGN_START")) return;
+    auto* map = gpBase->mpMapHandler->GetCurrentMap();
+    const float age = std::chrono::duration<float>(std::chrono::steady_clock::now()-mSmokeStart).count();
+    if(mCampaignStartTestStage == 0 && !IsClientReplica() && mSession.LobbyReady() && !map && age > 12) {
+        auto* menu = gpBase->mpMainMenu;
+        menu->SetWindowActive(eLuxMainMenuWindow_Online);
+        auto* button = menu->GetSet()->GetWidgetFromName("OnlineNewCampaign");
+        if(!button || !button->ProcessMessage(eGuiMessage_ButtonPressed,cGuiMessageData(0))) {
+            NetLog("[NET/TEST] Campaign start FAILED: new campaign button unavailable"); gpBase->mpEngine->Exit(); return;
+        }
+        mCampaignStartTestStage = 1;
+        NetLog("[NET/TEST] Campaign started through online lobby new campaign button");
+    }
+    if(!map || !mSession.IsWorldApplied(mEpoch)) return;
+    if(!IsClientReplica() && mCampaignStartTestStage == 1) {
+        const auto* step = map->GetVar("BlackoutStep");
+        if(step && cString::ToInt(step->msVal.c_str(),0) >= 18 && gpBase->mpPlayer->IsActive()) {
+            mCampaignStartTestStage = 2;
+            NetLog("[NET/TEST] Original campaign intro completed; native timers released controls");
+        }
+    }
+}
 bool cLuxNetwork::UpdateQADrive(float timeStep) {
     if(mQADriveFile.empty() || !mSmokeSeconds) return false;
     cLuxPlayer* player = gpBase->mpPlayer;
@@ -532,7 +557,7 @@ void cLuxNetwork::Reset() {
     mRemotePlayer2 = NULL; mPreviousButtons = 0;
     mInputAccumulator = 0;
     mPendingLookYaw = mPendingLookPitch = 0; mHasLookSequence = false;
-    mClientObjectLook = mClientScriptLook = mRemoteRotate = false;
+    mClientObjectLook = mClientScriptLook = mRemoteRotate = mClientSharedIntro = false;
     mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0; mLastSnapshotAt = {};
     mPrediction.Clear();
     mEntityBytes.clear(); mEntityStates.clear(); mReplicaIDs.clear(); mLoggedWorldReplica = false;
@@ -550,7 +575,7 @@ void cLuxNetwork::Reset() {
 void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
     if(!mSession.Connected()) { mPrediction.Clear(); return; }
     if (IsClientReplica() && (!mEpoch || !mReceivedSnapshot || !mBaselineApplied)) return;
-    if(IsClientReplica() && mClientDead) { input.forward = input.strafe = 0; input.buttons = 0; }
+    if(IsClientReplica() && (mClientDead || mClientSharedIntro)) { input.forward = input.strafe = 0; input.buttons = 0; input.lookYaw = input.lookPitch = 0; }
     if(IsClientReplica() && !mTestMovement) { input.sequence = mInputSequence + 1; mPrediction.Push(input,timeStep); }
     ++mInputTick;
     mInputAccumulator += timeStep;
@@ -603,7 +628,7 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
     cLuxPlayer* player = gpBase->mpPlayer2;
     if (!player || !player->GetCharacterBody()) { mPreviousButtons = 0; return true; }
     online::PlayerInput input;
-    const bool hasInput = !WaitingForMap() && mSession.ReadInput(input);
+    const bool hasInput = !WaitingForMap() && !SharedIntroView() && mSession.ReadInput(input);
     const bool active = hasInput && player->IsActive() && !player->IsDead();
     if (mSmokeSeconds && hasInput && !mLoggedRemoteInput) {
         mLoggedRemoteInput = true;
@@ -632,7 +657,7 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
     player->Run((buttons & 4) != 0);
     online::ActionRequest action;
     while(mSession.ReadAction(action)) {
-        if(!player->IsActive() || player->IsDead() || WaitingForMap() || action.epoch != mEpoch) continue;
+        if(!player->IsActive() || player->IsDead() || WaitingForMap() || SharedIntroView() || action.epoch != mEpoch) continue;
         if(action.action == online::PlayerAction::UseInventory || action.action == online::PlayerAction::CombineInventory) {
             gpBase->mpInventory->ApplyNetworkItemAction(player, action.item, action.secondItem, action.action == online::PlayerAction::CombineInventory);
             continue;
@@ -661,13 +686,13 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
     return true;
 }
 void cLuxNetwork::SendLocalAction(online::PlayerAction action, bool pressed) {
-    if(!IsClientReplica() || !mReceivedSnapshot || !mEpoch || !mBaselineApplied) return;
+    if(!IsClientReplica() || !mReceivedSnapshot || !mEpoch || !mBaselineApplied || mClientSharedIntro) return;
     if(mClientDead && pressed) return;
     online::ActionRequest request; request.epoch = mEpoch; request.sequence = ++mActionSequence;
     request.action = action; request.pressed = pressed; mSession.SendAction(request);
 }
 void cLuxNetwork::SendInventoryAction(online::PlayerAction action, const std::string& item, const std::string& secondItem) {
-    if(!IsClientReplica() || !mReceivedSnapshot || !mBaselineApplied) return;
+    if(!IsClientReplica() || !mReceivedSnapshot || !mBaselineApplied || mClientSharedIntro) return;
     if(mClientDead) return;
     online::ActionRequest request; request.epoch = mEpoch; request.sequence = ++mActionSequence;
     request.action = action; request.pressed = true; request.item = item; request.secondItem = secondItem; mSession.SendAction(request);
@@ -688,7 +713,7 @@ void cLuxNetwork::MusicChanged(int priority, float fadeTime) {
 bool cLuxNetwork::WaitingForMap() const {
     if(mRecovering || mInputLeasePaused) return true;
     return mSession.GetRole() == online::Role::Host && mSession.Connected() &&
-        mMapAnnounced && !mSession.IsMapReady(mEpoch);
+        mMapAnnounced && !mSession.IsWorldApplied(mEpoch);
 }
 bool cLuxNetwork::Host(uint16_t port) {
     ++mCheckpointContext;
@@ -725,7 +750,7 @@ void cLuxNetwork::Disconnect(bool menuHandlesReset) {
         if(mLastRole == online::Role::Client && !mConnectAddress.empty())
             gpBase->mpMainConfig->SetString("Online","LastAddress",mConnectAddress);
     }
-    ++mCheckpointContext; mSession.CloseVoluntarily(); mRecovering = mEverConnected = false;
+    ++mCheckpointContext; mSession.CloseVoluntarily(); mRecovering = mEverConnected = mClientSharedIntro = false;
     mInputLeaseSeen = mInputLeasePaused = false; mPrediction.Clear();
     if(menuHandlesReset) mWasClient = mHadClientConnection = false;
 }
@@ -773,6 +798,10 @@ void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
     }
     gpBase->mpEngine->GetUpdater()->SetContainer("Default");
     gpBase->mpInputHandler->ChangeState(eLuxInputState_Game);
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_CAMPAIGN_START")) {
+        NetLog("[NET/TEST] Simulating six-second synchronous client map load");
+        std::this_thread::sleep_for(std::chrono::seconds(6));
+    }
     const size_t slash = state.file.find_last_of('/');
     if(!gpBase->mpMapHandler->GetCurrentMap()) {
         gpBase->StartGame(state.file.substr(slash + 1), state.file.substr(0, slash + 1), "");
@@ -794,13 +823,13 @@ void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
     gpBase->mpMusicHandler->Reset();
     gpBase->mpEngine->GetSound()->GetMusicHandler()->Stop(1000);
     mSnapshots.clear(); mReceivedSnapshot = false; mLastSnapshotAt = {};
-    mHasClientLife = false; mClientDead = false;
+    mHasClientLife = false; mClientDead = mClientSharedIntro = false;
     mPendingLookYaw = mPendingLookPitch = 0; mClientObjectLook = false;
     map->GetWorld()->SetPhysicsSimulationEnabled(false);
     // Match the host's literal OnEnter preloads during the loading phase, before
     // announcing readiness, so first-use effects need less disk/decoder work.
     PreloadReplicaAssets(state.file);
-    mSession.SendMapReady(mEpoch);
+    if(!mSession.SendMapReady(mEpoch)) { NetLog("[NET/MAP] Cannot send map readiness; closing session"); mSession.Stop(); return; }
     NetLog("[NET/MAP] Replica loaded epoch=" + std::to_string(mEpoch) + " file=" + state.file);
 }
 void cLuxNetwork::ApplyReplica(cLuxPlayer* player, const online::PlayerState& state, bool localView) {
@@ -812,7 +841,7 @@ void cLuxNetwork::ApplyReplica(cLuxPlayer* player, const online::PlayerState& st
     if(player->GetAvatar()) player->GetAvatar()->SetNetworkVelocity(step > 0 && displacement.Length() < 5 ? displacement / step : cVector3f(0));
     body->SetActiveSize((state.flags & 1) ? 1 : 0);
     body->SetFeetPosition(position);
-    if(localView) { mClientObjectLook = (state.flags & 32) != 0; mClientScriptLook = (state.flags & 16) != 0; }
+    if(localView) { mClientObjectLook = (state.flags & 32) != 0; mClientScriptLook = (state.flags & 80) != 0; }
     const bool localLook = localView && (state.flags & 4) && !(state.flags & 48);
     body->SetYaw(localLook ? player->GetCamera()->GetYaw() : state.yaw / 1000.0f);
     if(!localLook) {
@@ -1009,7 +1038,14 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         online::PlayerState local = mSnapshots.back().state.players[1];
         if(mClientDead) local = mClientLife.players[1];
         auto* body = gpBase->mpPlayer->GetCharacterBody();
-        if(body && mBaselineApplied) {
+        if(mBaselineApplied && mReceivedSnapshot && mAppliedInventory && mAppliedJournal &&
+            mSession.IsWorldReady(mEpoch) && !mSession.IsWorldApplied(mEpoch)) {
+            if(!mSession.SendWorldApplied(mEpoch)) { NetLog("[NET/MAP] Cannot confirm applied world; closing session"); mSession.Stop(); return; }
+            NetLog("[NET/MAP] Full replica world acknowledged epoch=" + std::to_string(mEpoch));
+        }
+        mClientSharedIntro = (local.flags & 64) != 0;
+        if(mClientSharedIntro) mPrediction.Clear();
+        if(body && mBaselineApplied && !mClientSharedIntro) {
             const auto predictionStart = std::chrono::steady_clock::now();
             online::PredictionCollisionCache collisionCache;
             auto predicted = mPrediction.ReconcileSmoothed(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,[&](online::PredictedPosition from, online::PredictedPosition to) {
@@ -1051,6 +1087,17 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             NetLog("[NET/TEST] Reliable snapshot backups applied without life reset");
         }
         ApplyReplica(gpBase->mpPlayer2, interpolated.players[0], false);
+        if(mClientSharedIntro) {
+            // The original intro belongs to Daniel's camera. Keep the remote
+            // player's body separate, but share the scripted view until wake-up.
+            auto* camera = gpBase->mpPlayer->GetCamera();
+            auto* original = gpBase->mpPlayer2->GetCamera();
+            camera->SetPosition(original->GetPosition()); camera->SetYaw(original->GetYaw()); camera->SetPitch(original->GetPitch());
+            camera->SetRoll(original->GetRoll()); camera->SetFOV(original->GetFOV()); camera->SetAspect(original->GetAspect());
+            if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_CAMPAIGN_START") && !mIntroCameraTestObserved) {
+                mIntroCameraTestObserved = true; NetLog("[NET/TEST] Client shares original intro camera with host; companion avatars suppressed");
+            }
+        }
         if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) {
             const float elapsed = std::chrono::duration<float>(now - mSmokeStart).count();
             if(!mTestLanternRequested && elapsed > 5 && mBaselineApplied && mAppliedInventory &&
@@ -1115,7 +1162,13 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         NetLog("[NET/MAP] Announced epoch=" + std::to_string(mEpoch) + " file=" + state.file);
     }
     map->GetWorld()->SetPhysicsSimulationEnabled(!WaitingForMap());
-    if(WaitingForMap()) {
+    // Native scripts/physics wait for application of the full client world.
+    // Replication must continue between MapReady and WorldApplied, otherwise
+    // the baseline needed to release that barrier would never be sent.
+    if(!mSession.IsWorldApplied(mEpoch) && now-mMapWaitStart > std::chrono::seconds(30)) {
+        NetLog("[NET/MAP] Client world readiness timed out"); mSession.Stop(); return;
+    }
+    if(mRecovering || mInputLeasePaused || !mSession.IsMapReady(mEpoch)) {
         if(!mSession.IsMapReady(mEpoch) && now - mMapWaitStart > std::chrono::seconds(30)) {
             NetLog("[NET/MAP] Client map readiness timed out"); mSession.Stop();
         }
@@ -1243,6 +1296,12 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             (player->GetHelperLantern()->IsActive() ? 2 : 0) | (player->IsActive() ? 4 : 0) | (player->IsDead() ? 8 : 0) |
             (player->GetHelperLookAt()->IsActive() || player->GetLookSpeedMul() <= 0 ? 16 : 0) |
             (player->NetworkObjectControlsLook() ? 32 : 0);
+    }
+    if(map->GetName() == "00_rainy_hall") {
+        const auto* intro = map->GetVar("IntroSequenceState");
+        const auto* wake = map->GetVar("BlackoutStep");
+        const bool sharedIntro = intro->msVal.empty() ? !gpBase->mpPlayer->IsActive() : cString::ToInt(wake->msVal.c_str(),0) < 18;
+        if(sharedIntro) snapshot.players[1].flags |= 64;
     }
     if(!mHasHostLife || ((snapshot.players[0].flags ^ mHostLife.players[0].flags) & 12) ||
         ((snapshot.players[1].flags ^ mHostLife.players[1].flags) & 12)) {

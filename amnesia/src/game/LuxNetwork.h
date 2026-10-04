@@ -27,6 +27,7 @@ public:
     bool UpdateQADrive(float timeStep);
     bool IsClientReplica() const { return mSession.GetRole() == online::Role::Client; }
     bool ClientObjectControlsLook() const { return IsClientReplica() && mClientObjectLook; }
+    bool SharedIntroView() const { return IsClientReplica() ? mClientSharedIntro : mSession.GetRole() == online::Role::Host && mHasHostLife && (mHostLife.players[1].flags & 64); }
     bool OwnsPlayerInput(const cLuxPlayer* player) const { return mSession.GetRole() == online::Role::Host && mRemotePlayer2 && player == mRemotePlayer2; }
     bool RemoteRotateHeld() const { return mRemoteRotate; }
     bool HasNetworkPlayers() const { return mSession.GetRole() != online::Role::Offline && OwnsRemotePlayer2(); }
@@ -65,6 +66,7 @@ private:
     int mPendingLookYaw = 0, mPendingLookPitch = 0;
     uint32_t mAppliedLookSequence = 0;
     bool mHasLookSequence = false, mClientObjectLook = false, mClientScriptLook = false;
+    bool mClientSharedIntro = false, mIntroCameraTestObserved = false;
     online::MovementPrediction mPrediction;
     bool mPredictionTestObserved = false, mPredictionSmoothTestObserved = false;
     bool mRemoteRotate = false;
@@ -163,6 +165,8 @@ private:
     unsigned mMenuTestStage = 0, mMenuTestExits = 0;
     std::chrono::steady_clock::time_point mMenuTestAt;
     void UpdateMenuTest();
+    unsigned mCampaignStartTestStage = 0;
+    void UpdateCampaignStartTest();
     void UpdateMediaTest(cLuxMap* map, float elapsed);
     int mNextMediaID = 1000000000; // give unsaved runtime objects stable engine IDs
     bool ReplicateMedia(cLuxMap* map);
