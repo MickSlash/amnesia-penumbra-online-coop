@@ -139,11 +139,20 @@ try {
                   'Global sound volume fade applied on client', 'Global sound speed fade applied on client', 'Screen shake applied on client',
                   'Remote host lantern emits light on client', 'Both lanterns emit light with independent oil on client',
                   'Independent lantern toggles applied on client', 'Injected stale local lantern permissions on client',
-                  'Client held lantern follows moving camera with stale local permissions')
+                  'Client held lantern follows moving camera with stale local permissions',
+                  'Lantern save/load baseline and repeated snapshots stayed silent',
+                  'Client lantern on/off/on produced exactly one audible event per toggle',
+                  'Lantern audio one-shot counts verified on=2 off=3 including depletion and empty attempt')
             }
             foreach ($marker in $mediaMarkers) { if (!$log.Contains($marker)) { throw "Missing $role media proof: $marker" } }
             if ($log.Contains('FAILED') -or $log.Contains('closing session')) { throw "$role media integration failed" }
-            Write-Output "PASS: $role sound/particle lifecycle, music, effects, saved media and independent lanterns"
+            if($role -eq 'client') {
+                $audioEvents = [regex]::Matches($log, 'Owner lantern audio channel playing=1 file=ui_lantern_(on|off) target=2')
+                if($audioEvents.Count -ne 5) { throw "Expected exactly five audible owner lantern events; got $($audioEvents.Count)" }
+            } elseif(!$log.Contains('Requested authoritative remote lantern oil depletion')) {
+                throw 'Missing host lantern depletion fixture'
+            }
+            Write-Output "PASS: $role sound/particle lifecycle, music, effects, saved media, independent lanterns and owner audio"
         }
         if ($MapOnly) {
             if($VisibilityProps) {

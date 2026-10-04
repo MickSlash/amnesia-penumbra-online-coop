@@ -2429,6 +2429,28 @@ void cLuxPlayerLantern::Reset()
 //-----------------------------------------------------------------------
 
 
+void cLuxPlayerLantern::PlayOwnerSound(const tString& asName)
+{
+    if(asName.empty()) return;
+    auto* network = gpBase->mpNetwork;
+    // Replica snapshots and restored state are silent. The authoritative
+    // owner gets one reliable GUI event for an actual toggle or empty tank.
+    if(network && network->IsClientReplica()) return;
+    if(network && network->OwnsPlayerInput(mpPlayer))
+    {
+        online::Presentation event;
+        event.kind = online::PresentationKind::GuiSound;
+        event.target = 2;
+        event.text[0] = asName;
+        event.values[0] = 1000;
+        network->QueuePresentation(event);
+        return;
+    }
+    gpBase->mpHelpFuncs->PlayGuiSoundData(asName, eSoundEntryType_Gui);
+}
+
+//-----------------------------------------------------------------------
+
 void cLuxPlayerLantern::Update(float afTimeStep)
 {
 	if(mbActive ==false && mfAlpha <=0)
@@ -2468,8 +2490,8 @@ void cLuxPlayerLantern::Update(float afTimeStep)
 		if(fOil <=0)
 		{
 			fOil = 0;
-			gpBase->mpHelpFuncs->PlayGuiSoundData(msOutOfOilSound, eSoundEntryType_Gui);
-			SetActive(false, true);
+			PlayOwnerSound(msOutOfOilSound);
+			SetActive(false, false, false, false); // Automatic depletion must turn off even in a scripted state.
 		}
 		mpPlayer->SetLampOil(fOil);
 	}
@@ -2587,7 +2609,7 @@ void cLuxPlayerLantern::SetActive(bool abX, bool abUseEffects, bool abCheckForOi
 		if(abUseEffects)
 		{
 			gpBase->mpHintHandler->Add("LanternNoOil", kTranslate("Hints", "LanternNoOil"), 0);
-			gpBase->mpHelpFuncs->PlayGuiSoundData(msOutOfOilSound, eSoundEntryType_Gui);
+			PlayOwnerSound(msOutOfOilSound);
 		}
 		return;
 	}
@@ -2598,7 +2620,7 @@ void cLuxPlayerLantern::SetActive(bool abX, bool abUseEffects, bool abCheckForOi
 	mbActive = abX;
 	if(mbActive)
 	{
-		if(abUseEffects) gpBase->mpHelpFuncs->PlayGuiSoundData(msTurnOnSound, eSoundEntryType_Gui);
+		if(abUseEffects) PlayOwnerSound(msTurnOnSound);
 
 		// For P2, set alpha immediately since P2's update may not fade correctly
 		if(mpPlayer->IsPlayer2())
@@ -2612,7 +2634,7 @@ void cLuxPlayerLantern::SetActive(bool abX, bool abUseEffects, bool abCheckForOi
 	}
 	else
 	{
-		if(abUseEffects) gpBase->mpHelpFuncs->PlayGuiSoundData(msTurnOffSound, eSoundEntryType_Gui);
+		if(abUseEffects) PlayOwnerSound(msTurnOffSound);
 	}
 
 	/////////////////

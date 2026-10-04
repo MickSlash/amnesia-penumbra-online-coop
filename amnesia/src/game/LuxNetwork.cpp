@@ -199,6 +199,23 @@ void cLuxNetwork::Update(float timeStep) {
     gpBase->mpEngine->SetWaitIfAppOutOfFocus(
         mSession.GetRole() == online::Role::Offline && !mSmokeSeconds ? mOriginalFocusWait : false);
     mSession.Poll();
+    if(!mTestLanternSounds.empty()) {
+        // HPL starts a newly created GUI entry in the following sound update.
+        // Validate its pointer and ID before inspecting that live channel.
+        auto* handler = gpBase->mpEngine->GetSound()->GetSoundHandler();
+        for(auto it = mTestLanternSounds.begin(); it != mTestLanternSounds.end();) {
+            const bool valid = handler->IsValid(it->entry, it->id);
+            auto* channel = valid ? it->entry->GetChannel() : NULL;
+            const bool playing = channel && channel->IsPlaying() && channel->GetVolume() > 0;
+            if(playing) {
+                NetLog("[NET/TEST] Owner lantern audio channel playing=1 file=" + it->asset + " target=2");
+                it = mTestLanternSounds.erase(it);
+            } else if(!valid || std::chrono::steady_clock::now()-it->queuedAt > std::chrono::seconds(1)) {
+                NetLog("[NET/TEST] Owner lantern audio channel FAILED file=" + it->asset);
+                it = mTestLanternSounds.erase(it);
+            } else ++it;
+        }
+    }
     if(IsClientReplica() && mSession.PartnerLeftVoluntarily()) {
         NetLog("[NET/CONNECTION] Host left voluntarily; returning to main menu"); Disconnect();
     }
@@ -1156,6 +1173,34 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                 !gpBase->mpPlayer2->GetHelperLantern()->IsActive() && lit(gpBase->mpPlayer)) {
                 mTestLanternIndependentLogged = true; NetLog("[NET/TEST] Independent lantern toggles applied on client");
             }
+            if(!mTestLanternAudioBaseline && mEpoch == 2 && mBaselineApplied && elapsed > 11 &&
+                mTestLanternOnSounds == 1 && mTestLanternOffSounds == 0) {
+                mTestLanternAudioBaseline = true;
+                NetLog("[NET/TEST] Lantern save/load baseline and repeated snapshots stayed silent");
+            }
+            if(!mTestLanternOffRequested && mTestLanternAudioBaseline && mTestLanternIndependentLogged) {
+                SendLocalAction(online::PlayerAction::Lantern, true); SendLocalAction(online::PlayerAction::Lantern, false);
+                mTestLanternOffRequested = true;
+            }
+            if(mTestLanternOffRequested && !mTestLanternOnRequested && !lit(gpBase->mpPlayer) && mTestLanternOffSounds == 1) {
+                SendLocalAction(online::PlayerAction::Lantern, true); SendLocalAction(online::PlayerAction::Lantern, false);
+                mTestLanternOnRequested = true;
+            }
+            if(!mTestLanternAudioToggles && mTestLanternOnRequested && lit(gpBase->mpPlayer) &&
+                mTestLanternOnSounds == 2 && mTestLanternOffSounds == 1) {
+                mTestLanternAudioToggles = true;
+                NetLog("[NET/TEST] Client lantern on/off/on produced exactly one audible event per toggle");
+            }
+            if(!mTestLanternEmptyRequested && mTestLanternAudioToggles && elapsed > 43 &&
+                gpBase->mpPlayer->GetLampOil() == 0 && !lit(gpBase->mpPlayer) && mTestLanternOffSounds == 2) {
+                SendLocalAction(online::PlayerAction::Lantern, true); SendLocalAction(online::PlayerAction::Lantern, false);
+                mTestLanternEmptyRequested = true;
+            }
+            if(!mTestLanternAudioCounts && mTestLanternEmptyRequested && elapsed > 50 &&
+                mTestLanternOnSounds == 2 && mTestLanternOffSounds == 3 && !lit(gpBase->mpPlayer)) {
+                mTestLanternAudioCounts = true;
+                NetLog("[NET/TEST] Lantern audio one-shot counts verified on=2 off=3 including depletion and empty attempt");
+            }
         }
         if(mSmokeSeconds && !mClientMoved && gpBase->mpPlayer->GetCharacterBody()) {
             cVector3f delta = gpBase->mpPlayer->GetCharacterBody()->GetFeetPosition() - mReplicaInitialFeet;
@@ -1790,6 +1835,14 @@ void cLuxNetwork::ApplyMedia(cLuxMap* map, const online::MediaState& s) {
     }
 }
 void cLuxNetwork::UpdateMediaTest(cLuxMap* map, float elapsed) {
+    if(!mTestLanternDrainRequested && mTestRevived && elapsed > 40) {
+        // Revival can reset lantern state. Prepare a silent authoritative
+        // fixture, then let the normal oil-drain update turn it off.
+        gpBase->mpPlayer2->GetHelperLantern()->SetActive(true, false, false, false);
+        gpBase->mpPlayer2->SetLampOil(0.001f);
+        mTestLanternDrainRequested = true;
+        NetLog("[NET/TEST] Requested authoritative remote lantern oil depletion");
+    }
     cWorld* world = map->GetWorld();
     if(!mTestMediaSpawned && mBaselineSent && elapsed > 3) {
         // Reset must clear even a non-finite fade speed before checkpoint capture.
@@ -1881,12 +1934,22 @@ void cLuxNetwork::ReplicateLights(cLuxMap* map) {
 }
 void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& event) {
     switch(event.kind) {
-    case online::PresentationKind::GuiSound:
-        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) NetLog("[NET/TEST] GUI sound event applied on client");
+    case online::PresentationKind::GuiSound: {
+        cLuxSoundExtraData sound = {};
         if(cString::GetFileExt(event.text[0]).empty() || cString::GetFileExt(event.text[0]) == "snt")
-            gpBase->mpHelpFuncs->PlayGuiSoundData(event.text[0], eSoundEntryType_Gui, event.values[0] / 1000.0f);
-        else gpBase->mpEngine->GetSound()->GetSoundHandler()->PlayGui(event.text[0], false, event.values[0] / 1000.0f);
+            gpBase->mpHelpFuncs->PlayGuiSoundData(event.text[0], eSoundEntryType_Gui, event.values[0] / 1000.0f,
+                eSoundEntityType_Main, true, &sound);
+        else sound.mpSoundEntry = gpBase->mpEngine->GetSound()->GetSoundHandler()->PlayGui(event.text[0], false, event.values[0] / 1000.0f);
+        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) {
+            NetLog("[NET/TEST] GUI sound event applied on client");
+            if(event.text[0] == "ui_lantern_on" || event.text[0] == "ui_lantern_off") {
+                if(event.target != 2 || !sound.mpSoundEntry) NetLog("[NET/TEST] Owner lantern audio channel FAILED");
+                else mTestLanternSounds.push_back({sound.mpSoundEntry, sound.mpSoundEntry->GetId(), event.text[0], std::chrono::steady_clock::now()});
+                if(event.text[0] == "ui_lantern_on") ++mTestLanternOnSounds; else ++mTestLanternOffSounds;
+            }
+        }
         break;
+    }
     case online::PresentationKind::SoundFade: {
         auto it = map->GetWorld()->GetSoundEntityIterator();
         while(it.HasNext()) {

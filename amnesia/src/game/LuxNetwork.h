@@ -179,6 +179,17 @@ private:
     bool mTestMediaSpawned = false, mTestMediaChanged = false, mTestMediaRemoved = false;
     bool mTestMediaRestoreLogged = false, mTestLanternRemoteLogged = false, mTestLanternLocalLogged = false;
     bool mTestLanternRequested = false, mTestLanternIndependentLogged = false;
+    unsigned mTestLanternOnSounds = 0, mTestLanternOffSounds = 0;
+    bool mTestLanternAudioBaseline = false, mTestLanternOffRequested = false, mTestLanternOnRequested = false;
+    bool mTestLanternAudioToggles = false, mTestLanternDrainRequested = false, mTestLanternEmptyRequested = false;
+    bool mTestLanternAudioCounts = false;
+    struct TestLanternSound {
+        cSoundEntry* entry;
+        int id;
+        std::string asset;
+        std::chrono::steady_clock::time_point queuedAt;
+    };
+    std::deque<TestLanternSound> mTestLanternSounds;
     bool mTestLanternDisabled = false, mTestLanternHandsLogged = false, mTestSnapshotBackupLogged = false;
     online::Role mLastRole = online::Role::Offline;
     bool mClearImage = true;

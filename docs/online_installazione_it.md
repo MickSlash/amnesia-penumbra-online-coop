@@ -99,6 +99,8 @@ Inventario e progressione sono condivisi. Nelle nuove campagne online entrambi p
 
 Il protocollo 10 trasferisce le posizioni dei prop in movimento a 20 Hz senza attendere le ritrasmissioni del mondo e interpola i corpi sul client su 50 ms. Le posizioni vecchie vengono scartate; la posizione finale, creazione, distruzione e cambi di proprietà restano affidabili. Porte e casse restano simulate dall'host: l'interazione conserva il tempo di andata e ritorno della rete. Aggiornare entrambi i PC; protocollo 9 e 10 non sono compatibili.
 
+Questa build del protocollo 10 corregge anche il suono della lanterna del client: accensione, spegnimento e serbatoio vuoto vengono riprodotti sul PC del proprietario, senza click ripetuti dagli snapshot o dai caricamenti. Estrarre la nuova build su entrambi i PC, poiché l'invio dei suoni viene corretto sull'host. Prove in `docs/qa_audio_lanterna_2026-10-04.md` dentro `source.zip`.
+
 ## Limiti ancora aperti
 
 - Campagna completa, puzzle, inseguimenti, finali e Hard da verificare su due PC. Le prove coprono integrazioni e alcuni livelli, non un'intera partita.

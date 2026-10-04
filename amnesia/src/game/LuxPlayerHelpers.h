@@ -480,6 +480,8 @@ public:
 	iLight* GetLight(){ return mpLight;}
 
 private:
+	void PlayOwnerSound(const tString& asName);
+
 	cColor mDefaultColor;
 	float mfRadius;
 	tString msGobo;
