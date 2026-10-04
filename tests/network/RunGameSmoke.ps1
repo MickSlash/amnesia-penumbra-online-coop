@@ -8,6 +8,7 @@ param(
     [switch]$Media,
     [switch]$Prediction,
     [switch]$SnapshotBlackout,
+    [switch]$OnlineMenu,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
@@ -17,10 +18,11 @@ $ErrorActionPreference = 'Stop'
 if ($Media) { $Campaign = $true }
 if ($Campaign) { $Replication = $true }
 if ($Enemy) { $MapOnly = $true }
+if ($OnlineMenu) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $repoPath = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
-$runPath = Join-Path $repoPath $(if ($Enemy) { 'build/enemy-test' } elseif ($MapOnly) { "build/visual-qa/$($StartMap.Replace('.map',''))" } elseif ($Replication) { 'build/player-replication' } else { 'build/game-smoke' })
+$runPath = Join-Path $repoPath $(if ($OnlineMenu) { 'build/online-menu' } elseif ($Enemy) { 'build/enemy-test' } elseif ($MapOnly) { "build/visual-qa/$($StartMap.Replace('.map',''))" } elseif ($Replication) { 'build/player-replication' } else { 'build/game-smoke' })
 New-Item -ItemType Directory -Force -Path $runPath | Out-Null
 $runId = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') + '_' + [Guid]::NewGuid().ToString('N').Substring(0,8)
 $settingsPath = Join-Path $runPath 'settings.cfg'
@@ -34,7 +36,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -53,6 +55,7 @@ try {
         $initPath = Join-Path $runPath "$role-init.cfg"
         $init | Set-Content -LiteralPath $initPath -Encoding utf8
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ROLE', $role)
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_MENU', $(if ($OnlineMenu) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DRIVE_FILE', $null)
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$(if ($role -eq 'client' -and $ClientPort -gt 0) { $ClientPort } else { $Port }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ADDRESS', '127.0.0.1')
@@ -87,6 +90,19 @@ try {
             throw "$role did not finish a handshake and clean smoke exit: $($profiles[$role])"
         }
         Write-Output "PASS: $role game handshake and clean exit ($($profiles[$role]))"
+        if($OnlineMenu) {
+            foreach($marker in @('Clear image checkbox suppresses and restores original blur without changing graphics preferences','Online menu exit/reconnect regression completed')) {
+                if(!$log.Contains($marker)) { throw "Missing $role online menu proof: $marker" }
+            }
+            if($log.Contains('Online menu FAILED:')) { throw "$role online menu failed" }
+            if(([regex]::Matches($log,'Protocol handshake accepted')).Count -lt 3) { throw "$role did not complete both reconnects" }
+            if($role -eq 'client') {
+                foreach($marker in @('Exit stays at main menu with transport stopped','Save and exit stays at main menu with transport stopped')) {
+                    if(!$log.Contains($marker)) { throw "Missing client exit proof: $marker" }
+                }
+            }
+            Write-Output "PASS: $role clear image, deliberate exits and reconnect button"
+        }
         if($SnapshotBlackout) {
             $proof = if($role -eq 'host') { 'Ordinary snapshots suppressed for three seconds' } else { 'Reliable snapshot backups applied without life reset' }
             if(!$log.Contains($proof)) { throw "Missing $role snapshot blackout proof: $proof" }

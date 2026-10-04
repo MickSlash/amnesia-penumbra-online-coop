@@ -197,7 +197,16 @@ static void BulkFlowControlTest() {
     Check(received==sent && !client.ReadLife(read), "backpressure retains accepted bulk data and does not reset life");
     Check(host.SendEntity(entity), "deferred bulk resumes after acknowledgement"); pump();
     Check(client.ReadEntity(entity) && host.Connected() && client.Connected(), "bulk retry delivered with live session");
+    client.CloseVoluntarily();
+    Check(client.GetRole()==Role::Offline && !client.Connected(), "voluntary exit is immediately offline without blocking for ACK");
+    pump();
+    Check(host.PartnerLeftVoluntarily() && !host.Connected() && host.GetRole()==Role::Host, "host distinguishes voluntary departure and keeps listener");
+    Check(client.StartClient("127.0.0.1",27044,true), "manual reconnect after deliberate close"); pump();
+    Check(client.Connected() && host.Connected() && !host.PartnerLeftVoluntarily(), "manual reconnect clears departure marker");
+    host.CloseVoluntarily(); pump();
+    Check(client.PartnerLeftVoluntarily() && !client.Connected(), "host voluntary exit is signaled to client");
     std::cout << "PASS: bounded bulk backlog, control reservation and retry after drain\n";
+    std::cout << "PASS: nonblocking voluntary close, peer reason and subsequent manual reconnect\n";
 }
 static void PacketThrottleTest() {
     Check(enet_initialize()==0, "throttle test initialization");

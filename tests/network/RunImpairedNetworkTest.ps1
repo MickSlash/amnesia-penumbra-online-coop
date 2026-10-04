@@ -7,14 +7,16 @@ param(
     [switch]$Media,
     [switch]$Prediction,
     [switch]$SnapshotBlackout,
+    [switch]$OnlineMenu,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$MapOnly,
     [ValidateRange(576,65507)][int]$MaxDatagramBytes = 65507,
     [string]$Executable = "$PSScriptRoot/../../amnesia/src/game/x64/Release/Lux.exe"
 )
 $ErrorActionPreference = 'Stop'
+if($OnlineMenu) { $MapOnly = $true }
 $run = Join-Path (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path 'build/impaired-network'
-$gameLogs = Join-Path "$PSScriptRoot/../../build" $(if($MapOnly) { "visual-qa/$($StartMap.Replace('.map',''))" } else { 'player-replication' })
+$gameLogs = Join-Path "$PSScriptRoot/../../build" $(if($OnlineMenu) { 'online-menu' } elseif($MapOnly) { "visual-qa/$($StartMap.Replace('.map',''))" } else { 'player-replication' })
 New-Item -ItemType Directory -Force -Path $run | Out-Null
 $relaySource = @'
 using System;
@@ -89,7 +91,7 @@ $relay = Start-Process -FilePath $shellPath -WindowStyle Hidden -PassThru -Argum
 try {
     Start-Sleep -Seconds 2
     if($relay.HasExited) { throw 'UDP relay failed to start; inspect build/impaired-network/relay.err' }
-    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Executable $Executable -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly) -Media:$Media -Prediction:$Prediction -SnapshotBlackout:$SnapshotBlackout -StartMap $StartMap -MapOnly:$MapOnly
+    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Executable $Executable -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly) -Media:$Media -Prediction:$Prediction -SnapshotBlackout:$SnapshotBlackout -OnlineMenu:$OnlineMenu -StartMap $StartMap -MapOnly:$MapOnly
     if (!$relay.WaitForExit(15000)) { throw 'UDP relay did not exit on its timer' }
     $relay.Refresh()
     if($relay.ExitCode -ne 0) { throw 'UDP relay failed; inspect relay.err' }

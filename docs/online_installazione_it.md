@@ -1,6 +1,6 @@
 # Installare e giocare ad Amnesia Online Co-op
 
-Build sperimentale Windows x64, protocollo 6, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono in `docs/qa_recovery_2026-10-03.md` dentro `source.zip`.
+Build sperimentale Windows x64, protocollo 7, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono in `docs/qa_recovery_2026-10-03.md` dentro `source.zip`.
 
 Questa build corregge anche la camminata continua del client dopo il rilascio dei tasti: aggiornare **entrambi**, incluso l'host. La prova dell'arresto avanti/laterale è documentata in `docs/qa_movimento_2026-10-03.md` dentro `source.zip`.
 
@@ -11,6 +11,18 @@ La versione 6 corregge la posizione della lanterna in prima persona sul client e
 Corregge anche il throttle ENet che, dopo picchi degli ACK, poteva scartare tutti gli snapshot ordinari pur con ping stabile. Il traffico voluminoso mantiene il controllo della congestione. I campi di fade degli effetti visivi vengono inizializzati e azzerati per evitare checkpoint non validi.
 
 ## Avvio senza PowerShell
+
+La versione 7 aggiunge **Riconnettiti** e **Immagine nitida** in **Co-op online**.
+Le prove sono in `docs/qa_menu_blur_2026-10-04.md` dentro `source.zip`.
+Riconnettiti riprova l'ultima sessione con lo stesso ruolo e indirizzo: il client
+torna nell'host ancora aperto; un host senza mappa riapre la lobby e sceglie poi
+Continua salvataggio. Non usa gli eventuali nuovi valori digitati nei campi;
+per un altro IP usare Connetti.
+
+Immagine nitida è attiva di default su ciascun PC e toglie dalla visualizzazione
+scie ImageTrail e blur radiale, anche durante l'intro. Gli script e gli effetti
+continuano ad aggiornarsi. Disattivarla restituisce gli effetti originali;
+non modifica le preferenze grafiche della partita singola.
 
 1. Estrarre **tutto lo ZIP** in una cartella propria. Conservare `AmnesiaCoop.exe`, `bin` e gli altri file insieme.
 2. Fare doppio clic su **AmnesiaCoop.exe**. Scegliere, se necessario, la cartella dell'installazione originale contenente `config`, `maps` ed `entities`. Con la copia Steam, aprire Steam con l'account che possiede il gioco e lasciare selezionato **Mostra Amnesia su Steam**. Premere **Avvia Amnesia co-op**. Il launcher ricorda il percorso.
@@ -44,6 +56,14 @@ Questa build limita i datagrammi ENet a **1200 byte** per lasciare spazio all'in
 L'host salva campagna e stato di entrambi sotto `Documenti\Amnesia\AmnesiaOnlineCoop_Host\online`. Il launcher grafico usa questa cartella su ciascun PC, anche come client, per permettere il cambio di autorità. I vecchi profili dello script restano nella propria sottocartella: selezionarli con **Change Profile** per i rispettivi salvataggi.
 
 Per una partita chiusa normalmente, ricollegarsi dalla lobby, premere Pronto su entrambi e far scegliere Continua all'host. Il journal trasferisce note, ordine dei diari e obiettivi attivi/completati anche al join e al caricamento, senza riaprire automaticamente documenti già raccolti.
+
+**Esci** e **Salva ed esci** terminano la sessione volontariamente e riportano
+al menu principale: non riaprono la mappa. Salva ed esci esegue l'autosalvataggio
+se sei l'host; il client non salva una copia locale incompleta del mondo.
+Se esce il client, l'host tiene la campagna in pausa e aspetta che si ricolleghi,
+senza migrazione automatica. Se esce l'host, il client torna al menu principale.
+Le cadute involontarie conservano il recupero automatico già implementato.
+Aggiornare entrambi i PC: il protocollo 7 distingue questi casi.
 
 La perdita di connessione mette la campagna in pausa e avvia tentativi automatici di riconnessione. Se l'host resta assente e il client ha un checkpoint completo e validato, il client può diventare host dopo circa 12 secondi. Ripristina il salvataggio nativo, inverte correttamente i giocatori, esegue un autosalvataggio e **aspetta il partner**. Non prosegue da solo.
 

@@ -64,7 +64,7 @@ non esegue una seconda copia di AngelScript. Gli eventi di presentazione coprono
 solo i tipi elencati: questo non implica che ogni funzione script della campagna
 abbia già una replica. Una disconnessione conserva il mondo e P2, mette la campagna in pausa e avvia il recupero. Il client riprova lo stesso endpoint con identità persistente. Un checkpoint completo e validato consente di trasferire autorità e invertire i giocatori; il nuovo host aspetta il partner.
 
-## Protocollo versione 6
+## Protocollo versione 7
 
 ENet 1.3.18 incluso da sorgenti, licenza MIT conservata; mod GPLv3. Header AO,
 versione uint16 big-endian e tipo uint8; interi espliciti, nessuna struttura C++
@@ -199,6 +199,20 @@ sono nell'area del colpo. Oscurità, immobilità, accovacciamento e lanterna
 modificano il raggio di rilevamento separatamente per ciascun giocatore.
 
 ## Journal, prediction e recupero
+
+La chiusura volontaria usa il codice ENet `0x414f0001`. Il ruolo locale diventa
+subito Offline; Poll continua la consegna affidabile del disconnect in background
+per al massimo tre secondi, senza attesa sul thread. Il peer distingue l'uscita
+dal timeout: host in pausa sullo stesso listener quando esce il client, ritorno
+al menu del client quando esce l'host. La migrazione vale per le cadute involontarie.
+Il reset dei comandi Esci/Salva ed esci chiude prima la sessione; i salvataggi
+host vengono catturati prima di cessare l'autorità. Riconnettiti usa ruolo e
+endpoint precedenti con l'identità di ripresa conservata.
+
+Immagine nitida è una preferenza di presentazione online, attiva di default:
+alla fine di EffectHandler::Update disattiva soltanto il rendering di ImageTrail
+e RadialBlur. Non cambia Disabled, parametri, fade, script o configurazione
+grafica originale. Disattivandola ripristina gli effetti dai parametri correnti.
 
 Journal trasferisce fino a 512 voci e 60000 byte con revisione e map epoch. Note,
 diari ordinati per gruppo e obiettivi attivi/completati provengono dalla collezione

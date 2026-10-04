@@ -737,6 +737,7 @@ void cLuxMainMenu::OnMenuExit()
 	case eLuxMainMenuExit_QuitToMenu:
 		{
 			gpBase->mpLoadScreenHandler->DrawMenuScreen();
+            if(gpBase->mpNetwork) gpBase->mpNetwork->Disconnect(true);
 
 			//Reset game
 			gpBase->mpEngine->GetUpdater()->BroadcastMessageToAll(eUpdateableMessage_Reset);
@@ -756,6 +757,8 @@ void cLuxMainMenu::OnMenuExit()
 
 			//Save
 			gpBase->mpSaveHandler->AutoSave();
+            // Capture the host save before ending authority; clients never save a replica.
+            if(gpBase->mpNetwork) gpBase->mpNetwork->Disconnect(true);
 
 			//Destroy map
 			cLuxMapHandler *mpMapHandler = gpBase->mpMapHandler;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "LuxNetwork.h"
+#include "LuxMainMenu.h"
 #include "LuxSteam.h"
 #include "LuxPlayer.h"
 #include "LuxMapHandler.h"
@@ -113,6 +114,9 @@ cLuxNetwork::~cLuxNetwork() {
         cImGuiConsole::UnregisterCommand(name);
 }
 void cLuxNetwork::OnStart() {
+    const auto lastRole = gpBase->mpMainConfig->GetString("Online","LastRole","");
+    mLastRole = lastRole == "host" ? online::Role::Host : lastRole == "client" ? online::Role::Client : online::Role::Offline;
+    mClearImage = gpBase->mpMainConfig->GetBool("Online","ClearImage",true);
     const tString savedIdentity = gpBase->mpMainConfig->GetString("Online","ResumeIdentity","");
     char* identityEnd = NULL; const uint64_t identity = std::strtoull(savedIdentity.c_str(),&identityEnd,10);
     if(!savedIdentity.empty() && identityEnd && !*identityEnd && identity) mSession.SetLocalIdentity(identity);
@@ -175,6 +179,9 @@ void cLuxNetwork::Update(float timeStep) {
     gpBase->mpEngine->SetWaitIfAppOutOfFocus(
         mSession.GetRole() == online::Role::Offline && !mSmokeSeconds ? mOriginalFocusWait : false);
     mSession.Poll();
+    if(IsClientReplica() && mSession.PartnerLeftVoluntarily()) {
+        NetLog("[NET/CONNECTION] Host left voluntarily; returning to main menu"); Disconnect();
+    }
     const auto connectionNow = std::chrono::steady_clock::now();
     online::PlayerInput freshInput;
     if(mSession.GetRole() == online::Role::Host && mSession.ReadInput(freshInput)) { mInputLeaseSeen = true; mInputLeaseAt = connectionNow; }
@@ -191,12 +198,13 @@ void cLuxNetwork::Update(float timeStep) {
         mEverConnected = true; mRecovering = false;
         mMigrationHost = false; mMigrationAttempted = false;
     } else if(mEverConnected && mSession.GetRole() != online::Role::Offline) {
+        if(mSession.PartnerLeftVoluntarily()) mInputLeaseSeen = mInputLeasePaused = false;
         if(!mRecovering) { mRecovering = true; mRecoveryStart = connectionNow; mRetryAt = connectionNow; NetLog("[NET/RECOVERY] Connection lost; campaign paused for recovery"); }
         if(IsClientReplica() && mSession.RetryAllowed() && !mSession.AttemptActive() && connectionNow >= mRetryAt) {
             mSession.StartClient(mConnectAddress, mConnectPort, true); mRetryAt = connectionNow + std::chrono::seconds(1);
         }
         const auto missing = connectionNow - mRecoveryStart;
-        if(!mMigrationHost && !mMigrationAttempted && mSession.RetryAllowed()) {
+        if(!mMigrationHost && !mMigrationAttempted && mSession.RetryAllowed() && !mSession.PartnerLeftVoluntarily()) {
             if(IsClientReplica() && missing >= std::chrono::seconds(12) && !mRecoveryCheckpoint.bytes.empty()) {
                 mMigrationAttempted = true;
                 if(!PromoteFromCheckpoint()) NetLog("[NET/RECOVERY] Promotion failed; campaign remains paused");
@@ -239,6 +247,7 @@ void cLuxNetwork::Update(float timeStep) {
         }
     }
     UpdateRecoveryTest();
+    UpdateMenuTest();
     UpdateCheckpoint(timeStep);
     if(IsClientReplica() && gpBase->mpEngine->GetUpdater()->GetCurrentContainerName() != "Default") {
         online::PlayerInput idle; auto* camera = gpBase->mpPlayer->GetCamera();
@@ -310,6 +319,86 @@ void cLuxNetwork::Update(float timeStep) {
 }
 bool cLuxNetwork::OwnsRemotePlayer2() const {
     return mRemotePlayer2 && mRemotePlayer2 == gpBase->mpPlayer2;
+}
+void cLuxNetwork::UpdateMenuTest() {
+    if(!mSmokeSeconds || !TestFlag("AMNESIA_NET_TEST_MENU") || mMenuTestStage >= 9) return;
+    const char* role = std::getenv("AMNESIA_NET_ROLE");
+    const bool client = role && std::string(role) == "client";
+    const auto now = std::chrono::steady_clock::now();
+    const float age = std::chrono::duration<float>(now-mMenuTestAt).count();
+    auto fail = [&](const char* reason) {
+        NetLog(std::string("[NET/TEST] Online menu FAILED: ")+reason);
+        mMenuTestStage = 99; gpBase->mpEngine->Exit();
+    };
+    auto* mapHandler = gpBase->mpMapHandler;
+    auto* menu = gpBase->mpMainMenu;
+    if(mMenuTestStage == 0) {
+        if(!mSession.Connected() || !mapHandler->MapIsLoaded() || !(client ? mBaselineApplied : mBaselineSent) ||
+            std::chrono::duration<float>(now-mSmokeStart).count() < 5 ||
+            (client ? mRecoveryCheckpoint.bytes.empty() : !mSession.CheckpointAcknowledged())) return;
+        gpBase->mpEffectHandler->GetImageTrail()->FadeTo(1.8f,100);
+        gpBase->mpEffectHandler->GetRadialBlur()->FadeTo(0.12f,100);
+        mMenuTestStage = 1; mMenuTestAt = now; return;
+    }
+    if(mMenuTestStage == 1 && age > 0.3f) {
+        cPostEffectParams_ImageTrail trail; mapHandler->GetPostEffect_ImageTrail()->GetParams(&trail);
+        cPostEffectParams_RadialBlur radial; mapHandler->GetPostEffect_RadialBlur()->GetParams(&radial);
+        if(trail.mfAmount < 1 || radial.mfSize <= 0 || mapHandler->GetPostEffect_ImageTrail()->IsActive() || mapHandler->GetPostEffect_RadialBlur()->IsActive()) {
+            fail("clear image failed to suppress rendering while preserving script effects"); return;
+        }
+        gpBase->mpEngine->GetUpdater()->SetContainer("MainMenu");
+        menu->SetWindowActive(eLuxMainMenuWindow_Online);
+        auto* check = static_cast<cWidgetCheckBox*>(menu->GetSet()->GetWidgetFromName("OnlineClearImage"));
+        if(!check) { fail("missing clear image checkbox"); return; }
+        check->SetChecked(false,true);
+        mMenuTestStage = 2; mMenuTestAt = now; return;
+    }
+    if(mMenuTestStage == 2 && age > 0.3f) {
+        if(!mapHandler->GetPostEffect_ImageTrail()->IsActive() || !mapHandler->GetPostEffect_RadialBlur()->IsActive() || ClearImagePreference()) {
+            fail("original effects were not restored by checkbox"); return;
+        }
+        auto* check = static_cast<cWidgetCheckBox*>(menu->GetSet()->GetWidgetFromName("OnlineClearImage"));
+        check->SetChecked(true,true);
+        mMenuTestStage = 3; mMenuTestAt = now; return;
+    }
+    if(mMenuTestStage == 3 && age > 0.3f) {
+        if(mapHandler->GetPostEffect_ImageTrail()->IsActive() || mapHandler->GetPostEffect_RadialBlur()->IsActive() || !ClearImagePreference()) {
+            fail("clear image did not reactivate"); return;
+        }
+        NetLog("[NET/TEST] Clear image checkbox suppresses and restores original blur without changing graphics preferences");
+        if(!client) { menu->ExitMenu(eLuxMainMenuExit_ReturnToGame); mMenuTestStage = 8; return; }
+        menu->ExitMenu(eLuxMainMenuExit_QuitToMenu);
+        mMenuTestStage = 4; return;
+    }
+    if(mMenuTestStage == 4 && mSession.GetRole() == online::Role::Offline && !mapHandler->MapIsLoaded()) {
+        mMenuTestAt = now; mMenuTestStage = 5; return;
+    }
+    if(mMenuTestStage == 5) {
+        if(mSession.GetRole() != online::Role::Offline || mapHandler->MapIsLoaded() || gpBase->mpEngine->GetUpdater()->GetCurrentContainerName() != "MainMenu") {
+            fail("exit returned to match automatically"); return;
+        }
+        if(age < (mMenuTestExits ? 2 : 10)) return;
+        NetLog(mMenuTestExits ? "[NET/TEST] Save and exit stays at main menu with transport stopped" : "[NET/TEST] Exit stays at main menu with transport stopped");
+        menu->SetWindowActive(eLuxMainMenuWindow_Online);
+        mMenuTestStage = 6; mMenuTestAt = now; return;
+    }
+    if(mMenuTestStage == 6 && age > 0.2f) {
+        auto* button = menu->GetSet()->GetWidgetFromName("OnlineReconnect");
+        if(!button || !button->ProcessMessage(eGuiMessage_ButtonPressed,cGuiMessageData(0))) {
+            fail("reconnect button unavailable"); return;
+        }
+        mMenuTestStage = 7; mMenuTestAt = now; return;
+    }
+    if(mMenuTestStage == 7 && mSession.Connected() && mBaselineApplied && mapHandler->MapIsLoaded()) {
+        NetLog("[NET/TEST] Reconnect button restored complete campaign baseline");
+        if(++mMenuTestExits < 2) {
+            gpBase->mpEngine->GetUpdater()->SetContainer("MainMenu");
+            menu->ExitMenu(eLuxMainMenuExit_QuitAndSave); mMenuTestStage = 4;
+        } else { mMenuTestStage = 9; NetLog("[NET/TEST] Online menu exit/reconnect regression completed"); }
+    }
+    if(!client && mMenuTestStage == 8 && mSession.Generation() >= 3 && mBaselineSent) {
+        mMenuTestStage = 9; NetLog("[NET/TEST] Online menu exit/reconnect regression completed");
+    }
 }
 bool cLuxNetwork::UpdateQADrive(float timeStep) {
     if(mQADriveFile.empty() || !mSmokeSeconds) return false;
@@ -585,6 +674,7 @@ bool cLuxNetwork::Host(uint16_t port) {
     ++mCheckpointContext;
     mEverConnected = mRecovering = false; mConnectionGeneration = 0;
     mConnectPort = port;
+    mLastRole = online::Role::Host; gpBase->mpMainConfig->SetString("Online","LastRole","host");
     gpBase->mpMainConfig->SetString("Online","Port",std::to_string(port));
     mRecoveryCheckpoint.bytes.clear(); mMigrationAttempted = mMigrationHost = false;
     const bool started = mSession.StartHost(port);
@@ -595,6 +685,7 @@ bool cLuxNetwork::Join(const std::string& address, uint16_t port) {
     ++mCheckpointContext;
     mEverConnected = mRecovering = false; mConnectionGeneration = 0;
     mConnectAddress = address; mConnectPort = port;
+    mLastRole = online::Role::Client; gpBase->mpMainConfig->SetString("Online","LastRole","client");
     gpBase->mpMainConfig->SetString("Online","LastAddress",address);
     gpBase->mpMainConfig->SetString("Online","Port",std::to_string(port));
     mRecoveryCheckpoint.bytes.clear(); mMigrationAttempted = mMigrationHost = false;
@@ -603,8 +694,43 @@ bool cLuxNetwork::Join(const std::string& address, uint16_t port) {
     if(started) gpBase->mpEngine->SetWaitIfAppOutOfFocus(false);
     return started;
 }
-void cLuxNetwork::Disconnect() { ++mCheckpointContext; mSession.Stop(); mRecovering = mEverConnected = false; }
+void cLuxNetwork::SetClearImage(bool clear) {
+    mClearImage = clear; gpBase->mpMainConfig->SetBool("Online","ClearImage",clear);
+}
+void cLuxNetwork::Disconnect(bool menuHandlesReset) {
+    if(mSession.GetRole() != online::Role::Offline) {
+        mLastRole = mSession.GetRole();
+        gpBase->mpMainConfig->SetString("Online","LastRole",mLastRole == online::Role::Host ? "host" : "client");
+        gpBase->mpMainConfig->SetString("Online","Port",std::to_string(mConnectPort));
+        if(mLastRole == online::Role::Client && !mConnectAddress.empty())
+            gpBase->mpMainConfig->SetString("Online","LastAddress",mConnectAddress);
+    }
+    ++mCheckpointContext; mSession.CloseVoluntarily(); mRecovering = mEverConnected = false;
+    mInputLeaseSeen = mInputLeasePaused = false; mPrediction.Clear();
+    if(menuHandlesReset) mWasClient = mHadClientConnection = false;
+}
+bool cLuxNetwork::Reconnect() {
+    const auto role = mSession.GetRole() == online::Role::Offline ? mLastRole : mSession.GetRole();
+    if(role == online::Role::Offline) return false;
+    uint16_t port = mConnectPort;
+    if(mSession.GetRole() == online::Role::Offline && !Port(gpBase->mpMainConfig->GetString("Online","Port","27020"),port)) return false;
+    const auto address = mSession.GetRole() == online::Role::Client ? mConnectAddress :
+        gpBase->mpMainConfig->GetString("Online","LastAddress","127.0.0.1");
+    const bool inGame = gpBase->mpMapHandler->MapIsLoaded();
+    ++mCheckpointContext; mConnectionGeneration = 0; mInputLeaseSeen = mInputLeasePaused = false;
+    mPrediction.Clear(); mMigrationAttempted = mMigrationHost = false;
+    mRecovering = mEverConnected = inGame;
+    mRecoveryStart = mRetryAt = std::chrono::steady_clock::now();
+    mConnectAddress = address; mConnectPort = port;
+    mSession.SetListenPort(port);
+    const bool ok = role == online::Role::Host ? mSession.StartHost(port,true) : mSession.StartClient(address,port,true);
+    if(ok) { gpBase->mpEngine->SetWaitIfAppOutOfFocus(false); NetLog("[NET/CONNECTION] Manual reconnect requested"); }
+    else mRecovering = mEverConnected = false;
+    return ok;
+}
 std::string cLuxNetwork::ConnectionStatus() const {
+    if(mRecovering && mSession.GetRole() == online::Role::Host && mSession.PartnerLeftVoluntarily())
+        return "Il partner e uscito. Campagna in pausa, in attesa che si ricolleghi.";
     if(mInputLeasePaused) return "La rete non risponde: campagna in pausa, attesa del partner.";
     if(mMigrationHost && mRecovering) return "Host trasferito a questo PC. Campagna recuperata, in attesa del partner.";
     if(mRecovering) return mSession.RetryAllowed() ? "Connessione persa: riconnessione automatica, campagna in pausa." : "Connessione rifiutata: controlla versione e dati del gioco.";

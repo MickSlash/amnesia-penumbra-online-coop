@@ -560,6 +560,7 @@ private:
 	std::vector<iLuxEffect*> mvEffects;	
 
 	bool mbPlayerIsPaused;
+    bool mbOnlineBlurSuppressed = false;
 	cLuxPlayer *mpRadialBlurOwner;
 };
 

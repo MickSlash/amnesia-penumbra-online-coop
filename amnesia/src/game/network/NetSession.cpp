@@ -372,7 +372,7 @@ bool Session::StartClient(const std::string& name, uint16_t port, bool resume) {
     log_("[NET/CONNECTION] Connecting to " + name + ":" + std::to_string(port)); return true;
 }
 void Session::Stop() {
-    if (peer_) { enet_peer_disconnect_now(peer_, 0); }
+    if (peer_) { enet_peer_disconnect_now(peer_, closing_ ? VoluntaryDisconnectReason : 0); }
     if (host_) enet_host_destroy(host_);
     if (initialized_) enet_deinitialize();
     host_ = nullptr; peer_ = nullptr; initialized_ = ready_ = hasInput_ = false; role_ = Role::Offline;
@@ -380,6 +380,13 @@ void Session::Stop() {
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = snapshotBackups_ = 0; map_ = MapState();
     entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+    closing_ = partnerLeftVoluntarily_ = false;
+}
+void Session::CloseVoluntarily() {
+    if(!peer_ || peer_->state != ENET_PEER_STATE_CONNECTED) { Stop(); return; }
+    // Service the reliable disconnect in the background, without gameplay.
+    closing_ = true; closeStarted_ = enet_time_get(); ready_ = hasInput_ = false; role_ = Role::Offline;
+    enet_peer_disconnect(peer_,VoluntaryDisconnectReason); enet_host_flush(host_);
 }
 void Session::SuspendTransportForTest() {
     const Role previous = role_; Stop(); role_ = previous;
@@ -555,6 +562,16 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
 void Session::Poll() {
     if (!host_) return;
     const uint32_t now = enet_time_get();
+    if(closing_) {
+        ENetEvent event;
+        for(unsigned count=0; count<64 && enet_host_service(host_,&event,0)>0; ++count) {
+            if(event.type == ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(event.packet);
+            if(event.type == ENET_EVENT_TYPE_DISCONNECT) { Stop(); return; }
+        }
+        if(uint32_t(now-closeStarted_) >= 3000) Stop();
+        else enet_host_flush(host_);
+        return;
+    }
     if(lastPoll_ && uint32_t(now - lastPoll_) > 250)
         log_("[NET/DIAG] Transport service paused on game thread for " + std::to_string(uint32_t(now - lastPoll_)) + " ms");
     lastPoll_ = now;
@@ -562,6 +579,7 @@ void Session::Poll() {
     // Bound work per logic tick; malformed peers cannot monopolize the game loop.
     for (int count = 0; count < 64 && enet_host_service(host_, &e, 0) > 0; ++count) {
         if (e.type == ENET_EVENT_TYPE_CONNECT) {
+            partnerLeftVoluntarily_ = false;
             char address[64] = {}; enet_address_get_host_ip(&e.peer->address, address, sizeof(address)); remoteAddress_ = address; remoteReady_ = false;
             peer_ = e.peer; ready_ = hasInput_ = hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; started_ = enet_time_get();
             entities_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
@@ -581,6 +599,7 @@ void Session::Poll() {
             if (e.peer == peer_) { lastPacket_ = now; Receive(e.packet->data, e.packet->dataLength, e.channelID); }
             enet_packet_destroy(e.packet);
         } else if (e.type == ENET_EVENT_TYPE_DISCONNECT && e.peer == peer_) {
+            partnerLeftVoluntarily_ = e.data == VoluntaryDisconnectReason;
             peer_ = nullptr; ready_ = hasInput_ = false;
             log_("[NET/CONNECTION] Peer disconnected or timed out; remote reason=" + std::to_string(e.data) +
                 "; last received application packet age=" + std::to_string(uint32_t(now - lastPacket_)) + " ms");

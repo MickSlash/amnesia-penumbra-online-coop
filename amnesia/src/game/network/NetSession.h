@@ -10,7 +10,8 @@
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 6;
+constexpr uint16_t ProtocolVersion = 7;
+constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
 constexpr uint32_t TransportDatagramBytes = 1200;
@@ -118,6 +119,8 @@ public:
     bool StartHost(uint16_t port, bool resume = false);
     bool StartClient(const std::string& address, uint16_t port, bool resume = false);
     void Stop();
+    void CloseVoluntarily();
+    bool PartnerLeftVoluntarily() const { return partnerLeftVoluntarily_; }
     // Fault injection used only by the opt-in QA driver. Retain session identity.
     void SuspendTransportForTest();
     void Poll(); // non-blocking; caller owns scheduling
@@ -204,6 +207,8 @@ private:
     uint64_t identity_ = 0, expectedIdentity_ = 0;
     uint32_t generation_ = 0;
     bool fatal_ = false, localReady_ = true, remoteReady_ = false;
+    bool closing_ = false, partnerLeftVoluntarily_ = false;
+    uint32_t closeStarted_ = 0;
     uint16_t listenPort_ = DefaultPort, remotePort_ = DefaultPort;
     std::string remoteAddress_;
     CheckpointReceiver checkpointReceiver_;

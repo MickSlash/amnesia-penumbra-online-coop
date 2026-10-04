@@ -1667,6 +1667,7 @@ void cLuxEffectHandler::Reset()
 		gpBase->mpEngine->GetSound()->GetSoundHandler()->SetGlobalVolume(1, eSoundEntryType_World, i);
 	}
 
+    mbOnlineBlurSuppressed = false;
 	mbPlayerIsPaused = false;
 	mpRadialBlurOwner = NULL;
 }
@@ -1680,6 +1681,19 @@ void cLuxEffectHandler::Update(float afTimeStep)
 		iLuxEffect *pEffect = mvEffects[i];
 		if(pEffect->IsActive()) pEffect->Update(afTimeStep);
 	}
+    auto* map = gpBase->mpMapHandler;
+    const bool clear = gpBase->mpNetwork && gpBase->mpNetwork->ClearOnlineImage();
+    if(clear) {
+        // Presentation preference only: preserve script goals and graphics options.
+        map->GetPostEffect_ImageTrail()->SetActive(false);
+        map->GetPostEffect_RadialBlur()->SetActive(false);
+    } else if(mbOnlineBlurSuppressed) {
+        cPostEffectParams_ImageTrail trail; map->GetPostEffect_ImageTrail()->GetParams(&trail);
+        cPostEffectParams_RadialBlur radial; map->GetPostEffect_RadialBlur()->GetParams(&radial);
+        map->GetPostEffect_ImageTrail()->SetActive(trail.mfAmount > 0);
+        map->GetPostEffect_RadialBlur()->SetActive(radial.mfSize > 0);
+    }
+    mbOnlineBlurSuppressed = clear;
 }
 
 //-----------------------------------------------------------------------

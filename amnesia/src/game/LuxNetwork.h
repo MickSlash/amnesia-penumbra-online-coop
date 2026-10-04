@@ -39,7 +39,12 @@ public:
     void MusicChanged(int priority, float fadeTime);
     bool Host(uint16_t port);
     bool Join(const std::string& address, uint16_t port);
-    void Disconnect();
+    void Disconnect(bool menuHandlesReset = false);
+    bool Reconnect();
+    bool CanReconnect() const { return mLastRole != online::Role::Offline; }
+    bool ClearOnlineImage() const { return mClearImage && mSession.GetRole() != online::Role::Offline; }
+    bool ClearImagePreference() const { return mClearImage; }
+    void SetClearImage(bool clear);
     std::string ConnectionStatus() const;
 private:
     online::Session mSession;
@@ -153,6 +158,11 @@ private:
     bool mTestMediaRestoreLogged = false, mTestLanternRemoteLogged = false, mTestLanternLocalLogged = false;
     bool mTestLanternRequested = false, mTestLanternIndependentLogged = false;
     bool mTestLanternDisabled = false, mTestLanternHandsLogged = false, mTestSnapshotBackupLogged = false;
+    online::Role mLastRole = online::Role::Offline;
+    bool mClearImage = true;
+    unsigned mMenuTestStage = 0, mMenuTestExits = 0;
+    std::chrono::steady_clock::time_point mMenuTestAt;
+    void UpdateMenuTest();
     void UpdateMediaTest(cLuxMap* map, float elapsed);
     int mNextMediaID = 1000000000; // give unsaved runtime objects stable engine IDs
     bool ReplicateMedia(cLuxMap* map);
