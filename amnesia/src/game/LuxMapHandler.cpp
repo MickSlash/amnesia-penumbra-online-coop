@@ -1550,13 +1550,15 @@ void cLuxMapHandler::UpdateCoopPlayerBlockers(float afTimeStep)
 	// Want blockers at all this tick?
 	cLuxPlayer *pPlayers[2] = { gpBase->mpPlayer, gpBase->mpPlayer2 };
 
-	bool bWant = mbCoopActive && mpCurrentMap!=NULL &&
+	const bool online = gpBase->mpNetwork && gpBase->mpNetwork->UsesSharedInventory();
+	bool bWant = (mbCoopActive || online) && mpCurrentMap!=NULL &&
 				 pPlayers[0]!=NULL && pPlayers[1]!=NULL &&
 				 pPlayers[0]->GetCharacterBody()!=NULL &&
 				 pPlayers[1]->GetCharacterBody()!=NULL;
 
-	const bool bFull  = bWant && CoopPlayerCollisionEffective();
-	const bool bBoost = bWant && CoopCrouchBoostEffective();
+	// Online movement must never collide with the partner or crouch platforms.
+	const bool bFull  = bWant && !online && CoopPlayerCollisionEffective();
+	const bool bBoost = bWant && !online && CoopCrouchBoostEffective();
 
 	////////////////////////////////////////////////////////////////////////
 	// BASELINE character-vs-character collision.
@@ -1596,6 +1598,9 @@ void cLuxMapHandler::UpdateCoopPlayerBlockers(float afTimeStep)
 		}
 	}
 
+	if(!bWant) {
+		for(int i=0;i<2;++i) if(pPlayers[i] && pPlayers[i]->GetCharacterBody()) pPlayers[i]->GetCharacterBody()->SetIgnoreBody(NULL);
+	}
 	if(bWant==false || (bFull==false && bBoost==false))
 	{
 		for(int i=0; i<2; ++i)

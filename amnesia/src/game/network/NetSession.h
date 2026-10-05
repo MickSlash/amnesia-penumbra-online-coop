@@ -11,7 +11,7 @@
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 10;
+constexpr uint16_t ProtocolVersion = 11;
 constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
@@ -32,7 +32,7 @@ std::vector<uint8_t> EncodeJournal(const JournalState& state);
 bool DecodeJournal(const uint8_t* data, size_t size, JournalState& state);
 enum class PresentationKind : uint8_t { Note = 1, Diary = 2, Voice = 3, Message = 4, Light = 5, StopVoice = 6,
     Hint = 7, Fade = 8, ImageTrail = 9, Sepia = 10, RadialBlur = 11, BlurStart = 12, Flash = 13, FogColor = 14, FogProperties = 15,
-    GuiSound = 16, SoundFade = 17, GlobalVolume = 18, GlobalSpeed = 19, Emotion = 20, Shake = 21 };
+    GuiSound = 16, SoundFade = 17, GlobalVolume = 18, GlobalSpeed = 19, Emotion = 20, Shake = 21, SanityGain = 22 };
 struct Presentation {
     uint32_t epoch = 0;
     PresentationKind kind = PresentationKind::Message;
@@ -60,13 +60,16 @@ struct PlayerState {
     uint8_t flags = 4; // crouching, lantern, active, dead, scripted look, object-controlled look, shared intro view
     int16_t forwardSpeed = 0, sideSpeed = 0; // current local-axis velocity, mm/s
     uint16_t forwardMax = 0, sideMax = 0, acceleration = 0, deceleration = 0, backwardMax = 0; // mm/s, mm/s^2
+    int16_t verticalSpeed = 0, verticalAcceleration = 0; // mm/s, mm/s^2
+    uint16_t jumpSpeed = 0; // initial impulse velocity, mm/s; zero when jumping is unavailable
+    uint8_t grounded = 0;
 };
 struct Snapshot {
     uint32_t epoch = 0, sequence = 0, acknowledgedInput = 0;
     PlayerState players[2]; // stable network IDs 1 (host), 2 (client)
 };
 struct MapState { uint32_t epoch = 0; uint64_t fingerprint = 0; std::string file; };
-enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6 };
+enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, Jump = 7 };
 struct ActionRequest { uint32_t epoch = 0, sequence = 0; PlayerAction action = PlayerAction::Interact; bool pressed = false; std::string item, secondItem; };
 struct InventoryItem {
     std::string name, subtype, image, value, extraValue, nameEntry, descriptionEntry;

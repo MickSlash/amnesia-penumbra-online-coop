@@ -107,6 +107,7 @@ public:
 	void LoadFonts();
 
 	void Start(const tString &asTextCat, const tString &asTextEntry, const tString &asSound);
+    void BeginFadeOut();
 	void Reset();
 	
 	void Update(float afTimeStep);
@@ -350,8 +351,10 @@ public:
 	void Reset();
 
 	void DrawFlash(cGuiSet *apSet ,float afTimeStep);
+    bool VisibleForPlayer(cLuxPlayer* player) const;
 
 private:
+    void StartTimeline();
 	cGuiGfxElement *mpWhiteGfx;
 
 	float mfAlpha;

@@ -1,6 +1,29 @@
 # Installare e giocare ad Amnesia Online Co-op
 
-Build sperimentale Windows x64, protocollo 10, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono nei documenti QA dentro `source.zip`.
+Build sperimentale Windows x64, protocollo 11, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono nei documenti QA dentro `source.zip`.
+
+Il protocollo 11 sincronizza sul client il flash blu e il suono originali del
+recupero di sanità assegnato dagli obiettivi della campagna. Conserva le regole
+originali: un obiettivo deve prevedere quella ricompensa e, con sanità già al
+massimo, il gioco non la assegna di nuovo.
+
+La schermata bianca con testo delle pietre è una visione della storia. Ora il
+clic del client per proseguire raggiunge l'host anche mentre il personaggio è
+fermo; entrambi possono avanzare il testo. La fine della visione viene
+sincronizzata e ripristina comandi e campo visivo; resta anche la scadenza
+automatica originale. **Aggiornare entrambi i PC**: il protocollo 11 non è
+compatibile con le build precedenti. Prove e limiti in
+`docs/qa_objective_effects_2026-10-05.md` dentro `source.zip`.
+
+Il salto del client mantiene la previsione orizzontale e anticipa il decollo
+fino alla conferma dell'host, con un limite di 250 ms e controlli su pavimento
+e soffitto. Gli stati includono velocità verticale e contatto col suolo;
+piccole correzioni vengono riassorbite gradualmente. Il comando di salto
+parte subito e ha anche una copia affidabile, per conservare un clic breve
+quando si perdono pacchetti. Atterraggio e conseguenze restano decisi dall'host.
+Online i due giocatori si attraversano: sono disabilitati anche i sostegni
+fisici sopra la testa del partner. Restano le collisioni con il mondo e con
+i nemici. Ritardi elevati o correzioni importanti possono ancora essere visibili.
 
 La versione 9 corregge il recupero dopo il blocco dell'avvio riscontrato nella
 versione 8: l'host mantiene la campagna in pausa e il listener aperto. Se il

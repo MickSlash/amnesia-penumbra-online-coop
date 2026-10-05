@@ -45,7 +45,7 @@ public:
             const auto& input = command.input; const float dt = std::min(command.dt,0.5f-age);
             if(dt <= 0) break;
             age += dt;
-            if(input.buttons & 3) break; // jumps/crouch remain authoritative
+            if(input.buttons & 2) break; // crouch changes the collision shape; jumping keeps horizontal prediction
             const float diagonal = input.forward && input.strafe ? 0.70710678f : 1.0f;
             const float forwardMax = (input.forward < 0 ? state.backwardMax : state.forwardMax)/1000.0f * diagonal;
             const float sideMax = state.sideMax/1000.0f * diagonal;
@@ -91,5 +91,48 @@ private:
     PlayerState previousState_;
     uint32_t previousAcknowledged_ = 0, previousSequence_ = 0;
     PredictedPosition correction_;
+};
+// Bounded local jump anticipation; host poses own takeoff, landing and damage.
+class VerticalPrediction {
+public:
+    void Clear() { valid_=pending_=false; correction_=0; jumpAge_=0; }
+    bool Pending() const { return pending_; }
+    bool StartJump(const PlayerState& state,uint32_t inputSequence) {
+        if(pending_ || !state.grounded || !state.jumpSpeed || !(state.flags&4) || (state.flags&(1|8|16|32|64))) return false;
+        pending_=true; jumpSequence_=inputSequence; jumpAge_=0;
+        jumpBase_=valid_?shown_:state.y/1000.0f; jumpSpeed_=state.jumpSpeed/1000.0f;
+        jumpAcceleration_=state.verticalAcceleration/1000.0f*.15f;
+        return true;
+    }
+    template<class Collision>
+    float Update(const PlayerState& state,uint32_t acknowledged,uint32_t poseSequence,float dt,float poseAge,Collision collide) {
+        const float base=state.y/1000.0f;
+        if(!std::isfinite(dt) || dt<=0 || !(state.flags&4) || (state.flags&(1|8|16|32|64))) { Clear(); return base; }
+        dt=std::min(dt,.05f);
+        if(pending_) {
+            jumpAge_+=dt;
+            if(uint32_t(acknowledged-jumpSequence_)<0x80000000u || jumpAge_>.25f) pending_=false;
+        }
+        const float age=std::max(0.0f,std::min(.05f,poseAge));
+        float raw=base;
+        if(pending_) raw=jumpBase_+jumpSpeed_*jumpAge_+.5f*jumpAcceleration_*jumpAge_*jumpAge_;
+        else if(!state.grounded) raw+=state.verticalSpeed/1000.0f*age+.5f*state.verticalAcceleration/1000.0f*age*age;
+        const float dx=state.x/1000.0f-previousX_,dz=state.z/1000.0f-previousZ_;
+        if(valid_ && (std::fabs(base-previousBase_)>.75f || dx*dx+dz*dz>1)) { Clear(); raw=base; }
+        if(valid_ && poseSequence!=previousSequence_) correction_=shown_-raw;
+        if(std::fabs(correction_)>.5f) correction_=0;
+        correction_*=std::exp(-dt/.04f);
+        float next=raw+correction_;
+        if(valid_) next=collide(shown_,next);
+        else next=collide(base,next);
+        if(std::fabs(next-(raw+correction_))>.001f) { pending_=false; correction_=next-raw; }
+        shown_=next; previousBase_=base; previousX_=state.x/1000.0f; previousZ_=state.z/1000.0f; previousSequence_=poseSequence; valid_=true;
+        return next;
+    }
+private:
+    bool valid_=false,pending_=false;
+    uint32_t previousSequence_=0,jumpSequence_=0;
+    float shown_=0,previousBase_=0,correction_=0,jumpAge_=0,jumpBase_=0,jumpSpeed_=0,jumpAcceleration_=0;
+    float previousX_=0,previousZ_=0;
 };
 }

@@ -4,9 +4,18 @@
 
 Two players with an authoritative host, shared inventory/campaign, world and
 player replication, host saves, shared death/checkpoints, synchronized audio,
-particles and script presentation. Protocol **5** adds complete journal history,
-a ready lobby, automatic reconnect, checkpoint-based host migration and bounded
-horizontal client movement prediction. **The full campaign is not certified.**
+particles and script presentation. Current protocol: **11**. Includes complete
+journal history, a ready lobby, automatic reconnect, checkpoint-based host
+migration and bounded horizontal client movement prediction.
+**The full campaign is not certified.**
+
+Protocol 11 relays the original objective sanity reward flash and sound to the
+client. Either online reader can advance emotion-stone text while controls are
+locked; the host relays completion and restores controls and FOV. Both peers
+must update. See the [objective effects QA report](docs/qa_objective_effects_2026-10-05.md).
+Client jumps retain horizontal prediction and use bounded vertical anticipation
+with floor/ceiling checks and host-authoritative landing. Online players pass
+through each other, including when crouched.
 
 ### Play without a terminal
 
@@ -35,9 +44,10 @@ captured every 20 seconds and on map changes: progress since the last received
 checkpoint may be lost. Bidirectional reachability and retained player identities
 are required; no NAT traversal, relay or matchmaking is included.
 
-Prediction replays at most 250 ms of pending horizontal movement against world
-collisions. Jump/crouch, vertical motion and physical object interactions remain
-host controlled. High latency can still cause visible corrections. Full campaign
+Prediction keeps bounded pending movement against world collisions. Jump
+anticipation is limited to 250 ms, with short vertical extrapolation and smooth
+corrections; the host owns landing, crouch and physical object interactions.
+High latency can still cause visible corrections. Full campaign
 puzzles/endings, Hard mode, unsupported script/entity types, physical PC failures
 and WAN partitions need more testing.
 

@@ -13,6 +13,8 @@
 #include "LuxPlayerAvatar.h"
 #include "LuxProp.h"
 #include "LuxProp_Lamp.h"
+#include "LuxProp_EmotionStone.h"
+#include "LuxMoveState_Normal.h"
 #include "LuxProp_SwingDoor.h"
 #include "LuxEnemy.h"
 #include "LuxInventory.h"
@@ -228,7 +230,7 @@ void cLuxNetwork::Update(float timeStep) {
         if(mConnectionGeneration != mSession.Generation()) {
             mConnectionGeneration = mSession.Generation();
             mMapAnnounced = false; mAppliedJournal = false; mJournalBytes.clear();
-            mInputLeaseSeen = mInputLeasePaused = false; mPrediction.Clear();
+            mInputLeaseSeen = mInputLeasePaused = false; mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0;
             mJournalTestLastEpoch = 0;
             if(IsClientReplica()) { mEpoch = 0; mBaselineApplied = false; mAppliedInventory = false; }
             if(mRecovering) NetLog("[NET/RECOVERY] Partner reconnected; rebuilding authoritative baseline");
@@ -285,6 +287,7 @@ void cLuxNetwork::Update(float timeStep) {
         }
     }
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_VISIBILITY_PROPS")) UpdateVisibilityPropsTest(gpBase->mpMapHandler->GetCurrentMap());
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_EFFECTS")) UpdateEffectsTest(gpBase->mpMapHandler->GetCurrentMap());
     UpdateRecoveryTest();
     UpdateMenuTest();
     UpdateCampaignStartTest();
@@ -475,6 +478,7 @@ void cLuxNetwork::UpdateCampaignStartTest() {
     }
 }
 bool cLuxNetwork::UpdateQADrive(float timeStep) {
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_EFFECTS")) return true;
     if(mQADriveFile.empty() || !mSmokeSeconds) return false;
     cLuxPlayer* player = gpBase->mpPlayer;
     cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
@@ -588,7 +592,7 @@ void cLuxNetwork::Reset() {
     mPendingLookYaw = mPendingLookPitch = 0; mHasLookSequence = false;
     mClientObjectLook = mClientScriptLook = mRemoteRotate = mClientSharedIntro = false;
     mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0; mLastSnapshotAt = {};
-    mPrediction.Clear();
+    mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0;
     mEntityBytes.clear(); mEntityStates.clear(); mReplicaIDs.clear(); mLoggedWorldReplica = false;
     mEntityMotionAt.clear(); mEntityMotionSettled.clear(); mPropMotion.clear();
     mFillRemoteStartingOil = false;
@@ -604,16 +608,23 @@ void cLuxNetwork::Reset() {
     mSnapshotGapTotalMs = mSnapshotGapMaxMs = 0; mSnapshotGapSamples = 0;
 }
 void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
-    if(!mSession.Connected()) { mPrediction.Clear(); return; }
+    if(!mSession.Connected()) { mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0; return; }
     if (IsClientReplica() && (!mEpoch || !mReceivedSnapshot || !mBaselineApplied)) return;
     if(IsClientReplica() && (mClientDead || mClientSharedIntro)) { input.forward = input.strafe = 0; input.buttons = 0; input.lookYaw = input.lookPitch = 0; }
     if(IsClientReplica() && !mTestMovement) { input.sequence = mInputSequence + 1; mPrediction.Push(input,timeStep); }
+    const bool jumpEdge=((input.buttons^mLocalInputButtons)&1)!=0;
+    if(jumpEdge) {
+        if((input.buttons&1) && IsClientReplica() && !mSnapshots.empty())
+            mVerticalPrediction.StartJump(mSnapshots.back().state.players[1],mInputSequence+1);
+        SendLocalAction(online::PlayerAction::Jump,(input.buttons&1)!=0);
+    }
+    mLocalInputButtons=input.buttons;
     ++mInputTick;
     mInputAccumulator += timeStep;
     mPendingLookYaw = std::max(-31420, std::min(31420, mPendingLookYaw + int(input.lookYaw)));
     mPendingLookPitch = std::max(-31420, std::min(31420, mPendingLookPitch + int(input.lookPitch)));
     // 30 Hz divides the engine's default 60 Hz logic rate; render FPS is irrelevant.
-    if (mInputAccumulator < 1.0f / 30.0f) return;
+    if (!jumpEdge && mInputAccumulator < 1.0f / 30.0f) return;
     mInputAccumulator = std::fmod(mInputAccumulator, 1.0f / 30.0f);
     input.sequence = ++mInputSequence; input.tick = mInputTick;
     input.lookYaw = int16_t(mPendingLookYaw); input.lookPitch = int16_t(mPendingLookPitch);
@@ -688,7 +699,20 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
     player->Run((buttons & 4) != 0);
     online::ActionRequest action;
     while(mSession.ReadAction(action)) {
-        if(!player->IsActive() || player->IsDead() || WaitingForMap() || SharedIntroView() || action.epoch != mEpoch) continue;
+        if(player->IsDead() || WaitingForMap() || SharedIntroView() || action.epoch != mEpoch) continue;
+        // Inactive during a vision is intentional: accept only its page advance,
+        // never ordinary interactions with the world while controls are locked.
+        if(gpBase->mpEffectHandler->GetEmotionFlash()->IsActive() &&
+            (action.action == online::PlayerAction::Interact || action.action == online::PlayerAction::Attack)) {
+            gpBase->mpEffectHandler->GetEmotionFlash()->DoActionForPlayer(player,eLuxPlayerAction_Interact,action.pressed);
+            if(action.pressed) {
+                NetLog("[NET/EFFECT] Remote reader advanced authoritative emotion page");
+                if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_EFFECTS")) mEffectsTestRemoteSkip = true;
+            }
+            continue;
+        }
+        if(!player->IsActive()) continue;
+        if(action.action==online::PlayerAction::Jump) { player->Jump(action.pressed); continue; }
         if(action.action == online::PlayerAction::UseInventory || action.action == online::PlayerAction::CombineInventory) {
             gpBase->mpInventory->ApplyNetworkItemAction(player, action.item, action.secondItem, action.action == online::PlayerAction::CombineInventory);
             continue;
@@ -791,7 +815,7 @@ void cLuxNetwork::Disconnect(bool menuHandlesReset) {
             gpBase->mpMainConfig->SetString("Online","LastAddress",mConnectAddress);
     }
     ++mCheckpointContext; mSession.CloseVoluntarily(); mRecovering = mEverConnected = mClientSharedIntro = false;
-    mInputLeaseSeen = mInputLeasePaused = false; mPrediction.Clear();
+    mInputLeaseSeen = mInputLeasePaused = false; mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0;
     if(menuHandlesReset) mWasClient = mHadClientConnection = false;
 }
 bool cLuxNetwork::Reconnect() {
@@ -803,7 +827,7 @@ bool cLuxNetwork::Reconnect() {
         gpBase->mpMainConfig->GetString("Online","LastAddress","127.0.0.1");
     const bool inGame = gpBase->mpMapHandler->MapIsLoaded();
     ++mCheckpointContext; mConnectionGeneration = 0; mInputLeaseSeen = mInputLeasePaused = false;
-    mPrediction.Clear(); mMigrationAttempted = mMigrationHost = false;
+    mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0; mMigrationAttempted = mMigrationHost = false;
     mRecovering = mEverConnected = inGame;
     mRecoveryStart = mRetryAt = std::chrono::steady_clock::now();
     mConnectAddress = address; mConnectPort = port;
@@ -945,7 +969,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                         latest.sequence - life.sequence != 0 && latest.sequence - life.sequence < 0x80000000u) pose = latest;
                     // A checkpoint is a discontinuity even within five metres.
                     mSnapshots.clear(); mSnapshots.push_back({pose, now});
-                    mPrediction.Clear();
+                    mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0;
                     mReceivedSequence = pose.sequence; mReceivedSnapshot = true;
                 }
             }
@@ -1086,7 +1110,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             NetLog("[NET/MAP] Full replica world acknowledged epoch=" + std::to_string(mEpoch));
         }
         mClientSharedIntro = mSession.IsWorldApplied(mEpoch) && (local.flags & 64) != 0;
-        if(mClientSharedIntro) mPrediction.Clear();
+        if(mClientSharedIntro) { mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0; }
         if(body && mBaselineApplied && !mClientSharedIntro) {
             const auto predictionStart = std::chrono::steady_clock::now();
             online::PredictionCollisionCache collisionCache;
@@ -1107,6 +1131,25 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             if(predictionUs >= 5000) NetLog("[NET/PERF] Replica prediction item_us=" + std::to_string(predictionUs) +
                 " collision_queries=" + std::to_string(collisionCache.Queries()) + " reused=" + std::to_string(collisionCache.Hits()));
             local.x = int32_t(predicted.x*1000); local.z = int32_t(predicted.z*1000);
+            const float poseAge=std::chrono::duration<float>(now-mSnapshots.back().received).count();
+            const float y=mVerticalPrediction.Update(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,poseAge,[&](float from,float to) {
+                const float distance=std::fabs(to-from);
+                if(distance<.00001f) return to;
+                if(distance>1.28f) return from;
+                // Sweep in small increments so a predicted rise cannot cross a
+                // low ceiling and a predicted landing cannot cross the floor.
+                const int steps=std::min(32,std::max(1,int(std::ceil(std::fabs(to-from)/.04f))));
+                float safe=from;
+                for(int i=1;i<=steps;++i) {
+                    const float candidate=from+(to-from)*i/steps; cVector3f push;
+                    const cVector3f center(local.x/1000.0f,candidate+body->GetCurrentShape()->GetSize().y/2,local.z/1000.0f);
+                    const bool blocked=map->GetPhysicsWorld()->CheckShapeWorldCollision(&push,body->GetCurrentShape(),cMath::MatrixTranslate(center),body->GetCurrentBody(),false,true,NULL,true,0,eFlagBit_All,false,body->GetIgnoreBody());
+                    if(blocked && ((to>from && push.y<-.001f) || (to<from && push.y>.001f))) break;
+                    safe=candidate;
+                }
+                return safe;
+            });
+            local.y=int32_t(y*1000);
             if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_PREDICTION") && !mPredictionSmoothTestObserved && mPrediction.CorrectionDistance() > 0.002f) {
                 mPredictionSmoothTestObserved = true; NetLog("[NET/TEST] Small authoritative movement correction smoothed with collision checks");
             }
@@ -1355,6 +1398,16 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         p.forwardMax = fixedSpeed(body->GetMaxPositiveMoveSpeed(eCharDir_Forward)); p.sideMax = fixedSpeed(body->GetMaxPositiveMoveSpeed(eCharDir_Right));
         p.backwardMax = fixedSpeed(std::fabs(body->GetMaxNegativeMoveSpeed(eCharDir_Forward)));
         p.acceleration = fixedSpeed(body->GetMoveAcc(eCharDir_Forward)); p.deceleration = fixedSpeed(body->GetMoveDeacc(eCharDir_Forward));
+        auto signedSpeed=[](float value){return int16_t(std::max(-32.0f,std::min(32.0f,value))*1000);};
+        p.verticalSpeed=signedSpeed(body->GetForceVelocity().y);
+        cVector3f gravity=body->GetCustomGravityActive()?body->GetCustomGravity():map->GetPhysicsWorld()->GetGravity();
+        auto* move=static_cast<cLuxMoveState_Normal*>(player->GetMoveStateData(eLuxMoveState_Normal));
+        p.verticalAcceleration=signedSpeed(body->GravityIsActive()?gravity.y*move->GetJumpGravityMultiplier():0);
+        p.grounded=body->IsOnGround()?1:0;
+        if(player->GetCurrentMoveState()==eLuxMoveState_Normal && player->GetCurrentState()==eLuxPlayerState_Normal &&
+            !player->GetJumpDisabled() && !player->GetInsanityCollapse()->IsActive())
+            p.jumpSpeed=fixedSpeed(move->GetJumpStartForce()*player->GetScriptJumpForceMul()*
+                player->GetDefaultMass()/std::max(.001f,body->GetMass())*gpBase->mpEngine->GetStepSize());
         p.flags = (player->GetCharacterBody()->GetActiveSize() == 1 ? 1 : 0) |
             (player->GetHelperLantern()->IsActive() ? 2 : 0) | (player->IsActive() ? 4 : 0) | (player->IsDead() ? 8 : 0) |
             (player->GetHelperLookAt()->IsActive() || player->GetLookSpeedMul() <= 0 ? 16 : 0) |
@@ -1933,6 +1986,11 @@ void cLuxNetwork::ReplicateLights(cLuxMap* map) {
     }
 }
 void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& event) {
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_EFFECTS") && event.kind==online::PresentationKind::Message && event.text[0]=="AMNESIA_QA_JUMP_READY") {
+        mEffectsTestJumpReady=true;
+        mEffectsTestJumpSpawn=cVector3f(event.values[0]/1000.0f,event.values[1]/1000.0f,event.values[2]/1000.0f);
+        return;
+    }
     switch(event.kind) {
     case online::PresentationKind::GuiSound: {
         cLuxSoundExtraData sound = {};
@@ -1972,8 +2030,19 @@ void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& ev
         else handler->FadeGlobalSpeed(goal, speed, eSoundEntryType_World, eLuxGlobalVolumeType_Script, goal == 1);
         break;
     }
+    case online::PresentationKind::SanityGain:
+        gpBase->mpEffectHandler->GetSanityGainFlash()->StartForPlayer(gpBase->mpPlayer);
+        NetLog("[NET/EFFECT] Objective sanity gain flash applied on client");
+        break;
     case online::PresentationKind::Emotion:
-        gpBase->mpEffectHandler->GetEmotionFlash()->Start(event.text[0], event.text[1], event.text[2]); break;
+        if(event.values[0]) {
+            gpBase->mpEffectHandler->GetEmotionFlash()->BeginFadeOut();
+            if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_EFFECTS")) ++mEffectsTestEnds;
+        } else {
+            gpBase->mpEffectHandler->GetEmotionFlash()->Start(event.text[0], event.text[1], event.text[2]);
+            if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_EFFECTS")) { ++mEffectsTestStarts; mEffectsTestAt = std::chrono::steady_clock::now(); }
+        }
+        break;
     case online::PresentationKind::Shake:
         if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA")) NetLog("[NET/TEST] Screen shake applied on client");
         gpBase->mpEffectHandler->GetScreenShake()->Start(event.values[0] / 1000.0f, event.values[1] / 1000.0f,
@@ -2033,6 +2102,146 @@ void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& ev
         }
         break;
     }
+    }
+}
+void cLuxNetwork::UpdateEffectsTest(cLuxMap* map) {
+    if(!map || !mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || !gpBase->mpPlayer2) return;
+    const auto now=std::chrono::steady_clock::now();
+    auto* effects=gpBase->mpEffectHandler;
+    auto* vision=effects->GetEmotionFlash();
+    auto* local=gpBase->mpPlayer;
+    if(!mEffectsTestBaseFov) mEffectsTestBaseFov=local->GetBaseFOV();
+    if(IsClientReplica()) {
+        if(effects->GetSanityGainFlash()->VisibleForPlayer(local)) mEffectsTestProgressSeen=true;
+        const float age=std::chrono::duration<float>(now-mEffectsTestAt).count();
+        if(mEffectsTestStarts==1 && mEffectsTestStage==0 && age>3) {
+            vision->DoActionForPlayer(local,eLuxPlayerAction_Interact,true);
+            mEffectsTestStage=1;
+            NetLog("[NET/TEST] Client continued original emotion stone while inactive");
+        }
+        if(mEffectsTestEnds>=3 && !vision->IsActive() && local->IsActive() && mEffectsTestStage==1) {
+            mEffectsTestFeet=local->GetCharacterBody()->GetFeetPosition();
+            mEffectsTestAt=now; mEffectsTestStage=2;
+        }
+        online::PlayerInput input;
+        if(mEffectsTestStage==2) {
+            const float moving=std::chrono::duration<float>(now-mEffectsTestAt).count();
+            input.strafe=moving<2?500:0;
+            // Native FOV restoration is exponential and can outlast the white
+            // overlay. Verify it after settling, while idle input stays alive.
+            if(moving>3 && std::fabs(local->GetCamera()->GetFOV()-mEffectsTestBaseFov)<.01f) {
+                const float distance=(local->GetCharacterBody()->GetFeetPosition()-mEffectsTestFeet).Length();
+                const bool ok=mEffectsTestProgressSeen && local->IsActive() && !effects->GetPlayerIsPaused() && distance>.05f;
+                NetLog(std::string("[NET/TEST] ")+(ok?"PASS objective flash and emotion page recovery":"FAILED effects client movement or flash")+" displacement="+std::to_string(distance));
+                mEffectsTestStage=3;
+            }
+        }
+        if(mEffectsTestStage==3 && mEffectsTestJumpReady &&
+            (local->GetCharacterBody()->GetFeetPosition()-mEffectsTestJumpSpawn).Length()<.01f) {
+            mEffectsTestJumpBase=local->GetCharacterBody()->GetFeetPosition().y;
+            mEffectsTestAt=now; mEffectsTestStage=4;
+        }
+        if(mEffectsTestStage==4) {
+            const float age=std::chrono::duration<float>(now-mEffectsTestAt).count();
+            input.strafe=age<2?500:0; input.buttons=age>1 && age<1.2f?1:0;
+            const float height=local->GetCharacterBody()->GetFeetPosition().y-mEffectsTestJumpBase;
+            static float previousHeight=0,maxStep=0;
+            const float step=std::fabs(height-previousHeight);
+            if(step>.15f) NetLog("[NET/TEST] Vertical jump discontinuity age="+std::to_string(age)+" step="+std::to_string(step)+" pending="+std::to_string(mVerticalPrediction.Pending()));
+            maxStep=std::max(maxStep,step); previousHeight=height;
+            mEffectsTestJumpApex=std::max(mEffectsTestJumpApex,height);
+            if(mVerticalPrediction.Pending() && !mSnapshots.empty() &&
+                local->GetCharacterBody()->GetFeetPosition().y>mSnapshots.back().state.players[1].y/1000.0f+.01f) {
+                if(!mEffectsTestJumpImmediate) NetLog("[NET/TEST] Client jump visible before host acknowledgement");
+                mEffectsTestJumpImmediate=true;
+            }
+            if(age>5) {
+                const bool grounded=!mSnapshots.empty() && mSnapshots.back().state.players[1].grounded;
+                const bool ok=mEffectsTestJumpImmediate && mEffectsTestJumpApex>.2f && grounded && std::fabs(height)<.08f && maxStep<.2f;
+                NetLog(std::string("[NET/TEST] ")+(ok?"PASS client jump prediction and landing":"FAILED effects client jump")+
+                    " apex="+std::to_string(mEffectsTestJumpApex)+" landed_delta="+std::to_string(height)+" max_step="+std::to_string(maxStep));
+                mEffectsTestStage=5;
+            }
+        }
+        if(mEffectsTestStage==5 && !mSnapshots.empty() && !mSnapshots.back().state.players[1].jumpSpeed && mSnapshots.back().state.players[1].grounded) {
+            mEffectsTestJumpBase=local->GetCharacterBody()->GetFeetPosition().y;
+            mEffectsTestJumpApex=0; mEffectsTestAt=now; mEffectsTestStage=6;
+        }
+        if(mEffectsTestStage==6) {
+            const float age=std::chrono::duration<float>(now-mEffectsTestAt).count();
+            input.buttons=age<.2f?1:0;
+            mEffectsTestJumpApex=std::max(mEffectsTestJumpApex,std::fabs(local->GetCharacterBody()->GetFeetPosition().y-mEffectsTestJumpBase));
+            if(age>2) {
+                const bool ok=!mVerticalPrediction.Pending() && mEffectsTestJumpApex<.05f;
+                NetLog(ok?"[NET/TEST] PASS client respects scripted jump disable":"[NET/TEST] FAILED effects disabled client jump");
+                mEffectsTestStage=7;
+            }
+        }
+        // Native idle input continues during and after reading. Keep the same
+        // heartbeat here so the fixture never triggers the missing-input lease.
+        input.yaw=int16_t(local->GetCamera()->GetYaw()*1000); input.pitch=int16_t(local->GetCamera()->GetPitch()*1000);
+        SendLocalInput(input,1.0f/60);
+        return;
+    }
+    auto* partner=gpBase->mpPlayer2;
+    const float age=std::chrono::duration<float>(now-mEffectsTestAt).count();
+    auto stone=[&](cLuxPlayer* actor) {
+        auto* entity=map->GetEntityByName("emotion_stone_1",eLuxEntityType_Prop,eLuxPropType_EmotionStone);
+        if(!entity) { NetLog("[NET/TEST] FAILED effects original emotion stone missing"); mEffectsTestStage=99; return; }
+        cLuxPlayer* previous=cLuxPlayer::CoopBeginActAs(actor);
+        static_cast<cLuxProp_EmotionStone*>(entity)->OnInteract(NULL,cVector3f(0));
+        cLuxPlayer::CoopEndActAs(previous);
+        mEffectsTestAt=now;
+    };
+    if(mEffectsTestStage==0 && std::chrono::duration<float>(now-mSmokeStart).count()>5) {
+        local->ApplyNetworkVitals(local->GetHealth(),40,local->GetLampOil());
+        partner->ApplyNetworkVitals(partner->GetHealth(),40,partner->GetLampOil());
+        map->RunScript("GiveSanityBoost();");
+        NetLog("[NET/TEST] Original script objective sanity reward requested for both players");
+        mEffectsTestAt=now; mEffectsTestStage=1;
+    } else if(mEffectsTestStage==1 && age>3) {
+        stone(partner); if(mEffectsTestStage!=99) mEffectsTestStage=2;
+    } else if(mEffectsTestStage==2 && age>9 && !vision->IsActive()) {
+        if(!mEffectsTestRemoteSkip || !partner->IsActive()) { NetLog("[NET/TEST] FAILED effects client advance did not unlock authoritative partner"); mEffectsTestStage=99; return; }
+        NetLog("[NET/TEST] Remote emotion reader restored authoritative controls");
+        stone(local); if(mEffectsTestStage!=99) mEffectsTestStage=3;
+    } else if(mEffectsTestStage==3 && age>3) {
+        vision->DoActionForPlayer(local,eLuxPlayerAction_Interact,true);
+        mEffectsTestStage=4;
+    } else if(mEffectsTestStage==4 && age>9 && !vision->IsActive()) {
+        // A short original translation exercises natural expiry without a skip.
+        vision->Start("Journal","Notes","");
+        mEffectsTestAt=now; mEffectsTestStage=5;
+    } else if(mEffectsTestStage==5 && age>22 && !vision->IsActive()) {
+        const bool ok=local->IsActive() && partner->IsActive() && !effects->GetPlayerIsPaused() && std::fabs(local->GetCamera()->GetFOV()-mEffectsTestBaseFov)<.01f;
+        NetLog(std::string("[NET/TEST] ")+(ok?"PASS objective flash and emotion page recovery":"FAILED effects host controls")+
+            " original stone client/host advance and natural expiry host_active="+std::to_string(local->IsActive())+
+            " partner_active="+std::to_string(partner->IsActive())+" paused="+std::to_string(effects->GetPlayerIsPaused())+
+            " fov_delta="+std::to_string(std::fabs(local->GetCamera()->GetFOV()-mEffectsTestBaseFov)));
+        mEffectsTestHostFeet=local->GetCharacterBody()->GetFeetPosition();
+        partner->GetCharacterBody()->SetFeetPosition(mEffectsTestHostFeet);
+        partner->GetCharacterBody()->SetForceVelocity(cVector3f(0));
+        online::Presentation ready; ready.kind=online::PresentationKind::Message; ready.target=2; ready.text[0]="AMNESIA_QA_JUMP_READY";
+        ready.values[0]=int32_t(mEffectsTestHostFeet.x*1000); ready.values[1]=int32_t(mEffectsTestHostFeet.y*1000); ready.values[2]=int32_t(mEffectsTestHostFeet.z*1000);
+        QueuePresentation(ready);
+        mEffectsTestJumpBase=mEffectsTestHostFeet.y; mEffectsTestAt=now; mEffectsTestStage=6;
+        NetLog("[NET/TEST] Overlapped players for online collision and jump regression");
+    } else if(mEffectsTestStage==6) {
+        mEffectsTestJumpApex=std::max(mEffectsTestJumpApex,partner->GetCharacterBody()->GetFeetPosition().y-mEffectsTestJumpBase);
+        if(age>10) {
+            auto* a=local->GetCharacterBody(); auto* b=partner->GetCharacterBody();
+            const float hostMoved=(a->GetFeetPosition()-mEffectsTestHostFeet).Length();
+            const bool ok=a->GetIgnoreBody()==b->GetCurrentBody() && b->GetIgnoreBody()==a->GetCurrentBody() &&
+                hostMoved<.08f && mEffectsTestJumpApex>.2f && b->IsOnGround();
+            NetLog(std::string("[NET/TEST] ")+(ok?"PASS authoritative jump and players pass through":"FAILED effects host jump or player collision")+
+                " apex="+std::to_string(mEffectsTestJumpApex)+" host_displacement="+std::to_string(hostMoved));
+            partner->SetJumpDisabled(true);
+            mEffectsTestJumpBase=b->GetFeetPosition().y; mEffectsTestAt=now; mEffectsTestStage=7;
+        }
+    } else if(mEffectsTestStage==7 && age>4) {
+        const bool ok=partner->GetJumpDisabled() && std::fabs(partner->GetCharacterBody()->GetFeetPosition().y-mEffectsTestJumpBase)<.05f;
+        NetLog(ok?"[NET/TEST] PASS host respects scripted jump disable":"[NET/TEST] FAILED effects disabled host jump");
+        partner->SetJumpDisabled(false); mEffectsTestStage=8;
     }
 }
 #include "LuxNetwork_Serialize.inl"

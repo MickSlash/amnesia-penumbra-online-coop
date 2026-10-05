@@ -25,7 +25,7 @@ bool ValidPlayer(const PlayerState& p) {
         p.eyeHeight >= -5000 && p.eyeHeight <= 5000 && !(p.flags & ~127) &&
         p.roll >= -3142 && p.roll <= 3142 && p.cameraX >= -5000 && p.cameraX <= 5000 &&
         p.cameraZ >= -5000 && p.cameraZ <= 5000 && p.fov >= 10 && p.fov <= 3142 &&
-        p.aspect >= 10 && p.aspect <= 20000 && p.lookSpeed <= 10000;
+        p.aspect >= 10 && p.aspect <= 20000 && p.lookSpeed <= 10000 && p.grounded <= 1 && p.jumpSpeed <= 32000;
 }
 bool ValidMap(const std::string& file) {
     if (file.size() < 10 || file.size() > 240 || file.compare(0, 5, "maps/") ||
@@ -75,7 +75,7 @@ bool ValidInventoryItem(const InventoryItem& item) {
         (item.image.empty() || (item.image[0] != '/' && item.image[0] != '\\'));
 }
 bool ValidPresentation(const Presentation& event) {
-    if(!event.epoch || uint8_t(event.kind) < 1 || uint8_t(event.kind) > 21 || event.target > 2) return false;
+    if(!event.epoch || uint8_t(event.kind) < 1 || uint8_t(event.kind) > 22 || event.target > 2) return false;
     for(unsigned i = 0; i < 4; ++i)
         if(event.text[i].size() > ((i == 0 && event.kind == PresentationKind::Message) ||
             (i == 1 && event.kind == PresentationKind::Hint) ? 4096u : 256u) || event.text[i].find('\0') != std::string::npos) return false;
@@ -84,6 +84,7 @@ bool ValidPresentation(const Presentation& event) {
     if(event.kind == PresentationKind::ImageTrail || event.kind == PresentationKind::Sepia || event.kind == PresentationKind::RadialBlur ||
         event.kind == PresentationKind::BlurStart || event.kind == PresentationKind::Flash)
         for(int32_t v : event.values) if(v < 0) return false;
+    if(event.kind == PresentationKind::Emotion && (event.values[0] < 0 || event.values[0] > 1)) return false;
     if(event.kind == PresentationKind::Hint && (event.text[0].empty() || event.values[0] < 0)) return false;
     if(event.kind == PresentationKind::FogProperties && (event.values[2] < 0 || event.values[3] < 0 || event.values[3] > 3)) return false;
     if(event.kind == PresentationKind::GuiSound || event.kind == PresentationKind::SoundFade ||
@@ -276,15 +277,16 @@ std::vector<uint8_t> EncodeSnapshot(const Snapshot& s) {
                 U16(out, p.fov); U16(out, p.aspect); U16(out, p.lookSpeed);
         U16(out, uint16_t(p.forwardSpeed)); U16(out, uint16_t(p.sideSpeed));
         U16(out, p.forwardMax); U16(out, p.sideMax); U16(out, p.acceleration); U16(out, p.deceleration); U16(out,p.backwardMax);
+        U16(out,uint16_t(p.verticalSpeed)); U16(out,uint16_t(p.verticalAcceleration)); U16(out,p.jumpSpeed); out.push_back(p.grounded);
     }
     return out;
 }
 bool DecodeSnapshot(const uint8_t* p, size_t n, Snapshot& s) {
-    if (!ValidHeader(p, n) || n != 123 || p[4] != uint8_t(Message::Snapshot)) return false;
+    if (!ValidHeader(p, n) || n != 137 || p[4] != uint8_t(Message::Snapshot)) return false;
     Snapshot value; value.epoch = R32(p + 5); value.sequence = R32(p + 9); value.acknowledgedInput = R32(p + 13);
     if (!value.epoch) return false;
     for (unsigned i = 0; i < 2; ++i) {
-        const uint8_t* b = p + 17 + i * 53; auto& player = value.players[i];
+        const uint8_t* b = p + 17 + i * 60; auto& player = value.players[i];
         player.x = Signed32(b); player.y = Signed32(b + 4); player.z = Signed32(b + 8);
         player.yaw = Signed16(b + 12); player.pitch = Signed16(b + 14);
         player.health = R16(b + 16); player.sanity = R16(b + 18); player.oil = R16(b + 20);
@@ -294,6 +296,7 @@ bool DecodeSnapshot(const uint8_t* p, size_t n, Snapshot& s) {
         player.forwardSpeed = Signed16(b+39); player.sideSpeed = Signed16(b+41);
         player.forwardMax = R16(b+43); player.sideMax = R16(b+45); player.acceleration = R16(b+47); player.deceleration = R16(b+49);
         player.backwardMax = R16(b+51);
+        player.verticalSpeed=Signed16(b+53); player.verticalAcceleration=Signed16(b+55); player.jumpSpeed=R16(b+57); player.grounded=b[59];
         if (!ValidPlayer(player)) return false;
     }
     s = value; return true;
@@ -304,7 +307,7 @@ std::vector<uint8_t> EncodeLife(const Snapshot& s) {
     return bytes;
 }
 bool DecodeLife(const uint8_t* p, size_t n, Snapshot& s) {
-    if(!ValidHeader(p, n) || n != 123 || p[4] != uint8_t(Message::Life)) return false;
+    if(!ValidHeader(p, n) || n != 137 || p[4] != uint8_t(Message::Life)) return false;
     auto bytes = std::vector<uint8_t>(p, p + n);
     bytes[4] = uint8_t(Message::Snapshot);
     return DecodeSnapshot(bytes.data(), bytes.size(), s);
@@ -541,7 +544,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         return;
     }
     if(ready_ && role_ == Role::Host && channel == 0 && n >= 19 && p[4] == uint8_t(Message::Action)) {
-        if(p[13] < 1 || p[13] > 6 || p[14] > 1) { Reject("invalid player action"); return; }
+        if(p[13] < 1 || p[13] > 7 || p[14] > 1) { Reject("invalid player action"); return; }
         ActionRequest action; action.epoch = R32(p + 5); action.sequence = R32(p + 9);
         action.action = PlayerAction(p[13]); action.pressed = p[14] != 0;
         size_t cursor = 15;
@@ -808,7 +811,7 @@ bool Session::ReadEntity(EntityState& e) {
     return true;
 }
 bool Session::SendAction(const ActionRequest& a) {
-    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 6 || a.item.size() > 128 || a.secondItem.size() > 128) return false;
+    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 7 || a.item.size() > 128 || a.secondItem.size() > 128) return false;
     auto out = Header(Message::Action); U32(out, a.epoch); U32(out, a.sequence); out.push_back(uint8_t(a.action)); out.push_back(a.pressed ? 1 : 0);
     String(out, a.item); String(out, a.secondItem);
     return Send(out, 0, true);

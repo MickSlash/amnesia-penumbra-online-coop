@@ -69,6 +69,8 @@ private:
     bool mHasLookSequence = false, mClientObjectLook = false, mClientScriptLook = false;
     bool mClientSharedIntro = false, mIntroCameraTestObserved = false;
     online::MovementPrediction mPrediction;
+    online::VerticalPrediction mVerticalPrediction;
+    uint8_t mLocalInputButtons = 0;
     bool mPredictionTestObserved = false, mPredictionSmoothTestObserved = false;
     bool mRemoteRotate = false;
     cVector3f mRemoteSpawnFeet;
@@ -199,6 +201,17 @@ private:
     unsigned mCampaignStartTestStage = 0;
     void UpdateCampaignStartTest();
     void UpdateMediaTest(cLuxMap* map, float elapsed);
+    void UpdateEffectsTest(cLuxMap* map);
+    unsigned mEffectsTestStage = 0, mEffectsTestStarts = 0, mEffectsTestEnds = 0;
+    bool mEffectsTestProgressSeen = false, mEffectsTestRemoteSkip = false;
+    std::chrono::steady_clock::time_point mEffectsTestAt;
+    cVector3f mEffectsTestFeet;
+    float mEffectsTestBaseFov = 0;
+    float mEffectsTestJumpBase = 0, mEffectsTestJumpApex = 0;
+    bool mEffectsTestJumpImmediate = false;
+    cVector3f mEffectsTestHostFeet;
+    bool mEffectsTestJumpReady = false;
+    cVector3f mEffectsTestJumpSpawn;
     int mNextMediaID = 1000000000; // give unsaved runtime objects stable engine IDs
     bool ReplicateMedia(cLuxMap* map);
     void ApplyMedia(cLuxMap* map, const online::MediaState& state);

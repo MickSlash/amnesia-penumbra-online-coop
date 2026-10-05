@@ -19,6 +19,7 @@
 
 #include "LuxEffectHandler.h"
 #include "LuxNetwork.h"
+#include <cstdlib>
 
 #include "system/Platform.h"
 
@@ -290,6 +291,8 @@ void cLuxEffect_EmotionFlash::Start(const tString &asTextCat, const tString &asT
 	//down -- that is what stops a FOV sticking when one player starts a sequence
 	//and the other ends it.
 	mpActingPlayer = gpBase->mpPlayer;
+    if(gpBase->mpNetwork && gpBase->mpNetwork->UsesSharedInventory())
+        Log("[NET/EFFECT] Emotion started entry=%s player=%d\n",asTextEntry.c_str(),mpActingPlayer->GetPlayerIndex()+1);
 
 	gpBase->mpEffectHandler->SetPlayerIsPausedFor(mpActingPlayer, true);
 	mpActingPlayer->FadeFOVMulTo(0.5f, 0.5f);
@@ -348,19 +351,7 @@ void cLuxEffect_EmotionFlash::Update(float afTimeStep)
 		mfTextTime -= afTimeStep;
 		if(mfTextTime < 0)
 		{
-			//Coop: the zoom went to one player, the restore goes to BOTH. A restore
-			//cannot over-free anyone, and reaching both is what guarantees nobody is
-			//left at 0.5 FOV by a vision the other player finished.
-			gpBase->mpPlayer->FadeFOVMulTo(1.0f, 0.33f);
-			{
-				cLuxPlayer *pOtherFov = CoopGetOtherPlayerForEffects();
-				if(pOtherFov) pOtherFov->FadeFOVMulTo(1.0f, 0.33f);
-			}
-			gpBase->mpEffectHandler->SetPlayerIsPaused(false);
-
-			gpBase->mpEffectHandler->GetRadialBlur()->FadeTo(0, 1);
-			
-			mlStep = 2;
+            BeginFadeOut();
 		}
 	}
 	else if(mlStep ==2)
@@ -382,6 +373,22 @@ void cLuxEffect_EmotionFlash::Update(float afTimeStep)
 }
 
 //-----------------------------------------------------------------------
+
+void cLuxEffect_EmotionFlash::BeginFadeOut()
+{
+    if(!mbActive || mlStep == 2) return;
+    gpBase->mpPlayer->FadeFOVMulTo(1.0f, 0.33f);
+    cLuxPlayer* other = CoopGetOtherPlayerForEffects();
+    if(other) other->FadeFOVMulTo(1.0f, 0.33f);
+    gpBase->mpEffectHandler->SetPlayerIsPaused(false);
+    gpBase->mpEffectHandler->GetRadialBlur()->FadeTo(0, 1);
+    mlStep = 2;
+    if(gpBase->mpNetwork && gpBase->mpNetwork->UsesSharedInventory()) {
+        online::Presentation end; end.kind = online::PresentationKind::Emotion; end.values[0] = 1;
+        gpBase->mpNetwork->QueuePresentation(end);
+        Log("[NET/EFFECT] Emotion ending; player controls restored\n");
+    }
+}
 
 void cLuxEffect_EmotionFlash::OnDraw(float afFrameTime)
 {
@@ -430,7 +437,12 @@ void cLuxEffect_EmotionFlash::DoAction(eLuxPlayerAction aAction, bool abPressed)
 {
 	if(abPressed==false) return;
 
-	if(mlStep==1) mfTextTime = 0;
+    if(mlStep==1) {
+        // The client must advance the authoritative timer as well as its local page.
+        if(gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica())
+            gpBase->mpNetwork->SendLocalAction(online::PlayerAction::Interact, true);
+        mfTextTime = 0;
+    }
 }
 
 //-----------------------------------------------------------------------
@@ -447,7 +459,10 @@ void cLuxEffect_EmotionFlash::DoActionForPlayer(cLuxPlayer *apPlayer, eLuxPlayer
 	//has been destroyed, is still skippable. Nothing here can strand anybody in
 	//any case: Update() ends the vision on its own timer whether or not a button
 	//is ever pressed.
-	if(apPlayer && apPlayer != GetActingPlayer()) return;
+    // Online visions are relayed to both full-screen peers. Either reader may
+    // continue; split-screen retains its original per-player ownership.
+    if(apPlayer && apPlayer != GetActingPlayer() &&
+        !(gpBase->mpNetwork && gpBase->mpNetwork->UsesSharedInventory())) return;
 
 	DoAction(aAction, abPressed);
 }
@@ -1092,6 +1107,15 @@ void cLuxEffect_SanityGainFlash::Reset()
 
 void cLuxEffect_SanityGainFlash::Start()
 {
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::SanityGain;
+        gpBase->mpNetwork->QueuePresentation(event);
+    }
+    StartTimeline();
+}
+
+void cLuxEffect_SanityGainFlash::StartTimeline()
+{
 	// No player context, so both screens. StartForPlayer() narrows it after.
 	mbShowOnP1 = true;
 	mbShowOnP2 = true;
@@ -1120,6 +1144,11 @@ void cLuxEffect_SanityGainFlash::StartForPlayer(cLuxPlayer *apPlayer)
 	//Already flashing on this player's screen: leave it alone rather than
 	//restarting the timeline and playing the sound twice.
 	if(mbActive && bAlreadyShowing) return;
+    if(gpBase->mpNetwork) {
+        online::Presentation event; event.kind = online::PresentationKind::SanityGain;
+        event.target = bP2 ? 2 : 1;
+        gpBase->mpNetwork->QueuePresentation(event);
+    }
 
 	if(mbActive)
 	{
@@ -1132,7 +1161,7 @@ void cLuxEffect_SanityGainFlash::StartForPlayer(cLuxPlayer *apPlayer)
 		return;
 	}
 
-	Start();
+	StartTimeline();
 
 	mbShowOnP1 = !bP2;
 	mbShowOnP2 = bP2;
@@ -1173,9 +1202,21 @@ void cLuxEffect_SanityGainFlash::Update(float afTimeStep)
 
 //-----------------------------------------------------------------------
 
+bool cLuxEffect_SanityGainFlash::VisibleForPlayer(cLuxPlayer* player) const
+{
+    return mbActive && mfAlpha>0.05f && (player && player->IsPlayer2()?mbShowOnP2:mbShowOnP1);
+}
+
 void cLuxEffect_SanityGainFlash::OnDraw(float afFrameTime)
 {
-	if(mbShowOnP1) DrawFlash(gpBase->mpGameHudSet, afFrameTime);
+    if(mbShowOnP1) {
+        DrawFlash(gpBase->mpGameHudSet, afFrameTime);
+        const char* qa=std::getenv("AMNESIA_NET_TEST_EFFECTS");
+        if(qa && std::string(qa)=="1" && mfAlpha>.05f && gpBase->mpNetwork && gpBase->mpNetwork->IsClientReplica()) {
+            static bool logged=false;
+            if(!logged) { Log("[NET/TEST] Blue objective flash visible on local client viewport\n"); logged=true; }
+        }
+    }
 
 	//Coop: mpGameHudSet is only attached to P1's viewport in split-screen, so
 	//a reward P2 earned used to flash on P1's half and look like nothing had

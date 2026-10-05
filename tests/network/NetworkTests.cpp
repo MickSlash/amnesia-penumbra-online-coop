@@ -521,6 +521,8 @@ static void RecoveryTests() {
     for(int i = 0; i < 120; ++i) prediction.Push(input,1.0f/60);
     position = prediction.Reconcile(state,0,free); Check(prediction.Pending() == 32 && position.z > -1.51f && position.z < -0.76f, "prediction covers brief gaps but horizon and memory stay bounded");
     position = prediction.Reconcile(state,0,[](PredictedPosition from,PredictedPosition) { return from; }); Check(position.z == 0, "blocked movement cannot predict through wall");
+    prediction.Clear(); input.buttons=1; prediction.Push(input,1.0f/60);
+    position=prediction.Reconcile(state,0,free); Check(position.z<0,"jump preserves horizontal prediction"); input.buttons=0;
     state.flags |= 32; position = prediction.Reconcile(state,0,free); Check(position.z == 0 && prediction.Pending() == 0, "interactions suppress prediction");
     MovementPrediction smooth; PlayerState corrected;
     corrected.forwardMax=corrected.sideMax=3000; corrected.acceleration=corrected.deceleration=30000;
@@ -547,6 +549,28 @@ static void RecoveryTests() {
         position=briefLoss.ReconcileSmoothed(moving,0,1,1.0f/60,free);
         Check(position.z<previousZ, "local movement keeps advancing through 400 ms without new pose"); previousZ=position.z;
     }
+    VerticalPrediction vertical; PlayerState motor; motor.grounded=1; motor.jumpSpeed=4666; motor.verticalAcceleration=-20000;
+    auto air=[](float,float to){return to;};
+    vertical.Update(motor,0,1,1.0f/60,0,air);
+    Check(vertical.StartJump(motor,7),"grounded input starts bounded jump anticipation");
+    float height=vertical.Update(motor,0,1,1.0f/60,0,air);
+    Check(height>.02f && vertical.Pending(),"jump visible before authoritative acknowledgement");
+    Check(!vertical.StartJump(motor,8),"held or repeated jump cannot restart pending impulse");
+    motor.grounded=0; motor.y=120; motor.verticalSpeed=4400; motor.verticalAcceleration=-6000;
+    height=vertical.Update(motor,7,2,1.0f/60,.01f,air); Check(!vertical.Pending() && height>.02f && height<.2f,"host acknowledgement reconciles airborne jump without snapping");
+    motor.grounded=1; motor.y=0; motor.verticalSpeed=0;
+    for(int i=0;i<60;++i) height=vertical.Update(motor,7,3,1.0f/60,0,air);
+    Check(std::fabs(height)<.001f,"authoritative landing converges without vertical drift");
+    vertical.Clear(); vertical.StartJump(motor,8);
+    height=vertical.Update(motor,7,4,1.0f/60,0,[](float from,float){return from;});
+    Check(height==0 && !vertical.Pending(),"ceiling blocks predicted takeoff");
+    vertical.Clear(); vertical.StartJump(motor,8);
+    for(int i=0;i<30;++i) height=vertical.Update(motor,7,4,1.0f/60,1,air);
+    Check(!vertical.Pending() && std::fabs(height)<.05f,"unacknowledged jump has bounded horizon and returns to host state");
+    motor.y=3000; height=vertical.Update(motor,8,5,1.0f/60,0,air); Check(height==3,"teleport never vertically smoothed through geometry");
+    motor.x=2000; motor.y=3400; height=vertical.Update(motor,8,6,1.0f/60,0,air);
+    Check(std::fabs(height-3.4f)<.0001f,"horizontal teleport with smaller height change resets vertical prediction");
+    motor.flags|=8; vertical.Update(motor,8,6,1.0f/60,0,air); Check(!vertical.Pending(),"death cancels jump prediction");
     Session host(Log), client(Log), stranger(Log);
     host.SetLobbyReady(false); client.SetLobbyReady(false);
     Check(host.StartHost(27047) && client.StartClient("127.0.0.1",27047), "recovery transport startup");
@@ -636,9 +660,12 @@ int main(int argc, char** argv) {
     input.forward = 1001; Check(EncodeInput(input).empty(), "invalid axis"); input.forward = -1000;
     input.lookYaw = 31421; Check(EncodeInput(input).empty(), "raw look bounded"); input.lookYaw = 0;
     Snapshot snapshot; snapshot.epoch = 1; snapshot.sequence = 17; snapshot.players[0].x = -54321;
+    snapshot.players[1].verticalSpeed=4567; snapshot.players[1].verticalAcceleration=-20000; snapshot.players[1].jumpSpeed=4666; snapshot.players[1].grounded=1;
     auto stateBytes = EncodeSnapshot(snapshot); Snapshot stateRead;
-    Check(stateBytes.size() == 123 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
+    Check(stateBytes.size() == 137 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
         stateRead.players[0].x == -54321 && stateRead.sequence == 17, "signed snapshot roundtrip");
+    Check(stateRead.players[1].verticalSpeed==4567 && stateRead.players[1].verticalAcceleration==-20000 && stateRead.players[1].jumpSpeed==4666 && stateRead.players[1].grounded==1,"vertical motor state roundtrip");
+    snapshot.players[1].grounded=2; Check(EncodeSnapshot(snapshot).empty(),"grounded flag bounded"); snapshot.players[1].grounded=1;
     for(size_t n = 0; n < stateBytes.size(); ++n) Check(!DecodeSnapshot(stateBytes.data(), n, stateRead), "truncated snapshot");
     stateBytes.push_back(0); Check(!DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead), "snapshot trailing byte");
     snapshot.players[1].oil = 10001; Check(EncodeSnapshot(snapshot).empty(), "snapshot vital range");
@@ -692,6 +719,12 @@ int main(int argc, char** argv) {
     storyBytes.push_back(0); Check(!DecodePresentation(storyBytes.data(), storyBytes.size(), storyRead), "story trailing byte");
     story.text[0] = "../secret.ogg"; Check(EncodePresentation(story).empty(), "story asset traversal rejected");
     story.text[0] = "voice/test.ogg"; story.target = 3; Check(EncodePresentation(story).empty(), "story recipient bounded");
+    story = Presentation(); story.epoch = 1; story.kind = PresentationKind::SanityGain; story.target = 2;
+    storyBytes = EncodePresentation(story);
+    Check(DecodePresentation(storyBytes.data(),storyBytes.size(),storyRead) && storyRead.kind==PresentationKind::SanityGain && storyRead.target==2,"client objective flash roundtrip");
+    story.kind=PresentationKind::Emotion; story.values[0]=1; storyBytes=EncodePresentation(story);
+    Check(DecodePresentation(storyBytes.data(),storyBytes.size(),storyRead) && storyRead.values[0]==1,"authoritative emotion completion roundtrip");
+    story.values[0]=2; Check(EncodePresentation(story).empty(),"invalid emotion phase rejected");
     story.target = 0; story.kind = PresentationKind(99); Check(EncodePresentation(story).empty(), "story kind bounded");
     story.kind = PresentationKind::Message; story.text[0] = std::string(4097, 'x'); Check(EncodePresentation(story).empty(), "story text bounded");
     story = Presentation(); story.epoch = 1; story.kind = PresentationKind::Hint; story.text[0] = "Diary"; story.text[1] = std::string(4096, 'x');

@@ -10,6 +10,7 @@ param(
     [switch]$SnapshotBlackout,
     [switch]$OnlineMenu,
     [switch]$VisibilityProps,
+    [switch]$Effects,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
@@ -20,7 +21,7 @@ if ($Media) { $Campaign = $true }
 if ($Campaign) { $Replication = $true }
 if ($Enemy) { $MapOnly = $true }
 if ($OnlineMenu) { $MapOnly = $true }
-if ($VisibilityProps) { $MapOnly = $true }
+if ($VisibilityProps -or $Effects) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $repoPath = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
@@ -38,7 +39,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -59,10 +60,11 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ROLE', $role)
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_VISIBILITY_PROPS', $(if ($VisibilityProps) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_MENU', $(if ($OnlineMenu) { '1' } else { $null }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_EFFECTS', $(if ($Effects) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DRIVE_FILE', $null)
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$(if ($role -eq 'client' -and $ClientPort -gt 0) { $ClientPort } else { $Port }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ADDRESS', '127.0.0.1')
-        [Environment]::SetEnvironmentVariable('AMNESIA_NET_SMOKE_SECONDS', $(if ($Campaign -or $MapOnly) { '60' } elseif ($Replication) { '30' } else { '15' }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_SMOKE_SECONDS', $(if($Effects){'70'} elseif ($Campaign -or $MapOnly) { '60' } elseif ($Replication) { '30' } else { '15' }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_MOVEMENT', $(if ($Replication -and $role -eq 'client') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_PICKUP', $(if ($Replication -and $role -eq 'host') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_CAMPAIGN', $(if ($Campaign -and $role -eq 'host') { '1' } else { $null }))
@@ -93,6 +95,14 @@ try {
             throw "$role did not finish a handshake and clean smoke exit: $($profiles[$role])"
         }
         Write-Output "PASS: $role game handshake and clean exit ($($profiles[$role]))"
+        if($Effects) {
+            if(!$log.Contains('[NET/TEST] PASS objective flash and emotion page recovery') -or $log.Contains('[NET/TEST] FAILED effects')) {throw "Missing $role effects regression proof"}
+            if($role -eq 'client' -and !$log.Contains('Blue objective flash visible on local client viewport')) {throw 'Client did not render objective flash'}
+            $jumpMarker=if($role -eq 'client'){'PASS client jump prediction and landing'}else{'PASS authoritative jump and players pass through'}
+            if(!$log.Contains($jumpMarker)){throw "Missing $role jump/collision regression proof"}
+            if(!$log.Contains("PASS $role respects scripted jump disable")){throw "Missing $role scripted jump permission proof"}
+            Write-Output "PASS: $role objective flash, emotion page advance, natural expiry and restored controls"
+        }
         if($OnlineMenu) {
             foreach($marker in @('Clear image checkbox suppresses and restores original blur without changing graphics preferences','Online menu exit/reconnect regression completed')) {
                 if(!$log.Contains($marker)) { throw "Missing $role online menu proof: $marker" }

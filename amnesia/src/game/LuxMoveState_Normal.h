@@ -84,6 +84,8 @@ public:
 
 	bool IsRunning(){ return mbRunning;}
 	bool IsCrouching(){ return mbCrouching;}
+	float GetJumpStartForce() const { return mfJumpStartForce; }
+	float GetJumpGravityMultiplier() const { return mbJumping && mfMaxJumpCount>0 ? .1f+.5f*mfJumpCount/mfMaxJumpCount : 1.0f; }
 
 	void SetCrouch(bool abActive);
 	void ResetJumping();
