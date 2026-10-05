@@ -23,6 +23,7 @@
 #include "GameObject.h"
 #include "GameArea.h"
 #include "Player.h"
+#include "CoopNetwork.h"
 #include "Inventory.h"
 #include "Notebook.h"
 #include "NumericalPanel.h"
@@ -639,8 +640,8 @@ void cPlayerHealth::Update(float afTimeStep)
 	}
 	
 	////////////////////////////
-	//Increase health over time:
-	switch(mpInit->mDifficulty)
+	//Increase health over time only on the campaign authority:
+    if(!mpInit->mpCoop || !mpInit->mpCoop->IsClient()) switch(mpInit->mDifficulty)
 	{
 	case eGameDifficulty_Easy:
 		pPlayer->AddHealth(afTimeStep * 1.4f); break;
@@ -2222,9 +2223,9 @@ void cPlayerHidden::UnHide()
 	mfHiddenCount =0;
 	mfHiddenOnCount =0;
 
-	if(mbEnemyTooClose)
-	{
-		mpInit->mpGame->GetGraphics()->GetRendererPostEffects()->SetImageTrailActive(false);
+	if(mbEnemyTooClose && !mpInit->mpPlayer->IsNetworkRemote())
+    {
+        mpInit->mpGame->GetGraphics()->GetRendererPostEffects()->SetImageTrailActive(false);
 	}
 
 	mfEnemyTooCloseCount =0;
@@ -2453,7 +2454,8 @@ void cPlayerHidden::Update(float afTimeStep)
 
 	////////////////////////////////////////////////////
 	//Check if enemy is too close and act accordingly.
-	UpdateEnemyTooClose(afTimeStep);
+	if(!mpInit->mpPlayer->IsNetworkRemote()) UpdateEnemyTooClose(afTimeStep);
+    else mpLight->SetVisible(false);
 }
 
 //-----------------------------------------------------------------------

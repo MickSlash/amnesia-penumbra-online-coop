@@ -171,7 +171,8 @@ public:
 	virtual void OnAnimationOver(const tString& asAnimName)=0;
 	virtual void OnFlashlight(const cVector3f &avPosition)=0;
 
-	void SetPreviousState(int alX){ mlPreviousState = alX;}
+	void SetNetworkPlayer(cPlayer* p) { mpPlayer=p; }
+    void SetPreviousState(int alX){ mlPreviousState = alX;}
 	int GetPreviousState(){ return mlPreviousState;}
 
 	int GetId(){ return mlId;}
@@ -285,6 +286,9 @@ public:
 	
 	//AI
 	bool CanSeePlayer();
+    void SelectNetworkTarget(cPlayer* first,cPlayer* second,float dt);
+    cPlayer* GetNetworkTarget() const { return networkTarget; }
+    void ApplyNetworkState(float health,int state);
 	cCharacterMove* GetMover(){ return mpMover;}
 	cVector3f GetLastPlayerPos(){ return mvLastPlayerPos;}
 	void SetLastPlayerPos(const cVector3f &avPos){ mvLastPlayerPos = avPos;}
@@ -357,7 +361,10 @@ protected:
 	
 	bool LineOfSight(const cVector3f &avPos, const cVector3f &avSize);
 
-	bool mbSetFeetAtGroundOnStart;
+	cPlayer* networkTarget = nullptr;
+    float networkCheck = 0;
+    int networkLOS[2] = {};
+    bool mbSetFeetAtGroundOnStart;
 	bool mbAttachMeshToBody;
 	bool mbRemoveAttackerOnDisable;
 

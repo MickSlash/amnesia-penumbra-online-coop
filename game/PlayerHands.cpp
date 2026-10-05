@@ -461,7 +461,9 @@ bool cPlayerHands::AddModelFromFile(const tString &asFile)
 		return false;
 	}
 
-	ePlayerHandType handType = ToHandType(pMainElem->Attribute("Type"));
+	const tString modelName=cString::ToLowerCase(cString::ToString(pMainElem->Attribute("Name"),""));
+    if(m_mapHudModels.find(modelName)!=m_mapHudModels.end()) { hplDelete(pXmlDoc); return true; }
+    ePlayerHandType handType = ToHandType(pMainElem->Attribute("Type"));
 	iHudModel* pHudModel = NULL;
 	
 	switch(handType)

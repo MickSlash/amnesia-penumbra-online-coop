@@ -52,7 +52,7 @@ bool ValidTransform(const Transform& t) {
 }
 bool ValidEntity(const EntityState& e) {
     if(!e.epoch || e.name.empty() || e.name.size() > 128 || !ValidAsset(e.file) || e.type > 2 ||
-        e.bodies.size() > 32 || e.animations.size() > 32 || (e.flags & 128) || !ValidTransform(e.transform)) return false;
+        e.bodies.size() > 32 || e.animations.size() > 32 || (e.flags & 128) || e.health<0 || e.health>1000000000 || e.enemyState>12 || e.target>2 || !ValidTransform(e.character) || !ValidTransform(e.transform)) return false;
     for(unsigned char c : e.name) if(c < 32 || c > 126) return false;
     for(int32_t s : e.scale) if(s <= 0 || s > 100000) return false;
     for(const auto& t : e.bodies) if(!ValidTransform(t)) return false;
@@ -236,17 +236,19 @@ std::vector<uint8_t> EncodeEntity(const EntityState& e) {
     out.insert(out.end(), e.name.begin(), e.name.end()); out.insert(out.end(), e.file.begin(), e.file.end());
     for(const auto& t : e.bodies) for(int32_t v : t) U32(out, uint32_t(v));
     out.push_back(uint8_t(e.animations.size()));
-    for(const auto& a : e.animations) { U16(out, a.index); U16(out, a.weight); U32(out, a.time); }
+    for(const auto& a : e.animations) { U16(out, a.index); U16(out, a.weight); U32(out, a.time); out.push_back(a.loop?1:0); }
+    U32(out,uint32_t(e.health)); out.push_back(e.enemyState); out.push_back(e.target);
+    for(int32_t v:e.character) U32(out,uint32_t(v));
     U32(out, e.sequence);
     return out;
 }
 bool DecodeEntity(const uint8_t* p, size_t n, EntityState& entity) {
-    if(!ValidHeader(p, n) || n < 87 || p[4] != uint8_t(Message::Entity)) return false;
+    if(!ValidHeader(p, n) || n < 141 || p[4] != uint8_t(Message::Entity)) return false;
     const unsigned names = R16(p + 17), files = R16(p + 19), bodies = p[21];
     const size_t animationsOffset = 82 + names + files + bodies * 48;
     if(names > 128 || files > 240 || bodies > 32 || n <= animationsOffset) return false;
     const unsigned animations = p[animationsOffset];
-    if(animations > 32 || n != animationsOffset + 5 + animations * 8) return false;
+    if(animations > 32 || n != animationsOffset + 59 + animations * 9) return false;
     EntityState e; e.epoch = R32(p + 5); e.id = R32(p + 9); e.type = p[13]; e.flags = p[14]; e.subtype = R16(p + 15);
     for(unsigned i = 0; i < 3; ++i) e.scale[i] = Signed32(p + 22 + i * 4);
     for(unsigned i = 0; i < 12; ++i) e.transform[i] = Signed32(p + 34 + i * 4);
@@ -257,9 +259,13 @@ bool DecodeEntity(const uint8_t* p, size_t n, EntityState& entity) {
         e.bodies[i][j] = Signed32(p + 82 + names + files + i * 48 + j * 4);
     e.animations.resize(animations);
     for(unsigned i = 0; i < animations; ++i) {
-        const uint8_t* a = p + animationsOffset + 1 + i * 8;
+        const uint8_t* a = p + animationsOffset + 1 + i * 9;
         e.animations[i].index = R16(a); e.animations[i].weight = R16(a + 2); e.animations[i].time = R32(a + 4);
+        if(a[8]>1) return false; e.animations[i].loop=a[8]!=0;
     }
+    const uint8_t* extra=p+n-58;
+    e.health=Signed32(extra); e.enemyState=extra[4]; e.target=extra[5];
+    for(unsigned i=0;i<12;++i) e.character[i]=Signed32(extra+6+i*4);
     e.sequence = R32(p + n - 4);
     if(!ValidEntity(e)) return false;
     entity = std::move(e); return true;
@@ -541,7 +547,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         return;
     }
     if(ready_ && role_ == Role::Host && channel == 0 && n >= 23 && p[4] == uint8_t(Message::Action)) {
-        if(p[13] < 1 || p[13] > 7 || p[14] > 1) { Reject("invalid player action"); return; }
+        if(p[13] < 1 || p[13] > 8 || p[14] > 1) { Reject("invalid player action"); return; }
         ActionRequest action; action.epoch = R32(p + 5); action.sequence = R32(p + 9);
         action.action = PlayerAction(p[13]); action.pressed = p[14] != 0;
         size_t cursor = 15;
@@ -813,7 +819,7 @@ bool Session::ReadEntity(EntityState& e) {
     return true;
 }
 bool Session::SendAction(const ActionRequest& a) {
-    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 7 || a.item.size() > 128 || a.secondItem.size() > 128 || std::abs(int(a.lookYaw))>31420 || std::abs(int(a.lookPitch))>31420) return false;
+    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 8 || a.item.size() > 128 || a.secondItem.size() > 128 || std::abs(int(a.lookYaw))>31420 || std::abs(int(a.lookPitch))>31420) return false;
     auto out = Header(Message::Action); U32(out, a.epoch); U32(out, a.sequence); out.push_back(uint8_t(a.action)); out.push_back(a.pressed ? 1 : 0);
     String(out, a.item); String(out, a.secondItem);
     U16(out,uint16_t(a.lookYaw)); U16(out,uint16_t(a.lookPitch));

@@ -555,7 +555,8 @@ bool cMapHandler::Load(const tString &asFile,const tString& asStartPos)
 //-----------------------------------------------------------------------
 
 bool cMapHandler::LoadSimple(const tString &asFile, bool abLoadEntities)
-{	
+{
+    if(mpInit->mpCoop) mpInit->mpCoop->BeforeMapLoad();
 	tString sMapName = cString::ToLowerCase(cString::SetFileExt(asFile,""));
 	cWorld3D *pWorld=NULL;
 
@@ -631,7 +632,8 @@ bool cMapHandler::LoadSimple(const tString &asFile, bool abLoadEntities)
 	mpInit->mpGame->ResetLogicTimer();
 	
 	//Physics set up
-	pWorld->GetPhysicsWorld()->SetAccuracyLevel(mpInit->mPhysicsAccuracy);
+    pWorld->GetPhysicsWorld()->SetAccuracyLevel(mpInit->mPhysicsAccuracy);
+    if(mpInit->mpCoop) mpInit->mpCoop->AfterMapLoad(asFile);
 
 	return true;
 }
@@ -1373,7 +1375,9 @@ void cMapHandler::Update(float afTimeStep)
 		//LogUpdate("  %s\n",pEntity->GetName().c_str());
 
 		if(pEntity->IsActive()){
-			pEntity->OnUpdate(afTimeStep);
+			if(mpInit->mpCoop && mpInit->mpCoop->IsHost() && pEntity->GetType()==eGameEntityType_Enemy)
+                mpInit->mpCoop->UpdateEnemy(static_cast<iGameEnemy*>(pEntity),afTimeStep);
+            else pEntity->OnUpdate(afTimeStep);
 		}
 
 		if(pEntity->GetDestroyMe() || pEntity->GetBreakMe())
@@ -1441,6 +1445,7 @@ void cMapHandler::Update(float afTimeStep)
 
 void cMapHandler::Reset()
 {
+    if(mpInit->mpCoop) mpInit->mpCoop->BeforeMapLoad();
 #ifdef DEMO_VERSION
 	glNumOfLoads = 0;
 #endif

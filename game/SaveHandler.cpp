@@ -18,6 +18,9 @@
  */
 #include "SaveHandler.h"
 #include "CoopNetwork.h"
+#include <windows.h>
+#include <memory>
+#include <cmath>
 
 #include "Init.h"
 #include "MapHandler.h"
@@ -449,9 +452,22 @@ void cSaveHandler::LoadData(const tString &asName)
 
 //-----------------------------------------------------------------------
 
+namespace {
+struct SaveOwnerScope {
+    cInit* init; cPlayer* player; cPlayerHands* hands;
+    SaveOwnerScope(cInit* i):init(i),player(i->mpPlayer),hands(i->mpPlayerHands) {
+        if(i->mpCoop && i->mpCoop->IsHost()) { i->mpPlayer=i->mpCoop->HostPlayer(); i->mpPlayerHands=i->mpCoop->HostHands(); }
+    }
+    ~SaveOwnerScope() { init->mpPlayer=player; init->mpPlayerHands=hands; }
+};
+}
 void cSaveHandler::SaveGameToFile(const tWString& asFile)
 {
+    SaveOwnerScope owner(mpInit);
+    lastOperationOK=false;
+    if(mpInit->mpCoop && mpInit->mpCoop->IsHost() && (mpInit->mpPlayer->IsDead() || !mpInit->mpPlayer->GetCharacterBody())) return;
 	if(mpInit->mpCoop && mpInit->mpCoop->IsClient()) { Log("[COOP/SAVE] Replica save ignored; host owns campaign state\n"); return; }
+    if(mpInit->mpCoop && mpInit->mpCoop->IsHost()) mpInit->mpCoop->PrepareSave();
 	//Reset all global data
 	mpSavedGame->ResetGlobalData();
 	
@@ -477,6 +493,7 @@ void cSaveHandler::SaveGameToFile(const tWString& asFile)
 	//////////////////////////////
 	//Save player
 	mpInit->mpPlayer->SaveToGlobal(&mpSavedGame->mPlayer);
+    if(mpInit->mpCoop && mpInit->mpCoop->IsHost()) mpInit->mpCoop->SavePartner(mpSavedGame);
 
 	//////////////////////////////
 	//Save map handler
@@ -533,14 +550,42 @@ void cSaveHandler::SaveGameToFile(const tWString& asFile)
 	//tString sSaveFile = cString::To8Char(sSavePath);
 	//Log("Saving to %s\n",sSaveFile.c_str());
 	//cSerializeClass::SetLog(true);
-	cSerializeClass::SaveToFile(mpSavedGame,sSavePath, "SaveGame");
+	// Write the complete campaign and both players together. A failed write keeps
+    // the previous checkpoint; replacement is atomic on the same volume.
+    const tWString temporary=sSavePath+L".tmp";
+    if(!cSerializeClass::SaveToFile(mpSavedGame,temporary,"SaveGame")) return;
+    HANDLE file=CreateFileW(temporary.c_str(),GENERIC_WRITE,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
+    if(file==INVALID_HANDLE_VALUE) return;
+    const bool flushed=FlushFileBuffers(file)!=0; CloseHandle(file);
+    if(!flushed || !MoveFileExW(temporary.c_str(),sSavePath.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+        Error("[COOP/SAVE] Could not replace checkpoint, Windows error=%lu\n",GetLastError()); return;
+    }
+    lastOperationOK=true;
+    Log("[COOP/SAVE] Saved campaign map=%s players=%d\n",mpSavedGame->mMapHandler.msCurrentMap.c_str(),mpSavedGame->mlCoopVersion?2:1);
 }
 
 //-----------------------------------------------------------------------
 
 void cSaveHandler::LoadGameFromFile(const tWString& asFile)
 {
-	if(mpInit->mpCoop && mpInit->mpCoop->IsOnline()) { Log("[COOP/SAVE] Online save restoration is not implemented in this prototype\n"); return; }
+	lastOperationOK=false;
+    if(mpInit->mpCoop && mpInit->mpCoop->IsClient()) return;
+    // Parse and validate before resetting the running world.
+    std::unique_ptr<cSavedGame> loaded(new cSavedGame());
+    if(!cSerializeClass::LoadFromFile(loaded.get(),msSaveDir+asFile)) return;
+    const auto& name=loaded->mMapHandler.msCurrentMap;
+    const auto validPlayer=[](const cPlayer_GlobalSave& p) {
+        return std::isfinite(p.mfHealth) && p.mfHealth>=0 && p.mfHealth<=100 &&
+            std::isfinite(p.mfPower) && p.mfPower>=0 && p.mfPower<=100 &&
+            std::isfinite(p.mvPosition.x) && std::isfinite(p.mvPosition.y) && std::isfinite(p.mvPosition.z) &&
+            std::abs(p.mvPosition.x)<100000 && std::abs(p.mvPosition.y)<100000 && std::abs(p.mvPosition.z)<100000 &&
+            std::isfinite(p.mfYaw) && std::isfinite(p.mfPitch) && int(p.mMoveState)>=0 && int(p.mMoveState)<ePlayerMoveState_LastEnum;
+    };
+    if(name.empty() || name.find("..")!=tString::npos || name.find(':')!=tString::npos || name.find('/')!=tString::npos || name.find('\\')!=tString::npos ||
+       !FileExists(cString::To16Char("maps/"+name+".dae")) || !validPlayer(loaded->mPlayer) ||
+       (mpInit->mpCoop && mpInit->mpCoop->IsHost() && (loaded->mlCoopVersion!=1 || !validPlayer(loaded->mPlayer2)))) {
+        Error("[COOP/SAVE] Incompatible or invalid cooperative save\n"); return;
+    }
 	///////////////////////////////
 	//Draw loading screen.
 	mpInit->mpGraphicsHelper->DrawLoadingScreen("");
@@ -564,7 +609,7 @@ void cSaveHandler::LoadGameFromFile(const tWString& asFile)
 	cSerializeClass::SetLog(false);
 	tWString sSavePath = msSaveDir + asFile;
 	//tString sSaveFile = cString::To8Char(sSavePath);
-	cSerializeClass::LoadFromFile(mpSavedGame,sSavePath);
+	delete mpSavedGame; mpSavedGame=loaded.release();
 	
 	//////////////////////////////
 	//Load global properties
@@ -607,13 +652,14 @@ void cSaveHandler::LoadGameFromFile(const tWString& asFile)
 	///////////////////////////////
 	//Load the map
 	//TOOD: Use the correct file!
-    mpInit->mpMapHandler->LoadSimple(mpSavedGame->mMapHandler.msCurrentMap+".dae",false);    
+    if(!mpInit->mpMapHandler->LoadSimple(mpSavedGame->mMapHandler.msCurrentMap+".dae",false)) return;
 	//LoadData(mpSavedGame->mMapHandler.msCurrentMap);
 	//mpInit->mpMapHandler->Load(mpSavedGame->mMapHandler.msCurrentMap+".dae","link01");
 	
 	//////////////////////////////
 	//Load player properties.
 	mpInit->mpPlayer->LoadFromGlobal(&mpSavedGame->mPlayer);
+    if(mpInit->mpCoop && mpInit->mpCoop->IsHost()) mpInit->mpCoop->LoadPartner(mpSavedGame);
 
 	//////////////////////////////
 	//Load game music
@@ -631,10 +677,19 @@ void cSaveHandler::LoadGameFromFile(const tWString& asFile)
 	mpInit->mpGame->ResetLogicTimer();
 
 	//Quick fix, make sure player is always active:
-	mpInit->mpPlayer->SetActive(true); 
+	mpInit->mpPlayer->SetActive(true);
+    lastOperationOK=true;
+    Log("[COOP/SAVE] Restored campaign map=%s players=%d\n",mpSavedGame->mMapHandler.msCurrentMap.c_str(),mpSavedGame->mlCoopVersion?2:1);
 }
 
 //-----------------------------------------------------------------------
+
+bool cSaveHandler::SaveCheckpoint() {
+    SaveGameToFile(L"save/coop_checkpoint.sav"); return lastOperationOK;
+}
+bool cSaveHandler::LoadCheckpoint() {
+    LoadGameFromFile(L"save/coop_checkpoint.sav"); return lastOperationOK;
+}
 
 void cSaveHandler::AutoSave(const tWString &asDir, int alMaxSaves)
 {
@@ -662,6 +717,7 @@ void cSaveHandler::AutoSave(const tWString &asDir, int alMaxSaves)
 													cMath::RandRectl(0,99));
 	tWString sFile = sTemp;
 	SaveGameToFile(sFile);
+    if(lastOperationOK && mpInit->mpCoop && mpInit->mpCoop->IsHost()) SaveCheckpoint();
 
 	mpInit->mpGame->ResetLogicTimer();
 }
@@ -1011,6 +1067,10 @@ kSerializeVar(mDifficulty,eSerializeType_Int32)
 
 kSerializeVar(msOnRadioEndCallback, eSerializeType_String)
 
+kSerializeVar(mlCoopVersion,eSerializeType_Int32)
+kSerializeVar(mPlayer2,eSerializeType_Class)
+kSerializeVar(msHostWeapon,eSerializeType_String)
+kSerializeVar(msClientWeapon,eSerializeType_String)
 kSerializeVar(mPlayer,eSerializeType_Class)
 kSerializeVar(mMapHandler,eSerializeType_Class)
 kSerializeVar(mInventory,eSerializeType_Class)

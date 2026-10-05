@@ -7,7 +7,11 @@
 #include "CoopSteam.h"
 #include <map>
 #include <vector>
+#include <set>
 class iGameEntity;
+class iGameEnemy;
+class cGameTrigger;
+class cSavedGame;
 
 class cCoopNetwork : public hpl::iUpdateable, public hpl::iSoundEntityGlobalCallback {
 public:
@@ -25,6 +29,18 @@ public:
     bool ClientAction(online::PlayerAction action, bool pressed, const std::string& item = "",const std::string& second = "");
     bool ClientLook(float yaw, float pitch);
     void ClientWeaponModel(const std::string& model);
+    void UpdateEnemy(iGameEnemy* enemy,float dt);
+    bool EnemyTrigger(iGameEnemy* enemy,cGameTrigger* trigger);
+    void PrepareSave();
+    cPlayer* PartnerPlayer() const { return remotePlayer; }
+    void SavePartner(cSavedGame* save);
+    void LoadPartner(cSavedGame* save);
+    void RestoreWeapon(const std::string& model);
+    void RequestSave();
+    void DamagePlayer(cPlayer* player,float damage);
+    cPlayer* HostPlayer() const { return hostPlayer; }
+    cPlayerHands* HostHands() const { return hostHands; }
+    cPlayer* PlayerForBody(hpl::iPhysicsBody* body) const;
     void WeaponHit(const std::string& entity,float health);
     void BeforeObjectBreak(iGameEntity* entity);
     void RelayParticle(const std::string& file,const hpl::cMatrixf& matrix);
@@ -46,8 +62,13 @@ private:
     void PublishMedia();
     void ApplyMedia(const online::MediaState& state);
     void PublishEnvironment();
+    void UpdateLife(float dt);
+    void PublishJournal();
+    void RunCampaignQA(float dt);
     cInit* init;
     online::Session session;
+    cPlayer* hostPlayer = nullptr;
+    cPlayerHands* hostHands = nullptr;
     cPlayer* remotePlayer = nullptr;
     cPlayerHands* remoteHands = nullptr;
     hpl::cMeshEntity* avatar[6] = {};
@@ -65,7 +86,7 @@ private:
     float sendTime = 0, backupTime = 0, worldTime = 0, qaTime = 0;
     hpl::cVector3f avatarPosition;
     std::map<std::string, online::EntityState> published;
-    struct Motion { online::EntityState state; std::vector<hpl::cMatrixf> from; float age = 0; };
+    struct Motion { online::EntityState state; std::vector<hpl::cMatrixf> from; hpl::cMatrixf meshFrom; bool meshMotion = false; float age = 0; };
     std::map<std::string, Motion> motion;
     std::vector<online::Presentation> pendingPresentation;
     online::InventoryState inventory;
@@ -104,4 +125,16 @@ private:
     bool remoteExamineDown = false;
     int gestureYaw = 0, gesturePitch = 0;
     int hammerCycle = -1;
+    bool applyingBaseline = false, restoredEquipment = false, checkpointRequested = false;
+    float checkpointCooldown = 0, deathTime[2] = {};
+    uint8_t lifeMask = 0;
+    hpl::cVector3f spawn;
+    std::set<std::string> baselineNames;
+    std::vector<uint8_t> journalBytes;
+    uint32_t journalRevision = 0, receivedJournal = 0;
+    float journalTime = 0;
+    float campaignTime = 0;
+    int campaignStage = 0;
+    bool qaHostAttacked = false, qaClientAttacked = false, qaEnemySeen = false;
+    bool qaRespawned = false, qaSaved = false, qaLoaded = false;
 };

@@ -455,6 +455,7 @@ float cCharacterMove::DistanceToChar2D(iCharacterBody *apBody)
 
 cAINode* cCharacterMove::GetAINodeInRange(float afMinDistance, float afMaxDistance)
 {
+    if(!mpContainer || mpContainer->GetNodeNum()==0) return NULL;
 	float fMaxDistSqr = afMaxDistance * afMaxDistance;
 	float fMinDistSqr = afMinDistance * afMinDistance;
 	
@@ -567,7 +568,7 @@ void cCharacterMove::SetNodeContainer(cAINodeContainer* apContainer)
 void cCharacterMove::SetAStar(cAStarHandler *apAStar)
 {
 	mpAStar = apAStar;
-	mpAStar->SetCallback(mpAStarCallback);
+	if(mpAStar) mpAStar->SetCallback(mpAStarCallback);
 }
 
 //-----------------------------------------------------------------------

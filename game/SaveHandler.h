@@ -341,7 +341,10 @@ public:
 
 	tString msOnRadioEndCallback;
 
-	cPlayer_GlobalSave mPlayer;
+	int mlCoopVersion = 0;
+    cPlayer_GlobalSave mPlayer2;
+    tString msHostWeapon,msClientWeapon;
+    cPlayer_GlobalSave mPlayer;
 	cMapHandler_GlobalSave mMapHandler;
 	cInventory_GlobalSave mInventory;
 	cNotebook_GlobalSave mNotebook;
@@ -366,6 +369,9 @@ public:
 	void LoadData(const tString &asName);
 
 	void SaveGameToFile(const tWString& asFile);
+    bool SaveCheckpoint();
+    bool LoadCheckpoint();
+    bool LastOperationOK() const { return lastOperationOK; }
 	void LoadGameFromFile(const tWString& asFile);
 
 	void AutoSave(const tWString &asDir, int alMaxSaves);
@@ -386,7 +392,8 @@ public:
 private:
 	cInit *mpInit;
 	
-	cSavedGame* mpSavedGame;
+	bool lastOperationOK = false;
+    cSavedGame* mpSavedGame;
 	tWString msSaveDir;
 };
 

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "CoopNetwork.h"
 #include "Player.h"
+#include "SaveHandler.h"
+#include "Notebook.h"
+#include "GameEnemy.h"
 #include "PlayerHelper.h"
 #include "PlayerHands.h"
 #include "MapHandler.h"
@@ -13,6 +16,7 @@
 #include "EffectHandler.h"
 #include "GameMusicHandler.h"
 #include "HudModel_Weapon.h"
+#include "PlayerState_Weapon.h"
 #include "graphics/Renderer3D.h"
 #include "resources/TextureManager.h"
 #include <algorithm>
@@ -86,6 +90,7 @@ online::PlayerState Capture(cPlayer* p,cPlayerHands* hands) {
 }
 
 cCoopNetwork::cCoopNetwork(cInit* i) : iUpdateable("OvertureOnline"), init(i), session([](const std::string& s){ Log("[COOP] %s\n",s.c_str()); }) {
+    hostPlayer=init->mpPlayer; hostHands=init->mpPlayerHands;
     const char* role=getenv("PENUMBRA_COOP_ROLE"); if(!role) return;
     const char* portText=getenv("PENUMBRA_COOP_PORT"); const long port=portText?std::strtol(portText,nullptr,10):online::DefaultPort;
     if(port<1 || port>65535) FatalError("Invalid cooperative UDP port\n");
@@ -119,7 +124,7 @@ void cCoopNetwork::CreateRemote() {
 }
 bool cCoopNetwork::Ready() const { return map.epoch && session.Connected() && (IsHost()?session.IsWorldApplied(map.epoch):positioned); }
 void cCoopNetwork::BeforeMapLoad() {
-    if(IsHost()) session.BeginMapLoad();
+    if(IsHost()) { PrepareSave(); session.BeginMapLoad(); }
     if(remotePlayer && remotePlayer->GetCharacterBody()) { PlayerScope scope(init,remotePlayer,remoteHands); remotePlayer->OnWorldExit(); remoteHands->OnWorldExit(); }
     auto* world=init->mpGame->GetScene()->GetWorld3D();
     if(world) {
@@ -132,7 +137,8 @@ void cCoopNetwork::BeforeMapLoad() {
     remoteLight=nullptr; hasAvatarPosition=false; positioned=false; baselineSent=false;
     remoteTool=nullptr; remoteToolID=0; toolSwing=0; hasClientPosition=false; snapshotAge=0;
     remoteFlashlight=nullptr;
-    prediction.Clear(); motion.clear(); published.clear(); pendingPresentation.clear(); remoteButtons=0; lastInput=0;
+    prediction.Clear(); motion.clear(); published.clear(); pendingPresentation.clear();
+    restoredEquipment=false; baselineNames.clear(); journalBytes.clear(); receivedJournal=0; remoteButtons=0; lastInput=0;
     remoteExamineDown=false;
     mediaBytes.clear(); pendingMedia.clear(); currentMusic.clear(); currentSkybox.clear(); inventoryBytes.clear();
 }
@@ -141,8 +147,9 @@ void cCoopNetwork::AfterMapLoad(const tString& file) {
     if(IsHost()) {
         ++map.epoch; map.file="maps/"+cString::GetFileName(file); map.fingerprint=Fingerprint(map.file);
         if(!map.fingerprint) FatalError("Cannot fingerprint cooperative map '%s'\n",map.file.c_str());
-        { PlayerScope scope(init,remotePlayer,remoteHands); remotePlayer->OnWorldLoad(); remotePlayer->SetPower(100); }
-        remotePlayer->GetCharacterBody()->SetFeetPosition(init->mpPlayer->GetCharacterBody()->GetFeetPosition()+cVector3f(0.6f,0,0));
+        { PlayerScope scope(init,remotePlayer,remoteHands); remotePlayer->OnWorldLoad(); remoteHands->OnWorldLoad(); if(map.epoch==1) remotePlayer->SetPower(100); }
+        spawn=init->mpPlayer->GetCharacterBody()->GetFeetPosition();
+        remotePlayer->GetCharacterBody()->SetFeetPosition(spawn+cVector3f(0.6f,0,0));
         remotePlayer->GetCharacterBody()->SetCollideCharacter(false); init->mpPlayer->GetCharacterBody()->SetCollideCharacter(false);
         remotePlayer->GetCamera()->SetYaw(init->mpPlayer->GetCamera()->GetYaw());
         remotePlayer->GetCamera()->SetPitch(init->mpPlayer->GetCamera()->GetPitch());
@@ -166,7 +173,7 @@ bool cCoopNetwork::ClientAction(online::PlayerAction action, bool pressed,const 
     return !(action==online::PlayerAction::Interact && init->mpPlayer->GetState()==ePlayerState_WeaponMelee);
 }
 void cCoopNetwork::ClientWeaponModel(const std::string& model) {
-    if(!IsClient() || !Ready()) return;
+    if(!IsClient() || !Ready() || applyingBaseline || !restoredEquipment) return;
     if(model.empty()) { ClientAction(online::PlayerAction::UseInventory,false); return; }
     for(const auto& pair:init->mpInventory->NetworkItems()) {
         auto* item=pair.second;
@@ -174,6 +181,115 @@ void cCoopNetwork::ClientWeaponModel(const std::string& model) {
             ClientAction(online::PlayerAction::UseInventory,true,item->GetName(),init->mbSimpleWeaponSwing?"simple":"manual"); return;
         }
     }
+}
+void cCoopNetwork::UpdateEnemy(iGameEnemy* enemy,float dt) {
+    enemy->SelectNetworkTarget(init->mpPlayer,Ready()?remotePlayer:nullptr,dt);
+    auto* target=enemy->GetNetworkTarget();
+    if(!target) target=init->mpPlayer;
+    PlayerScope scope(init,target,target==remotePlayer?remoteHands:init->mpPlayerHands);
+    enemy->iGameEntity::OnUpdate(dt);
+}
+bool cCoopNetwork::EnemyTrigger(iGameEnemy* enemy,cGameTrigger* trigger) {
+    auto* target=enemy->GetNetworkTarget(); if(!target) target=init->mpPlayer;
+    PlayerScope scope(init,target,target==remotePlayer?remoteHands:init->mpPlayerHands);
+    return enemy->HandleTrigger(trigger);
+}
+cPlayer* cCoopNetwork::PlayerForBody(iPhysicsBody* body) const {
+    auto* local=hostPlayer;
+    if(local && local->GetCharacterBody() && local->GetCharacterBody()->GetBody()==body) return local;
+    if(remotePlayer && remotePlayer->GetCharacterBody() && remotePlayer->GetCharacterBody()->GetBody()==body) return remotePlayer;
+    // Enemy scopes may temporarily expose player 2 as init->mpPlayer.
+    return nullptr;
+}
+void cCoopNetwork::DamagePlayer(cPlayer* p,float damage) {
+    PlayerScope scope(init,p,p==remotePlayer?remoteHands:hostHands);
+    p->Damage(damage,ePlayerDamageType_BloodSplash);
+}
+void cCoopNetwork::PrepareSave() {
+    cPlayer* players[]={hostPlayer,remotePlayer};
+    for(auto* player:players) {
+        if(!player || !player->GetCharacterBody()) continue;
+        PlayerScope scope(init,player,player==remotePlayer?remoteHands:hostHands);
+        const auto state=player->GetState();
+        if(state==ePlayerState_Grab || state==ePlayerState_Move || state==ePlayerState_Push) {
+            player->ChangeState(ePlayerState_Normal); player->SetPushBody(nullptr);
+        }
+    }
+}
+void cCoopNetwork::SavePartner(cSavedGame* save) {
+    save->mlCoopVersion=1;
+    save->msHostWeapon=init->mpPlayerHands->GetCurrentModel(1)?init->mpPlayerHands->GetCurrentModel(1)->msName:"";
+    PlayerScope scope(init,remotePlayer,remoteHands);
+    remotePlayer->SaveToGlobal(&save->mPlayer2);
+    save->mPlayer2.mState=ePlayerState_Normal; // A physics grab cannot survive a load.
+    save->mPlayer2.mbActive=true;
+    save->msClientWeapon=remoteHands->GetCurrentModel(1)?remoteHands->GetCurrentModel(1)->msName:"";
+}
+void cCoopNetwork::RestoreWeapon(const std::string& model) {
+    if(model.empty()) { init->mpPlayer->ChangeState(ePlayerState_Normal); init->mpPlayerHands->SetCurrentModel(1,""); return; }
+    for(const auto& pair:init->mpInventory->NetworkItems()) {
+        auto* item=pair.second;
+        if(item->GetItemType()!=eGameItemType_WeaponMelee || cString::ToLowerCase(item->GetHudModelName())!=cString::ToLowerCase(model)) continue;
+        if(!init->mpPlayerHands->GetModel(item->GetHudModelName())) init->mpPlayerHands->AddModelFromFile(item->GetHudModelFile());
+        auto* hud=init->mpPlayerHands->GetModel(item->GetHudModelName()); if(!hud) return;
+        // Inventory's normal action is a toggle; restoration must be idempotent.
+        init->mpPlayerHands->SetCurrentModel(1,item->GetHudModelName());
+        auto* state=static_cast<cPlayerState_WeaponMelee*>(init->mpPlayer->GetStateData(ePlayerState_WeaponMelee));
+        state->SetHudWeapon(static_cast<cHudModel_WeaponMelee*>(hud));
+        init->mpPlayer->ChangeState(ePlayerState_WeaponMelee); return;
+    }
+}
+void cCoopNetwork::LoadPartner(cSavedGame* save) {
+    RestoreWeapon(save->msHostWeapon); Log("[COOP/SAVE] Host weapon restored state=%d\n",int(init->mpPlayer->GetState()));
+    {
+        PlayerScope scope(init,remotePlayer,remoteHands);
+        remotePlayer->ChangeState(ePlayerState_Normal); remotePlayer->LoadFromGlobal(&save->mPlayer2); RestoreWeapon(save->msClientWeapon); Log("[COOP/SAVE] Client weapon restored state=%d\n",int(remotePlayer->GetState()));
+    }
+    Log("[COOP/SAVE] Restored host_health=%.2f client_health=%.2f host_power=%.2f client_power=%.2f host_pos=%s client_pos=%s host_weapon=%s client_weapon=%s\n",init->mpPlayer->GetHealth(),remotePlayer->GetHealth(),init->mpPlayer->GetPower(),remotePlayer->GetPower(),init->mpPlayer->GetCharacterBody()->GetPosition().ToString().c_str(),remotePlayer->GetCharacterBody()->GetPosition().ToString().c_str(),save->msHostWeapon.c_str(),save->msClientWeapon.c_str());
+    deathTime[0]=deathTime[1]=0; lifeMask=0; latest.players[0]=Capture(init->mpPlayer,init->mpPlayerHands);
+    latest.players[1]=Capture(remotePlayer,remoteHands); lastInput=0;
+    baselineSent=false; published.clear(); inventoryBytes.clear(); journalBytes.clear(); mediaBytes.clear();
+}
+void cCoopNetwork::RequestSave() {
+    if(IsClient()) ClientAction(online::PlayerAction::Checkpoint,true);
+    else if(IsHost()) checkpointRequested=true;
+}
+void cCoopNetwork::UpdateLife(float dt) {
+    cPlayer* players[2]={init->mpPlayer,remotePlayer};
+    for(int n=0;n<2;++n) deathTime[n]=players[n]->IsDead()?deathTime[n]+dt:0;
+    if(deathTime[0]>=5 && deathTime[1]>=5) {
+        if(init->mpSaveHandler->LoadCheckpoint()) return;
+        Log("[COOP/LIFE] No valid checkpoint; restarting current map\n");
+        const std::string file=cString::GetFileName(map.file);
+        init->mpMapHandler->Load(file,"link1"); init->mpPlayer->SetHealth(100); remotePlayer->SetHealth(100);
+        deathTime[0]=deathTime[1]=0; return;
+    }
+    for(int n=0;n<2;++n) if(deathTime[n]>=5 && !players[1-n]->IsDead()) {
+        auto* p=players[n]; auto* body=p->GetCharacterBody();
+        const auto buddy=players[1-n]->GetCharacterBody()->GetFeetPosition();
+        bool placed=false;
+        for(int trial=0;trial<24 && !placed;++trial) {
+            const float angle=trial*k2Pif/8, radius=.8f+.4f*(trial/8);
+            const auto feet=buddy+cVector3f(std::cos(angle)*radius,.1f,std::sin(angle)*radius);
+            auto matrix=cMath::MatrixTranslate(feet+cVector3f(0,body->GetSize().y/2,0));
+            if(!init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld()->CheckShapeWorldCollision(nullptr,body->GetShape(),matrix,body->GetBody(),false,true,nullptr,false)) {
+                PlayerScope scope(init,p,n?remoteHands:init->mpPlayerHands);
+                body->SetForce(cVector3f(0)); body->SetForceVelocity(cVector3f(0)); body->SetMoveSpeed(eCharDir_Forward,0); body->SetMoveSpeed(eCharDir_Right,0); body->SetFeetPosition(feet); p->SetHealth(100); p->SetActive(true); p->ChangeState(ePlayerState_Normal);
+                deathTime[n]=0; placed=true; worldDirty=true;
+                Log("[COOP/LIFE] Respawn player=%d near surviving partner\n",n+1);
+            }
+        }
+    }
+}
+void cCoopNetwork::PublishJournal() {
+    cNotebook_GlobalSave saved; init->mpNotebook->SaveToGlobal(&saved);
+    online::JournalState next; next.epoch=map.epoch;
+    auto notes=saved.mlstNotes.GetIterator();
+    while(notes.HasNext()) { const auto& n=notes.Next(); online::JournalEntry e; e.kind=0; e.name=cString::To8Char(n.msName); e.group=n.msTextCat; e.textEntry=n.msTextEntry; next.entries.push_back(e); }
+    auto tasks=saved.mlstTasks.GetIterator();
+    while(tasks.HasNext()) { const auto& t=tasks.Next(); online::JournalEntry e; e.kind=2; e.name=t.msName; e.textEntry=cString::To8Char(t.msText); next.entries.push_back(e); }
+    const auto bytes=online::EncodeJournal(next);
+    if(bytes!=journalBytes) { next.revision=journalRevision+1; if(session.SendJournal(next)) { journalBytes=bytes; journalRevision=next.revision; } }
 }
 void cCoopNetwork::WeaponHit(const std::string& entity,float health) {
     if(!IsHost()) return;
@@ -236,14 +352,15 @@ void cCoopNetwork::Update(float dt) {
     session.Poll();
     RunQA(dt);
     if(session.Connected() && generation!=session.Generation()) {
-        generation=session.Generation(); baselineSent=false; positioned=false; published.clear(); motion.clear(); prediction.Clear();
+        generation=session.Generation(); baselineSent=false; positioned=false; restoredEquipment=false; published.clear(); motion.clear(); prediction.Clear();
+        inventoryBytes.clear(); journalBytes.clear(); mediaBytes.clear();
         if(IsHost() && map.epoch) { ++map.epoch; session.SendMap(map); }
         hadConnection=true;
     }
     if(!session.Connected()) {
         if(IsClient()) init->mpPlayer->SetActive(false);
         if(hadConnection && IsClient() && !session.AttemptActive() && session.RetryAllowed()) session.StartClient(session.RemoteAddress(),session.RemotePort(),true);
-        if(remotePlayer && remotePlayer->GetCharacterBody()) { remotePlayer->GetCharacterBody()->SetMoveSpeed(eCharDir_Forward,0); remotePlayer->GetCharacterBody()->SetMoveSpeed(eCharDir_Right,0); }
+        if(remotePlayer && remotePlayer->GetCharacterBody()) { PlayerScope scope(init,remotePlayer,remoteHands); remotePlayer->SetActive(false); remotePlayer->GetCharacterBody()->SetMoveSpeed(eCharDir_Forward,0); remotePlayer->GetCharacterBody()->SetMoveSpeed(eCharDir_Right,0); }
         return;
     }
     const auto perfStart=std::chrono::steady_clock::now();
@@ -258,10 +375,10 @@ void cCoopNetwork::Update(float dt) {
 void cCoopNetwork::UpdateHost(float dt) {
     if(!map.epoch || !remotePlayer->GetCharacterBody()) return;
     const bool canPlay=Ready() && init->mpGame->GetUpdater()->GetCurrentContainerName()=="Default";
-    online::PlayerInput input; const bool hasInput=canPlay && session.ReadInput(input) && input.epoch==map.epoch && !(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))!="hammer" && ((qaTime>4 && qaTime<6) || (qaTime>15 && qaTime<18) || (qaTime>24 && qaTime<26)));
+    online::PlayerInput input; const bool hasInput=canPlay && !remotePlayer->IsDead() && session.ReadInput(input) && input.epoch==map.epoch && !(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))!="hammer" && ((qaTime>4 && qaTime<6) || (qaTime>15 && qaTime<18) || (qaTime>24 && qaTime<26)));
     {
         PlayerScope scope(init,remotePlayer,remoteHands);
-        remotePlayer->SetActive((latest.players[0].flags&4)!=0);
+        remotePlayer->SetActive((init->mpPlayer==remotePlayer ? (hostPlayer->IsActive() || hostPlayer->IsDead()) : true) && !remotePlayer->IsDead());
         // Local UI and camera effects belong to their owner; remote physics has its own state.
         if(hasInput) {
             if(remotePlayer->GetState()==ePlayerState_Move || remotePlayer->GetState()==ePlayerState_WeaponMelee) {
@@ -280,7 +397,10 @@ void cCoopNetwork::UpdateHost(float dt) {
             remotePlayer->MoveForwards(input.forward/1000.0f,dt); remotePlayer->MoveSideways(input.strafe/1000.0f,dt);
         } else { remotePlayer->StopInteract(); remotePlayer->MoveForwards(0,dt); remotePlayer->MoveSideways(0,dt); remoteButtons=0; remoteExamineDown=false; }
         remotePlayer->Update(dt);
+        if(!remotePlayer->IsDead()) remotePlayer->AddHealth(dt*(init->mDifficulty==eGameDifficulty_Easy?1.4f:init->mDifficulty==eGameDifficulty_Normal?.4f:.14f));
         remotePlayer->GetFlashLight()->Update(dt);
+        const float hp=remotePlayer->GetHealth();
+        remotePlayer->SetHealthSpeedMul(hp>50?1.0f:hp>25?.8f:hp>10?.6f:.4f);
         remoteHands->Update(dt);
         // The partner's world tool is drawn separately; these private HUD entities drive combat.
         for(int slot=0;slot<2;++slot) if(auto* model=remoteHands->GetCurrentModel(slot)) {
@@ -291,7 +411,8 @@ void cCoopNetwork::UpdateHost(float dt) {
     }
     online::ActionRequest action;
     while(session.ReadAction(action)) {
-        if(action.epoch!=map.epoch || !canPlay) continue;
+        if(action.epoch!=map.epoch || !canPlay || remotePlayer->IsDead()) continue;
+        if(action.action==online::PlayerAction::Checkpoint) { checkpointRequested=true; continue; }
         if(action.action==online::PlayerAction::Interact && action.pressed && init->mpGameMessageHandler->HasMessage()) { init->mpGameMessageHandler->ShowNext(); continue; }
         PlayerScope scope(init,remotePlayer,remoteHands);
         if(action.action==online::PlayerAction::Interact) {
@@ -318,8 +439,7 @@ void cCoopNetwork::UpdateHost(float dt) {
                 if(item->GetItemType()==eGameItemType_WeaponMelee) {
                     remoteSimpleSwing=action.secondItem=="simple";
                     auto* equipped=remoteHands->GetCurrentModel(1);
-                    if(!equipped || equipped->msName!=item->GetHudModelName() || remotePlayer->GetState()!=ePlayerState_WeaponMelee)
-                        init->mpInventory->GetItemType(item->GetItemType())->OnAction(item,0);
+                    RestoreWeapon(item->GetHudModelName());
                 }
             }
         }
@@ -333,6 +453,7 @@ void cCoopNetwork::UpdateHost(float dt) {
     }
     if(session.IsMapReady(map.epoch)) {
         PublishMedia();
+        journalTime+=dt; if(journalTime>=.5f || journalBytes.empty()) { journalTime=0; PublishJournal(); }
         online::InventoryState next; next.epoch=map.epoch;
         for(const auto& pair:init->mpInventory->NetworkItems()) {
             auto* item=pair.second; online::InventoryItem value; value.name=item->GetName(); value.image=item->GetEntityFile(); value.count=uint16_t(std::max(1,item->GetCount())); next.items.push_back(value);
@@ -348,12 +469,20 @@ void cCoopNetwork::UpdateHost(float dt) {
         if(sendTime+0.000001f>=1.0f/60) {
             sendTime=std::max(0.0f,sendTime-1.0f/60); latest.epoch=map.epoch; latest.sequence=++sequence; latest.acknowledgedInput=lastInput;
             latest.players[0]=Capture(init->mpPlayer,init->mpPlayerHands); latest.players[1]=Capture(remotePlayer,remoteHands);
-            latest.players[1].flags=(latest.players[1].flags&~4)|(canPlay?(latest.players[0].flags&4):0);
+            latest.players[1].flags=(latest.players[1].flags&~4)|((canPlay && !remotePlayer->IsDead() && ((latest.players[0].flags&4) || (latest.players[0].flags&8)))?4:0);
+            const uint8_t deadMask=(init->mpPlayer->IsDead()?1:0)|(remotePlayer->IsDead()?2:0);
+            if(deadMask!=lifeMask) { session.SendLife(latest); lifeMask=deadMask; }
             session.SendSnapshot(latest);
             if(backupTime>=0.2f) { session.SendSnapshotBackup(latest); backupTime=0; }
         }
         UpdateAvatar(latest.players[1],dt);
     }
+    checkpointCooldown=std::max(0.0f,checkpointCooldown-dt);
+    if(checkpointRequested && checkpointCooldown<=0 && Ready()) {
+        checkpointRequested=false; checkpointCooldown=2;
+        if(init->mpSaveHandler->SaveCheckpoint()) { online::Presentation e; e.epoch=map.epoch; e.kind=online::PresentationKind::Hint; e.text[0]="Checkpoint co-op salvato sull\x27host."; session.SendPresentation(e); init->mpEffectHandler->GetSubTitle()->Add(cString::To16Char(e.text[0]),3,false); }
+    }
+    if(Ready()) UpdateLife(dt);
 }
 void cCoopNetwork::UpdateClient(float dt) {
     online::MapState received;
@@ -363,10 +492,12 @@ void cCoopNetwork::UpdateClient(float dt) {
         if(!init->mpMapHandler->Load(cString::GetFileName(map.file),"link1")) { session.Stop(); return; }
     }
     if(!map.epoch || !init->mpPlayer->GetCharacterBody()) return;
-    online::EntityState entity; while(session.ReadEntity(entity)) if(entity.epoch==map.epoch) ApplyEntity(entity);
+    online::EntityState entity; while(session.ReadEntity(entity)) if(entity.epoch==map.epoch) { if(!session.IsWorldApplied(map.epoch) && !(entity.flags&4)) baselineNames.insert(entity.name); ApplyEntity(entity); }
     online::MediaState media; while(session.ReadMedia(media)) if(media.epoch==map.epoch) ApplyMedia(media);
-    online::Snapshot snapshot;
-    if(session.ReadSnapshot(snapshot) && snapshot.epoch==map.epoch) {
+    online::Snapshot snapshot,life;
+    bool hasSnapshot=session.ReadSnapshot(snapshot);
+    while(session.ReadLife(life)) if(life.epoch==map.epoch && (!hasSnapshot || int32_t(life.sequence-snapshot.sequence)>0)) { snapshot=life; hasSnapshot=true; }
+    if(hasSnapshot && snapshot.epoch==map.epoch) {
         latest=snapshot;
         if(snapshot.sequence!=lastSnapshot) {
             const uint64_t now=Milliseconds();
@@ -407,11 +538,13 @@ void cCoopNetwork::UpdateClient(float dt) {
     for(auto& pair:motion) {
         auto* e=init->mpMapHandler->GetGameEntity(pair.first,false); if(!e) continue;
         auto& m=pair.second; m.age+=dt; const float alpha=std::min(1.0f,m.age/(1.0f/30));
+        if(m.meshMotion && e->GetMeshEntity()) e->GetMeshEntity()->SetMatrix(cMath::MatrixSlerp(alpha,m.meshFrom,Unpack(m.state.transform),true));
         for(size_t n=0;n<m.state.bodies.size() && n<size_t(e->GetBodyNum());++n) e->GetBody(int(n))->SetMatrix(cMath::MatrixSlerp(alpha,m.from[n],Unpack(m.state.bodies[n]),true));
     }
     online::Presentation event;
     while(session.ReadPresentation(event)) {
         if(event.epoch!=map.epoch || event.target==1) continue;
+        if(event.kind==online::PresentationKind::Hint) init->mpEffectHandler->GetSubTitle()->Add(cString::To16Char(event.text[0]),3,false);
         if(event.kind==online::PresentationKind::Message) init->mpGameMessageHandler->Add(cString::To16Char(event.text[0]));
         if(event.kind==online::PresentationKind::Fade) { if(event.values[0]) init->mpFadeHandler->FadeOut(event.values[1]/1000.0f); else init->mpFadeHandler->FadeIn(event.values[1]/1000.0f); }
         if(event.kind==online::PresentationKind::GuiSound) init->mpGame->GetSound()->GetSoundHandler()->PlayGui(event.text[0],false,event.values[0]/1000.0f);
@@ -432,6 +565,7 @@ void cCoopNetwork::UpdateClient(float dt) {
     }
     online::InventoryState items;
     if(session.ReadInventory(items) && items.epoch==map.epoch && (items.revision!=inventory.revision || items.epoch!=inventory.epoch)) {
+        applyingBaseline=true;
         std::vector<cInventoryItem*> remove;
         for(const auto& pair:init->mpInventory->NetworkItems()) {
             bool present=false; for(const auto& value:items.items) if(value.name==pair.first) present=true;
@@ -448,10 +582,32 @@ void cCoopNetwork::UpdateClient(float dt) {
             if(!item) { init->mpInventory->AddItemFromFile(value.name,value.image,-1); item=init->mpInventory->GetItem(value.name); }
             if(item) item->SetCount(value.count);
         }
-        inventory=items;
+        inventory=items; applyingBaseline=false;
     }
     // Confirm only after every baseline presentation queued in this poll was applied.
-    if(!session.IsWorldApplied(map.epoch) && session.IsWorldReady(map.epoch)) session.SendWorldApplied(map.epoch);
+    online::JournalState book;
+    if(session.ReadJournal(book) && book.epoch==map.epoch && book.revision!=receivedJournal) {
+        cNotebook_GlobalSave saved;
+        for(const auto& e:book.entries) {
+            if(e.kind==0) { cNotebookNote_GlobalSave n; n.msName=cString::To16Char(e.name); n.msTextCat=e.group; n.msTextEntry=e.textEntry; n.mbRead=false; saved.mlstNotes.Add(n); }
+            if(e.kind==2) { cNotebookTask_GlobalSave t; t.msName=e.name; t.msText=cString::To16Char(e.textEntry); saved.mlstTasks.Add(t); }
+        }
+        if(init->mpNotebook->IsActive()) init->mpNotebook->SetActive(false);
+        init->mpNotebook->Reset(); init->mpNotebook->LoadFromGlobal(&saved); receivedJournal=book.revision;
+    }
+    if(positioned && inventory.epoch==map.epoch && receivedJournal && !session.IsWorldApplied(map.epoch) && session.IsWorldReady(map.epoch)) {
+        auto it=init->mpMapHandler->GetGameEntityIterator();
+        while(it.HasNext()) { auto* e=it.Next(); if(!baselineNames.count(e->GetName())) e->SetActive(false); }
+        applyingBaseline=true;
+        const auto& s=latest.players[1];
+        init->mpPlayer->GetFlashLight()->SetActive((s.flags&2)!=0);
+        for(const auto& pair:init->mpInventory->NetworkItems()) if(pair.second->GetItemType()==eGameItemType_WeaponMelee) {
+            const auto model=cString::ToLowerCase(pair.second->GetHudModelName());
+            if((s.tinderboxes==1 && model=="hammer") || (s.tinderboxes==2 && model=="pickaxe")) RestoreWeapon(model);
+        }
+        applyingBaseline=false; restoredEquipment=true;
+        session.SendWorldApplied(map.epoch);
+    }
     if(Ready()) {
         online::PlayerInput input; input.epoch=map.epoch; input.sequence=++inputSequence;
         auto* p=init->mpPlayer; auto* keys=init->mpGame->GetInput();
@@ -482,14 +638,28 @@ bool cCoopNetwork::PublishWorld(bool baseline) {
         auto* entity=it.Next(); const auto& name=entity->GetName(); alive.insert(name);
         online::EntityState e; e.epoch=map.epoch; e.id=EntityID(name); e.name=name; e.file=entity->GetFileName();
         e.flags=entity->IsActive()?1:0; e.subtype=uint16_t(entity->GetType());
+        if(entity->GetType()==eGameEntityType_Enemy) {
+            auto* enemy=static_cast<iGameEnemy*>(entity);
+            e.health=int32_t(std::clamp(enemy->GetHealth(),0.0f,100000000.0f)*10);
+            e.enemyState=uint8_t(std::max(0,enemy->GetCurrentStateId()));
+            e.target=enemy->GetNetworkTarget()==remotePlayer?2:1;
+            auto* body=enemy->GetMover()->GetCharBody();
+            auto frame=cMath::MatrixRotateY(body->GetYaw()); frame.SetTranslation(body->GetPosition()); e.character=Pack(frame);
+            if(auto* mesh=enemy->GetMeshEntity()) for(int n=0;n<mesh->GetAnimationStateNum() && n<1024;++n) {
+                auto* a=mesh->GetAnimationState(n); if(!a->IsActive()) continue;
+                online::Animation value; value.index=uint16_t(n); value.weight=uint16_t(std::clamp(a->GetWeight(),0.0f,1.0f)*10000);
+                value.time=uint32_t(std::max(0.0f,a->GetTimePosition())*1000); value.loop=a->IsLooping();
+                if(e.animations.size()<32) e.animations.push_back(value);
+            }
+        }
         if(auto* mesh=entity->GetMeshEntity()) e.transform=Pack(mesh->GetWorldMatrix()); else e.transform=Pack(cMatrixf::Identity);
         for(int n=0;n<entity->GetBodyNum() && n<32;++n) e.bodies.push_back(Pack(entity->GetBody(n)->GetLocalMatrix()));
         const auto found=published.find(name);
-        const bool lifecycle=found==published.end() || found->second.flags!=e.flags;
-        const bool moved=found==published.end() || found->second.bodies!=e.bodies || found->second.transform!=e.transform;
+        const bool lifecycle=found==published.end() || found->second.flags!=e.flags || (e.subtype==eGameEntityType_Enemy && ((found->second.health<=0)!=(e.health<=0) || found->second.enemyState!=e.enemyState));
+        const bool moved=found==published.end() || found->second.bodies!=e.bodies || found->second.transform!=e.transform || found->second.character!=e.character || !e.animations.empty();
         if(lifecycle || moved) {
             e.sequence=++sequence;
-            const bool sent=lifecycle?session.SendEntity(e):session.SendEntityMotion(e);
+            const bool sent=(baseline || lifecycle)?session.SendEntity(e):session.SendEntityMotion(e);
             if(sent) published[name]=e; else complete=false;
         }
     }
@@ -505,13 +675,28 @@ void cCoopNetwork::ApplyEntity(const online::EntityState& s) {
     if(!entity && !(s.flags&4) && !s.file.empty()) {
         init->mpGame->GetScene()->GetWorld3D()->CreateEntity(s.name,Unpack(s.transform),s.file,true);
         entity=init->mpMapHandler->GetGameEntity(s.name,false);
+        if(entity && entity->GetType()==eGameEntityType_Enemy) entity->OnWorldLoad();
     }
     if(!entity) return;
     if((s.flags&4) && entity->IsActive() && getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Replica removed entity=%s t_ms=%llu\n",s.name.c_str(),(unsigned long long)Milliseconds());
     entity->SetActive((s.flags&1)!=0 && !(s.flags&4));
     if(s.flags&4) { motion.erase(s.name); return; }
     if(auto* mesh=entity->GetMeshEntity()) if(s.bodies.empty()) mesh->SetMatrix(Unpack(s.transform));
+    if(entity->GetType()==eGameEntityType_Enemy) {
+        auto* enemy=static_cast<iGameEnemy*>(entity); enemy->ApplyNetworkState(s.health/10.0f,s.enemyState);
+        auto* body=enemy->GetMover()->GetCharBody(); const auto frame=Unpack(s.character);
+        body->SetPosition(frame.GetTranslation());
+        if(auto* mesh=entity->GetMeshEntity()) {
+            if(!s.liveMotion || s.health<=0) mesh->SetMatrix(Unpack(s.transform));
+            for(int n=0;n<mesh->GetAnimationStateNum();++n) mesh->GetAnimationState(n)->SetActive(false);
+            for(const auto& value:s.animations) if(value.index<mesh->GetAnimationStateNum()) {
+                auto* a=mesh->GetAnimationState(value.index); a->SetActive(true); a->SetLoop(value.loop);
+                a->SetWeight(value.weight/10000.0f); a->SetTimePosition(value.time/1000.0f);
+            }
+        }
+    }
     Motion m; m.state=s;
+    if(s.liveMotion && s.health>0 && entity->GetType()==eGameEntityType_Enemy && entity->GetMeshEntity()) { m.meshMotion=true; m.meshFrom=entity->GetMeshEntity()->GetWorldMatrix(); }
     for(size_t n=0;n<s.bodies.size() && n<size_t(entity->GetBodyNum());++n) {
         auto* body=entity->GetBody(int(n)); m.from.push_back(body->GetLocalMatrix());
         if(!body->IsCharacter()) { body->SetMass(0); body->SetGravity(false); body->SetLinearVelocity(cVector3f(0)); body->SetAngularVelocity(cVector3f(0)); }
@@ -568,6 +753,8 @@ void cCoopNetwork::RunQA(float dt) {
     if(!getenv("PENUMBRA_COOP_QA") || (!Ready() && qaTime<=0)) return;
     qaTime+=dt;
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="hammer") { RunHammerQA(dt); return; }
+    if(std::string(getenv("PENUMBRA_COOP_QA"))=="campaign") { if(hammerTime<10) RunHammerQA(dt); else RunCampaignQA(dt); return; }
+    if(std::string(getenv("PENUMBRA_COOP_QA"))=="resume") { RunCampaignQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="intro") {
         auto* song=init->mpGame->GetSound()->GetMusicHandler()->GetCurrentSong();
         if(qaTime>15 && Ready() && init->mpPlayer->IsActive() && song && song->msFileName.find("penumbra_music_E1_A6")!=std::string::npos) qaPuzzle=true;

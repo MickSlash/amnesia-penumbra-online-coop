@@ -1,62 +1,56 @@
-# Penumbra: Overture — Online Co-op 0.2
+# Penumbra: Overture — Online Co-op 0.3 sperimentale
 
-Prototipo sperimentale Windows per due giocatori. Ricostruisce i sorgenti ufficiali di Overture e HPL1 e usa i dati della propria installazione originale. Il progetto è separato dalla mod di Amnesia.
+Mod per **due giocatori** su Windows. Richiede un'installazione originale di **Penumbra: Overture** su entrambi i PC. Questa versione aggiunge nemici autorevoli, morte/respawn e checkpoint cooperativi. La campagna completa resta da validare.
 
-## Installazione e avvio
+## Installazione e connessione
 
-1. Entrambi estraggono **tutto** lo ZIP della mod in una cartella separata.
-2. Aprono `PenumbraCoopLauncher.exe` e selezionano la cartella di Overture. Accetta sia la cartella principale sia `redist`.
-3. L'host sceglie **Ospita partita**; l'altro inserisce l'IP dell'host e sceglie **Connettiti all'host**.
-4. La porta predefinita è **UDP 27120**. I due launcher devono usare la stessa porta e la stessa versione della mod.
+1. Estrarre lo ZIP in una cartella separata e aprire **PenumbraCoopLauncher.exe**.
+2. Selezionare la cartella del gioco, per esempio `E:\Steam\steamapps\common\Penumbra Overture`. Il launcher trova anche `redist`.
+3. L'host sceglie **Ospita partita**. Il client inserisce l'IP dell'host e sceglie **Connettiti all'host**. Porta predefinita: **UDP 27120**.
+4. Aggiornare entrambi alla **0.3, protocollo 3**: le build precedenti non sono compatibili.
 
-Non servono comandi PowerShell per giocare. Il pacchetto non sostituisce gli eseguibili originali e non contiene mappe, texture, audio o DLL commerciali del gioco. Il launcher usa le DLL della propria cartella `redist`. Se manca il runtime MSVC x86, installare il Microsoft Visual C++ Redistributable x86; se manca OpenAL, usare l'installer incluso nel gioco originale.
+Per giocare non serve PowerShell. Non vengono sostituiti gli eseguibili originali. Il pacchetto non contiene mappe, texture, audio o DLL commerciali: usa quelle della propria installazione `redist`. Se mancano MSVC x86 o OpenAL, installare il runtime x86 e l'OpenAL fornito con il gioco.
 
-I comandi restano quelli di Overture, configurabili nelle opzioni: WASD per muoversi, mouse per guardare, tasto di interazione per raccogliere/afferrare, inventario per selezionare la chiave e click sul lucchetto per usarla. Per trascinare porte e cassetti tenere premuto il tasto di interazione e muovere il mouse.
+Su LAN usare l'IP locale dell'host. Su Radmin/Hamachi entrare nella stessa rete VPN e usare l'IP VPN dell'host; consentire `bin/PenumbraCoop.exe` nel firewall. Su LAN/VPN normalmente non serve inoltrare porte sul router. Per collegamento diretto da Internet rendere raggiungibile UDP 27120. Le prove automatiche usano due processi sullo stesso PC, anche con ritardo e perdita simulati: una partita reale fra due PC tramite VPN resta da verificare.
 
-Il martello raccolto nella miniera entra nell'inventario condiviso: entrambi possono equipaggiarlo separatamente. I colpi del client iniziano subito nella sua visuale; l'host decide danni e rotture e invia agli altri lo stato, i frammenti e l'effetto di polvere. La torcia del partner ha un modello visibile e proietta luce su entrambi i PC. Per colpire usare i controlli originali del martello: tenere premuto il tasto di interazione, muovere il mouse per caricare e invertire il gesto per sferrare il colpo; è disponibile anche l'opzione originale dei colpi semplificati.
+## Giocare e combattere
 
-**Aggiornare entrambi i PC alla 0.2**: il protocollo è versione 2 e rifiuta build incompatibili. Invia gli stati dei giocatori fino a 60 Hz e quelli degli oggetti fino a 30 Hz, entro la frequenza effettiva degli aggiornamenti del gioco. La prediction riduce l'attesa del proprio movimento; conferme delle interazioni e rotture restano soggette alla rete.
+I controlli sono quelli originali e si configurano nelle opzioni. Inventario e oggetti raccolti sono condivisi; il martello e la torcia si equipaggiano separatamente. Il colpo del client inizia subito nella sua visuale, mentre l'host decide danni e rotture. La torcia del partner ha un modello visibile e proietta luce su entrambi i PC.
+
+L'host esegue l'IA originale dei nemici e valuta entrambi i giocatori, con controlli di visuale, distanza, ombra e accovacciamento. Il client riceve animazioni, posizione, salute e corpi dei nemici; non esegue una seconda IA indipendente. I danni degli attacchi possono colpire entrambi. Il verme mantiene l'inseguimento continuo previsto dal gioco originale.
+
+Se uno muore, il compagno può continuare; dopo **5 secondi** viene cercata una posizione libera vicino al superstite per il respawn. Se muoiono entrambi, si carica l'ultimo checkpoint co-op valido. Senza checkpoint valido si tenta il rientro nella mappa corrente. Nascondersi continua a dipendere dalle regole dell'IA originale: non garantisce l'immunità durante un inseguimento.
+
+Gli stati dei giocatori sono inviati fino a 60 Hz, quelli del mondo fino a 30 Hz, entro la frequenza effettiva del gioco. La prediction riduce l'attesa del proprio movimento; danni, porte e altri esiti autorevoli richiedono comunque il passaggio attraverso la rete.
+
+## Salvare e riprendere
+
+- Nel menu di pausa scegliere **Salva checkpoint co-op**. Anche il client può richiederlo, ma il file viene scritto **sul PC dell'host**.
+- I punti di autosalvataggio originali dell'host aggiornano anche il checkpoint co-op.
+- Prima di uscire salvare e attendere la conferma. L'uscita dal gioco da sola non crea un nuovo checkpoint.
+- Per continuare in una nuova sessione l'host seleziona **Host: riprendi l'ultimo checkpoint cooperativo** nel launcher. Il compagno si connette normalmente.
+- Durante la sessione l'host può scegliere **Riprendi checkpoint co-op** nel menu di pausa. Ripristina i progressi salvati per entrambi.
+
+Il checkpoint conserva mondo e mappe visitate secondo il salvataggio nativo, variabili e timer della campagna, inventario, notebook, salute, batteria, posizione ed equipaggiamento dei due giocatori. Gli oggetti trattenuti vengono rilasciati prima del salvataggio; la presa fisica non viene ripristinata.
+
+File normale dell'host:
+
+```
+%LocalAppData%\PenumbraOnlineCoop\host\PenumbraOnlineCoop\Overture\save\coop_checkpoint.sav
+```
+
+La scrittura usa un file temporaneo e sostituzione atomica. Un controllo d'integrità rileva alterazioni accidentali prima di azzerare il mondo corrente. I vecchi salvataggi senza stato del secondo giocatore non sono compatibili. Conservare una copia del checkpoint prima di aggiornare o fare prove lunghe. Il client non ha una copia autonoma utilizzabile per la migrazione dell'host.
 
 ## Steam facoltativo
 
-**Usa Steam** registra il processo come **Penumbra: Overture, App ID 22180**. Serve Steam aperto con l'account che possiede Overture. Per DVD o altre edizioni lasciare l'opzione disattivata: la connessione co-op funziona indipendentemente da Steam.
+**Usa Steam** registra il processo come **Penumbra: Overture, App ID 22180**. Serve Steam aperto con l'account che possiede Overture. Per DVD o altre edizioni lasciare l'opzione disattivata.
 
-La versione Steam di Overture installata su questo PC non include `steam_api.dll`. Il launcher cerca automaticamente un runtime Valve originale a 32 bit, già presente nelle librerie Steam; il gioco ne verifica la firma prima di caricarlo. Nessun runtime Valve viene redistribuito. Se il PC contiene soltanto Overture e non dispone di questo runtime, disattivare l'opzione. La scelta viene ricordata.
+Il launcher cerca un runtime Valve originale a 32 bit già installato nelle librerie Steam, e il gioco ne verifica la firma. Se il PC non ne dispone, disattivare l'opzione. Nessuna DLL Steam è redistribuita. Non sono implementati inviti Steam o matchmaking.
 
-Integrazione basata su [SteamAPI_Init e SteamAPI_Shutdown](https://partner.steamgames.com/doc/sdk/api), verificata anche nei log del client Steam. Non sono implementati inviti Steam o matchmaking.
+## Limiti e log
 
-## LAN, Radmin e Hamachi
+Verifiche e fixture sono descritte in `TESTS.md`; non costituiscono una certificazione di tutta la campagna. Restano da verificare tutte le arene, il nascondersi nelle situazioni reali, ogni arma e consumabile, tutti gli enigmi e gli eventi audio/visivi, e partite su due PC. Avatar del partner provvisorio; nessuna migrazione host. La cronologia del notebook viene ricostruita sul client, ma lo stato personale delle note già lette non è persistito separatamente.
 
-Su LAN usare l'IP locale dell'host; su Radmin/Hamachi entrambi devono stare nella stessa rete VPN e il client deve inserire l'IP VPN dell'host. Consentire `bin/PenumbraCoop.exe` nel firewall per quella rete. Su LAN/VPN normalmente non serve inoltrare porte sul router; per collegamento diretto da Internet occorre rendere raggiungibile UDP 27120.
+**Apri log della mod** apre `%LocalAppData%\PenumbraOnlineCoop`. I log sono in `host\PenumbraOnlineCoop\Overture\hpl.log` e `client\PenumbraOnlineCoop\Overture\hpl.log`. Profili separati dal gioco originale. Per segnalare un problema conservare entrambi i log e specificare build, mappa e rete utilizzata.
 
-Sono state provate due istanze sullo stesso PC, anche attraverso un relay con 35 ms di ritardo per direzione e circa 5% di perdita. Una sessione reale fra due PC tramite Radmin/Hamachi resta da verificare.
-
-## Funzioni e limiti
-
-Implementati: host autorevole, ingresso nella stessa mappa, avatar provvisorio, movimento con prediction e correzione che conserva gravità e impulsi, oggetti fisici e corpi articolati replicati, raccolta e inventario condiviso, uso della chiave, mouse per trascinare porte, martello con equipaggiamento indipendente e colpi autorevoli, rotture e frammenti replicati, torcia del partner e batteria del client sincronizzata, messaggi/fade e replica iniziale di suoni e musica, cielo/nebbia/illuminazione ambientale, cambio mappa e tentativi di riconnessione.
-
-Verificati nel gioco: cabina iniziale, movimento del client, presa/spostamento della bottiglia, chiave sul lucchetto, apertura dell'armadietto, mappa esterna e miniera con il martello. Il test usa due processi sullo stesso PC, posiziona i giocatori e aziona input di prova. La prova della miniera raccoglie il vero martello e crea due casse di un asset originale per verificare i colpi di entrambi. **Non equivale a una partita manuale completa della campagna.**
-
-Ancora da completare o validare:
-
-- Nemici che scelgano e attacchino entrambi i giocatori, danni/morte del secondo giocatore, combattimento contro ogni nemico, nascondersi e respawn.
-- Salvataggio/ripresa dei due giocatori, notebook/journal completo, consumo degli oggetti, combinazioni, altre armi e tutte le interazioni della campagna.
-- Animazioni dell'avatar e dei nemici, effetti/particelle, presentazione completa delle scene e tutti gli eventi audio.
-- Ripresa dopo perdita prolungata, migrazione host e test della campagna dall'inizio alla fine.
-
-Il launcher avvia una nuova partita. Il menu online offre ripresa della sessione, opzioni ed uscita; caricamento dei salvataggi online non disponibile. Gli autosalvataggi nativi dell'host non contengono ancora lo stato completo del secondo giocatore. Non usare questa versione per una campagna lunga contando sulla ripresa dei progressi.
-
-## Log e profili
-
-Il pulsante **Apri log della mod** apre `%LocalAppData%\PenumbraOnlineCoop`. I log del gioco sono in:
-
-```
-host\PenumbraOnlineCoop\Overture\hpl.log
-client\PenumbraOnlineCoop\Overture\hpl.log
-```
-
-Profili e salvataggi della mod sono separati dal gioco originale. Per segnalare problemi conservare i log di entrambi i PC e specificare build, host/client, mappa e uso della VPN.
-
-## Sorgenti e compilazione
-
-Sorgenti corrispondenti inclusi in `PenumbraOnlineCoop-source.zip`, licenza GPL-3.0-or-later. `upstream.json` identifica le revisioni ufficiali; `THIRD_PARTY.md` descrive dipendenze e modifiche. `BUILD.md` contiene le istruzioni di compilazione e `TESTS.md` le verifiche svolte.
+Sorgenti corrispondenti inclusi in `PenumbraOnlineCoop-source.zip`, GPL-3.0-or-later. `upstream.json`, `THIRD_PARTY.md` e `BUILD.md` riportano provenienza e istruzioni di compilazione.

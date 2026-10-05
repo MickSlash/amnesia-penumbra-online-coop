@@ -673,10 +673,14 @@ int main(int argc, char** argv) {
     EntityState entity; entity.epoch = 1; entity.id = 42; entity.name = "test"; entity.file = "entities/box.ent";
     entity.transform[0] = entity.transform[5] = entity.transform[10] = 10000; entity.transform[3] = -12345;
     entity.bodies.push_back(entity.transform); entity.animations.push_back({2, 10000, 500});
+    entity.health=74250; entity.enemyState=2; entity.target=2; entity.character=entity.transform; entity.animations[0].loop=true;
     auto entityBytes = EncodeEntity(entity); EntityState entityRead;
     Check(DecodeEntity(entityBytes.data(), entityBytes.size(), entityRead) && entityRead.bodies[0][3] == -12345 &&
-        entityRead.animations[0].time == 500, "world entity signed pose and animation roundtrip");
+        entityRead.animations[0].time == 500 && entityRead.animations[0].loop && entityRead.health==74250 && entityRead.enemyState==2 && entityRead.target==2 && entityRead.character==entity.character, "world entity signed pose and animation roundtrip");
     for(size_t n = 0; n < entityBytes.size(); ++n) Check(!DecodeEntity(entityBytes.data(), n, entityRead), "truncated entity");
+    entity.health=-1; Check(EncodeEntity(entity).empty(),"negative enemy health rejected"); entity.health=74250;
+    entity.enemyState=13; Check(EncodeEntity(entity).empty(),"unknown enemy state rejected"); entity.enemyState=2;
+    entity.target=3; Check(EncodeEntity(entity).empty(),"unknown enemy target rejected"); entity.target=2;
     entityBytes.push_back(0); Check(!DecodeEntity(entityBytes.data(), entityBytes.size(), entityRead), "entity trailing byte");
     entity.file = "../secret.ent"; Check(EncodeEntity(entity).empty(), "entity asset traversal rejected");
     entity.file = "entities/box.ent"; entity.bodies.resize(33); Check(EncodeEntity(entity).empty(), "entity body count bounded");

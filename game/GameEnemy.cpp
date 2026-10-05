@@ -18,6 +18,7 @@
  */
 #include "StdAfx.h"
 #include "GameEnemy.h"
+#include "CoopNetwork.h"
 
 #include "GameEnemy_Dog.h"
 #include "GameEnemy_Spider.h"
@@ -1069,6 +1070,7 @@ void iGameEnemy::OnDamage(float afX)
 
 void iGameEnemy::OnFlashlight(const cVector3f &avPos)
 {
+    if(mpInit->mpCoop && mpInit->mpCoop->IsClient()) return;
 	mvStates[mlCurrentState]->OnFlashlight(avPos);
 }
 
@@ -1076,6 +1078,10 @@ void iGameEnemy::OnFlashlight(const cVector3f &avPos)
 
 void iGameEnemy::OnSetActive(bool abX)
 {
+    if(mpInit->mpCoop && mpInit->mpCoop->IsClient()) {
+        for(auto* body:mvBodies) body->SetActive(abX && mfHealth<=0);
+        mpCharBody->SetActive(false); return;
+    }
 	//This will do for now:
 	for(size_t i=0; i<mvBodies.size(); ++i)
 	{
@@ -1239,6 +1245,7 @@ void iGameEnemy::UpdateEnemyPose(float afTimeStep)
 
 void iGameEnemy::UpdateCheckForPlayer(float afTimeStep)
 {
+    if(mpInit->mpCoop && mpInit->mpCoop->IsOnline()) return;
 	
 
 	//Do not check for player at pre update.
@@ -1362,6 +1369,73 @@ void iGameEnemy::UpdateCheckForPlayer(float afTimeStep)
 }
 
 //-----------------------------------------------------------------------
+
+// Each candidate retains its own visibility counter; a wall or a dead partner
+// must not donate visibility accumulated for the other player.
+void iGameEnemy::SelectNetworkTarget(cPlayer* first,cPlayer* second,float dt)
+{
+    networkCheck-=dt;
+    if(networkCheck>0 && networkTarget && !networkTarget->IsDead()) return;
+    networkCheck=mfCheckForPlayerRate;
+    cPlayer* players[2]={first,second};
+    cPlayer* selected=nullptr; float best=1e30f; float selectedChance=0;
+    cPlayer* original=mpInit->mpPlayer;
+    for(int n=0;n<2;++n) {
+        cPlayer* p=players[n];
+        if(!p || !p->GetCharacterBody() || p->IsDead() || !p->IsActive()) { networkLOS[n]=0; continue; }
+        mpInit->mpPlayer=p;
+        auto* body=p->GetCharacterBody();
+        const float distance=cMath::Vector3Dist(mpCharBody->GetPosition(),body->GetPosition());
+        const float oldFOV=mfFOV,oldDistance=mfMaxSeeDist;
+        if(p!=networkTarget || !mbCanSeePlayer) {
+            if(distance>1.3f && mpInit->mDifficulty==eGameDifficulty_Easy) { mfFOV*=.6f; mfMaxSeeDist*=.6f; }
+            if(distance>1.3f && p->GetHidden()->IsHidden()) { mfFOV*=.36f; mfMaxSeeDist*=.25f; }
+            else if(distance>1.3f && p->GetHidden()->InShadows()) {
+                mfFOV*=p->GetMoveState()==ePlayerMoveState_Crouch?.6f:.8f;
+                mfMaxSeeDist*=p->GetMoveState()==ePlayerMoveState_Crouch?.65f:.85f;
+            }
+        }
+        const float near=mpCharBody->GetBody()->GetBV()->GetRadius()+body->GetBody()->GetBV()->GetRadius();
+        const bool relentless=dynamic_cast<cGameEnemy_Worm*>(this)!=nullptr;
+        // The native worm hunts continuously; choose its living co-op target by distance.
+        const bool seen=mfHealth>0 && (relentless || (mbUsesTriggers && ((distance<=mfMaxSeeDist && LineOfSight(body->GetPosition(),body->GetSize())) || distance<=near)));
+        networkLOS[n]=relentless && seen?mlMaxPlayerInLOSCount:seen?std::min(mlMaxPlayerInLOSCount,networkLOS[n]+1):std::max(0,networkLOS[n]-1);
+        const float score=distance*(p==networkTarget?.65f:1.0f);
+        if(seen && networkLOS[n]>=mlMaxPlayerInLOSCount && score<best) {
+            selected=p; best=score; selectedChance=std::max(0.0f,1-distance/mfMaxSeeDist);
+        }
+        mfFOV=oldFOV; mfMaxSeeDist=oldDistance;
+    }
+    mpInit->mpPlayer=original;
+    const bool wasVisible=mbCanSeePlayer;
+    cPlayer* previous=networkTarget;
+    mbCanSeePlayer=selected!=nullptr;
+    if(selected) networkTarget=selected;
+    if(!networkTarget || networkTarget->IsDead() || (networkTarget!=first && networkTarget!=second)) {
+        networkTarget=first && !first->IsDead()?first:second && !second->IsDead()?second:first;
+    }
+    for(auto* state:mvStates) if(state) state->SetNetworkPlayer(networkTarget);
+    if(selected) {
+        mvLastPlayerPos=selected->GetCharacterBody()->GetFeetPosition();
+        if(!wasVisible || previous!=selected) {
+            mpInit->mpPlayer=selected;
+            if(mlCurrentState>=0) mvStates[mlCurrentState]->OnSeePlayer(selected->GetCharacterBody()->GetPosition(),selectedChance);
+            selected->GetHidden()->UnHide();
+            mpInit->mpPlayer=original;
+            Log("[COOP/ENEMY] %s acquired player=%d\n",GetName().c_str(),selected==second?2:1);
+        }
+    }
+}
+void iGameEnemy::ApplyNetworkState(float health,int state)
+{
+    const bool died=mfHealth>0 && health<=0;
+    mfHealth=health;
+    if(died && mlCurrentState!=STATE_DEAD) {
+        mbLoading=true; ChangeState(STATE_DEAD); mbLoading=false;
+    }
+    // Live AI never runs on the replica. Host animation/physics poses drive it.
+    if(health>0) { mpMeshEntity->SetSkeletonPhysicsActive(false); mpCharBody->SetActive(false); }
+}
 
 void iGameEnemy::UpdateAnimations(float afTimeStep)
 {

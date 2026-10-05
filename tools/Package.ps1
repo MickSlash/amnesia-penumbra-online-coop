@@ -12,8 +12,8 @@ $launcher=Join-Path $root 'build/package-candidate/PenumbraCoopLauncher.exe'
 $evidence=Get-Content -LiteralPath $EvidenceFile -Raw | ConvertFrom-Json
 if($evidence.game_sha256 -ne (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash) {throw 'Test evidence does not match the game binary'}
 if($evidence.launcher_sha256 -ne (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash) {throw 'Test evidence does not match the launcher'}
-if(!$evidence.protocol_pass -or !$evidence.native_full_pass -or !$evidence.native_intro_pass -or !$evidence.native_hammer_pass -or !$evidence.native_hammer_impaired_pass -or !$evidence.steam_presence_pass) {throw 'Required prototype checks have not passed'}
-$name='PenumbraOnlineCoop_0.2_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '_' + $revision.Substring(0,8)
+if(!$evidence.protocol_pass -or !$evidence.native_full_pass -or !$evidence.native_intro_pass -or !$evidence.native_hammer_pass -or !$evidence.native_hammer_impaired_pass -or !$evidence.steam_presence_pass -or !$evidence.native_campaign_pass -or !$evidence.native_campaign_impaired_pass -or !$evidence.native_resume_pass) {throw 'Required prototype checks have not passed'}
+$name='PenumbraOnlineCoop_0.3_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '_' + $revision.Substring(0,8)
 $packages=Join-Path $root 'packages'
 $release=Join-Path $packages $name
 New-Item -ItemType Directory -Path (Join-Path $release 'bin') -Force | Out-Null
@@ -30,7 +30,7 @@ $hashes=@()
 Get-ChildItem -LiteralPath $release -File -Recurse | ForEach-Object {
     $hashes+=[ordered]@{file=$_.FullName.Substring($release.Length+1).Replace('\','/'); sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash; bytes=$_.Length}
 }
-$manifest=[ordered]@{version='0.2-experimental'; protocol_version=2; source_commit=$revision; created_utc=[DateTime]::UtcNow.ToString('o'); full_campaign_certified=$false; files=$hashes}
+$manifest=[ordered]@{version='0.3-experimental'; protocol_version=3; source_commit=$revision; created_utc=[DateTime]::UtcNow.ToString('o'); full_campaign_certified=$false; files=$hashes}
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $release 'manifest.json') -Encoding UTF8
 $zip=Join-Path $packages ($name+'.zip')
 Compress-Archive -LiteralPath $release -DestinationPath $zip

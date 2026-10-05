@@ -6,7 +6,7 @@ using System.Net.Sockets;
 using System.Threading;
 public static class CoopUdpRelay {
     class Pending { public byte[] Data; public EndPoint Target; public Socket Socket; public long Due; }
-    public static string Run(int port, int delay, int dropEvery, int seconds, int ceiling) {
+    public static string Run(int port, int delay, int dropEvery, int seconds, int ceiling, string stopFile) {
         using(var front = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
         using(var back = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)) {
             front.Bind(new IPEndPoint(IPAddress.Loopback, port));
@@ -15,7 +15,7 @@ public static class CoopUdpRelay {
             var queue = new Queue<Pending>(); var clock = Stopwatch.StartNew();
             var buffer = new byte[65536]; long received = 0, dropped = 0, forwarded = 0, bytes = 0;
             long oversized = 0; int largest = 0, largestForwarded = 0;
-            while(clock.ElapsedMilliseconds < seconds*1000L) {
+            while(clock.ElapsedMilliseconds < seconds*1000L && (String.IsNullOrEmpty(stopFile) || !System.IO.File.Exists(stopFile))) {
                 for(int side=0; side<2; ++side) {
                     var socket = side==0 ? front : back;
                     for(int count=0; count<64; ++count) {

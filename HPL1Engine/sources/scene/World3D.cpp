@@ -922,6 +922,7 @@ namespace hpl {
 				return NULL;
 			}
 			cTempNodeContainer *pTempCont = ContIt->second;
+            if(pTempCont->mlstNodes.empty()) return NULL;
 
 			pContainer = hplNew( cAINodeContainer, (asName,asNodeName,this,avSize) );
 			mlstAINodeContainers.push_back(pContainer);

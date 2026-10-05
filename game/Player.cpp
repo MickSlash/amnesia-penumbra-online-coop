@@ -317,7 +317,7 @@ void cPlayer::SetActive(bool abActive)
 {
 	mbActive = abActive;
 
-	if(mbActive==false)
+	if(mbActive==false && !(mpInit->mpCoop && mpInit->mpCoop->IsOnline() && !IsDead() && mState==ePlayerState_WeaponMelee))
 	{
 		ChangeState(ePlayerState_Normal);
 	}
@@ -615,7 +615,19 @@ void cPlayer::SetHealthSpeedMul(float afHealthSpeedMul)
 
 void cPlayer::SetHealth(float afX)
 {
-	mfHealth = afX;
+	if(mpInit->mpCoop && mpInit->mpCoop->IsOnline()) {
+        const float old=mfHealth;
+        mfHealth=std::max(0.0f,std::min(100.0f,afX));
+        if(mpInit->mpCoop->IsClient() && mfHealth<old) mpDamage->Start(1.5f,ePlayerDamageType_BloodSplash);
+        if(old>0 && mfHealth<=0) {
+            ChangeState(ePlayerState_Normal); SetActive(false);
+            mpFlashLight->SetActive(false); mpGlowStick->SetActive(false); mpFlare->SetActive(false);
+            mpInit->mpPlayerHands->SetCurrentModel(0,""); mpInit->mpPlayerHands->SetCurrentModel(1,"");
+            Log("[COOP/LIFE] Player down role=%s\n",mbNetworkRemote?"client":mpInit->mpCoop->IsClient()?"replica":"host");
+        }
+        return;
+    }
+    mfHealth = afX;
 	
 	if(mfHealth>100)
 	{
@@ -635,6 +647,7 @@ void cPlayer::AddHealth(float afX)
 void cPlayer::Damage(float afDamage, ePlayerDamageType aType)
 {
 	if(afDamage <= 0) return;
+    if(mpInit->mpCoop && mpInit->mpCoop->IsClient()) return;
 	if(mpInit->mpMapHandler->IsChangingMap()) return;
 	if(mfHealth <=0) return;
 
@@ -650,7 +663,7 @@ void cPlayer::Damage(float afDamage, ePlayerDamageType aType)
 	if(afDamage> 20) fSize = 2.0f;
 	if(afDamage> 50) fSize = 3.0f;
 	if(afDamage> 80) fSize = 4.0f;
-	mpDamage->Start(fSize,aType);
+	if(!mbNetworkRemote) mpDamage->Start(fSize,aType);
 
 	AddHealth(-afDamage);
 
@@ -687,7 +700,8 @@ void cPlayer::Damage(float afDamage, ePlayerDamageType aType)
 
 bool cPlayer::IsDead()
 {
-	return mpDeath->IsActive();
+	if(mpInit->mpCoop && mpInit->mpCoop->IsOnline()) return mfHealth<=0;
+    return mpDeath->IsActive();
 }
 
 //-----------------------------------------------------------------------
@@ -1065,6 +1079,7 @@ void cPlayer::Update(float afTimeStep)
 		mvMoveStates[mMoveState]->Update(afTimeStep); mbMoving=false;
 		mpCamera->SetPosition(mpCharBody->GetFeetPosition()+cVector3f(0,mvSize.y+mfCameraHeightAdd+mfHeightAdd,0));
 		SetPickedBody(NULL); mvStates[mState]->OnUpdate(afTimeStep);
+        mpHidden->Update(afTimeStep);
 		return;
 	}
 	cSystem *pSystem = mpInit->mpGame->GetSystem();
@@ -1082,7 +1097,7 @@ void cPlayer::Update(float afTimeStep)
 	//LogUpdate("  Death\n");
 	////////////////////////////////////////
 	// Make sure player is dead if he should be
-	if(mfHealth <=0 && mpDeath->IsActive()==false)
+	if(mfHealth <=0 && mpDeath->IsActive()==false && (!mpInit->mpCoop || !mpInit->mpCoop->IsOnline()))
 	{
 		mpDeath->Start();
 	}

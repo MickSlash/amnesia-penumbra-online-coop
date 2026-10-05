@@ -11,7 +11,7 @@
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 2;
+constexpr uint16_t ProtocolVersion = 3;
 constexpr uint32_t VoluntaryDisconnectReason = 0x504f0001;
 constexpr uint16_t DefaultPort = 27120;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
@@ -66,7 +66,7 @@ struct Snapshot {
     PlayerState players[2]; // stable network IDs 1 (host), 2 (client)
 };
 struct MapState { uint32_t epoch = 0; uint64_t fingerprint = 0; std::string file; };
-enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, WeaponLook = 7 };
+enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, WeaponLook = 7, Checkpoint = 8 };
 struct ActionRequest { uint32_t epoch = 0, sequence = 0; PlayerAction action = PlayerAction::Interact; bool pressed = false; std::string item, secondItem; int16_t lookYaw = 0, lookPitch = 0; };
 struct InventoryItem {
     std::string name, subtype, image, value, extraValue, nameEntry, descriptionEntry;
@@ -89,7 +89,7 @@ struct MediaState {
 };
 std::vector<uint8_t> EncodeMedia(const MediaState& state);
 bool DecodeMedia(const uint8_t* data, size_t size, MediaState& state);
-struct Animation { uint16_t index = 0, weight = 0; uint32_t time = 0; };
+struct Animation { uint16_t index = 0, weight = 0; uint32_t time = 0; bool loop = false; };
 struct EntityState {
     uint32_t epoch = 0, id = 0;
     uint32_t sequence = 0; // shared serial across reliable lifecycle and live poses
@@ -97,6 +97,9 @@ struct EntityState {
     std::string name, file;
     uint8_t type = 0, flags = 0; // active, interaction disabled, destroyed, lit, locked, closed, effects
     uint16_t subtype = 0;
+    int32_t health = 0;
+    uint8_t enemyState = 0, target = 0;
+    Transform character = {};
     Transform transform = {}; // mesh/spawn transform
     std::array<int32_t, 3> scale = {{1000,1000,1000}};
     std::vector<Transform> bodies;

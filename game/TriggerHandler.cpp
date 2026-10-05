@@ -21,6 +21,7 @@
 #include "Init.h"
 #include "MapHandler.h"
 #include "GameEnemy.h"
+#include "CoopNetwork.h"
 
 //////////////////////////////////////////////////////////////////////////
 // TRIGGER
@@ -98,7 +99,7 @@ void cTriggerHandler::Update(float afTimeStep)
 	//////////////////////////////////////////////
 	//Go through the enemies and hand them triggers
 	tGameEnemyIterator EnemyIt = mpMapHandler->GetGameEnemyIterator();
-	while(EnemyIt.HasNext())
+	while(EnemyIt.HasNext() && !(mpInit->mpCoop && mpInit->mpCoop->IsClient()))
 	{
 		iGameEnemy *pEnemy = EnemyIt.Next();
 		if(pEnemy->IsActive()==false || pEnemy->GetUsesTriggers()==false) continue;
@@ -135,7 +136,7 @@ void cTriggerHandler::Update(float afTimeStep)
 			}
 			
 			//Let enemy handle trigger, if false get next trigger else next enemy.
-			if(pEnemy->HandleTrigger(pTrigger))
+			if(mpInit->mpCoop && mpInit->mpCoop->IsHost() ? mpInit->mpCoop->EnemyTrigger(pEnemy,pTrigger) : pEnemy->HandleTrigger(pTrigger))
 			{
 				break;
 			}

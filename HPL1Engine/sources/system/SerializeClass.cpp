@@ -195,7 +195,15 @@ namespace hpl {
 
 	//-----------------------------------------------------------------------
 
-	bool cSerializeClass::SaveToFile(iSerializable* apData, const tWString &asFile,const tString &asRoot)
+	// Integrity of the canonical XML class, independent of platform newlines.
+    // This detects damaged saves; it is not an authentication mechanism.
+    static tString SavedClassChecksum(TiXmlElement* element) {
+        TiXmlPrinter printer; printer.SetStreamPrinting(); element->Accept(&printer);
+        unsigned long long value=14695981039346656037ULL;
+        for(const unsigned char* p=(const unsigned char*)printer.CStr();*p;++p) value=(value^*p)*1099511628211ULL;
+        char hex[17]; sprintf(hex,"%016llx",value); return hex;
+    }
+    bool cSerializeClass::SaveToFile(iSerializable* apData, const tWString &asFile,const tString &asRoot)
 	{
 		SetUpData();
 
@@ -208,6 +216,7 @@ namespace hpl {
 		TiXmlElement* pRootElem = static_cast<TiXmlElement*>(pXmlDoc->InsertEndChild(XmlRoot));
 
 		SaveToElement(apData,"",pRootElem);
+        if(apData->Serialize_GetTopClass()=="cSavedGame") pRootElem->SetAttribute("integrity",SavedClassChecksum(pRootElem->FirstChildElement("class")).c_str());
 
 		//Save
 		#ifdef WIN32
@@ -216,7 +225,7 @@ namespace hpl {
 		FILE *pFile = fopen(cString::To8Char(asFile).c_str(),"w+");
 		#endif
 
-		bool bRet = pXmlDoc->SaveFile(pFile);
+		bool bRet = pFile && pXmlDoc->SaveFile(pFile);
 		if(bRet==false)
 			Error("Couldn't save class to '%s'\n", asFile.c_str());
 
@@ -306,7 +315,7 @@ namespace hpl {
 		FILE *pFile = fopen(cString::To8Char(asFile).c_str(),"rb");
 		#endif
 
-		if(pXmlDoc->LoadFile(pFile)==false)
+		if(!pFile || pXmlDoc->LoadFile(pFile)==false)
 		{
 			Error("Couldn't load saved class file '%s' from %s!\n",
 									cString::To8Char(asFile).c_str(),
@@ -321,9 +330,15 @@ namespace hpl {
 		TiXmlElement* pRootElem = pXmlDoc->RootElement();
 
 		//Get first, there should only be ONE class at the root.
-		TiXmlElement* pClassElem = pRootElem->FirstChildElement("class");
+		TiXmlElement* pClassElem = pRootElem?pRootElem->FirstChildElement("class"):NULL;
+        if(!pClassElem || !pClassElem->Attribute("type") || apData->Serialize_GetTopClass()!=pClassElem->Attribute("type")) {
+            hplDelete(pXmlDoc); return false;
+        }
 
-		LoadFromElement(apData,pClassElem);
+		if(apData->Serialize_GetTopClass()=="cSavedGame" && (!pRootElem->Attribute("integrity") || SavedClassChecksum(pClassElem)!=pRootElem->Attribute("integrity"))) {
+            Error("Invalid or damaged cooperative checkpoint integrity\n"); hplDelete(pXmlDoc); return false;
+        }
+        LoadFromElement(apData,pClassElem);
 
 		hplDelete(pXmlDoc);
 		return true;

@@ -2766,6 +2766,17 @@ typedef tTempFileAndDataSet::iterator tTempFileAndDataSetIt;
 
 //-----------------------------------------------------------------------
 
+class cMainMenuWidget_CoopCheckpoint : public cMainMenuWidget_Button {
+    bool load;
+public:
+    cMainMenuWidget_CoopCheckpoint(cInit* i,const cVector3f& pos,bool resume)
+      : cMainMenuWidget_Button(i,pos,resume?L"Riprendi checkpoint co-op":L"Salva checkpoint co-op",eMainMenuState_LastEnum,22,eFontAlign_Left),load(resume) {}
+    void OnMouseDown(eMButton button) {
+        if(button!=eMButton_Left) return;
+        mpInit->mpMainMenu->SetActive(false);
+        if(load) mpInit->mpSaveHandler->LoadCheckpoint(); else mpInit->mpCoop->RequestSave();
+    }
+};
 void cMainMenu::CreateWidgets()
 {
 	cVector3f vPos;
@@ -2846,7 +2857,11 @@ void cMainMenu::CreateWidgets()
 		}
 	}
 
-	if(!mpInit->mpCoop || !mpInit->mpCoop->IsOnline()) {
+	if(mpInit->mpCoop && mpInit->mpCoop->IsOnline()) {
+        AddWidgetToState(eMainMenuState_Start,hplNew(cMainMenuWidget_CoopCheckpoint,(mpInit,vPos,false))); vPos.y+=40;
+        if(mpInit->mpCoop->IsHost()) { AddWidgetToState(eMainMenuState_Start,hplNew(cMainMenuWidget_CoopCheckpoint,(mpInit,vPos,true))); vPos.y+=40; }
+    }
+    if(!mpInit->mpCoop || !mpInit->mpCoop->IsOnline()) {
 	AddWidgetToState(eMainMenuState_Start,hplNew( cMainMenuWidget_MainButton,(mpInit,vPos,kTranslate("MainMenu","New Game"),eMainMenuState_NewGame)) ); 
 	vPos.y += 51;
 	AddWidgetToState(eMainMenuState_Start,hplNew( cMainMenuWidget_MainButton,(mpInit,vPos,kTranslate("MainMenu","Load Game"),eMainMenuState_LoadGameSpot)) ); 

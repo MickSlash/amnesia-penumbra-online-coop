@@ -21,6 +21,7 @@
 #include "Init.h"
 #include "MapHandler.h"
 #include "Player.h"
+#include "CoopNetwork.h"
 #include "GameEnemy.h"
 #include "GameObject.h"
 #include "GameSwingDoor.h"
@@ -160,9 +161,10 @@ bool cAttackHandler::CreateLineAttack(const cVector3f& avStart, const cVector3f&
 	
 	if(aTarget & eAttackTargetFlag_Player)
 	{
-		if(mpInit->mpPlayer->GetCharacterBody()->GetBody() == mRayCallback.mpClosestBody)
+		cPlayer* victim=mpInit->mpCoop && mpInit->mpCoop->IsHost()?mpInit->mpCoop->PlayerForBody(mRayCallback.mpClosestBody):mpInit->mpPlayer->GetCharacterBody()->GetBody()==mRayCallback.mpClosestBody?mpInit->mpPlayer:NULL;
+        if(victim && !victim->IsDead())
 		{
-			if(afDamage>0) mpInit->mpPlayer->Damage(afDamage,ePlayerDamageType_BloodSplash);
+			if(afDamage>0) { if(mpInit->mpCoop && mpInit->mpCoop->IsHost()) mpInit->mpCoop->DamagePlayer(victim,afDamage); else victim->Damage(afDamage,ePlayerDamageType_BloodSplash); }
 			return true;
 		}
 	}
@@ -236,7 +238,8 @@ bool cAttackHandler::CreateShapeAttack(	iCollideShape *apShape, const cMatrixf& 
 			//Player
 			if(aTarget & eAttackTargetFlag_Player)
 			{
-				if(mpInit->mpPlayer->GetCharacterBody()->GetBody() == pBody)
+				cPlayer* victim=mpInit->mpCoop && mpInit->mpCoop->IsHost()?mpInit->mpCoop->PlayerForBody(pBody):mpInit->mpPlayer->GetCharacterBody()->GetBody()==pBody?mpInit->mpPlayer:NULL;
+                if(victim && !victim->IsDead())
 				{
 					//Check with line if there is a free path, if not skip damage.
 					cVector3f vEnd = pBody->GetWorldPosition();
@@ -251,12 +254,12 @@ bool cAttackHandler::CreateShapeAttack(	iCollideShape *apShape, const cMatrixf& 
 					{
 						if(afDamage>0)
 						{
-							mpInit->mpPlayer->Damage(afDamage,ePlayerDamageType_BloodSplash);
+							if(mpInit->mpCoop && mpInit->mpCoop->IsHost()) mpInit->mpCoop->DamagePlayer(victim,afDamage); else victim->Damage(afDamage,ePlayerDamageType_BloodSplash);
 						}
 					}
 					
 					//Impulse
-					float fMass = mpInit->mpPlayer->GetCharacterBody()->GetMass();
+					float fMass = victim->GetCharacterBody()->GetMass();
 					float fForceSize =0;
 					if(fMass > afMaxMass*10) fForceSize =0;
 					else if(fMass <= afMinMass*10) fForceSize = afMaxImpulse*10;
@@ -265,11 +268,11 @@ bool cAttackHandler::CreateShapeAttack(	iCollideShape *apShape, const cMatrixf& 
 						fForceSize = afMinImpulse*10 * fT + afMaxImpulse*10 * (1-fT);
 					}
 					
-					cVector3f vForceDir = mpInit->mpPlayer->GetCharacterBody()->GetPosition() - avOrigin;
+					cVector3f vForceDir = victim->GetCharacterBody()->GetPosition() - avOrigin;
 					vForceDir.Normalise();
 					vForceDir += cVector3f(0,0.1f,0);
 					
-					mpInit->mpPlayer->GetCharacterBody()->AddForce(vForceDir * fForceSize * 300);
+					victim->GetCharacterBody()->AddForce(vForceDir * fForceSize * 300);
 					
 					bHit = true;
 					continue;
@@ -421,20 +424,24 @@ void cAttackHandler::CreateSplashDamage(const cVector3f& avCenter, float afRadiu
 
     if(aTarget & eAttackTargetFlag_Player)
 	{
-		cBoundingVolume* pCharBV = mpInit->mpPlayer->GetCharacterBody()->GetBody()->GetBV();
+        cPlayer* victims[]={mpInit->mpCoop && mpInit->mpCoop->IsHost()?mpInit->mpCoop->HostPlayer():mpInit->mpPlayer,mpInit->mpCoop && mpInit->mpCoop->IsHost()?mpInit->mpCoop->PartnerPlayer():NULL};
+        for(auto* victim:victims) {
+        if(!victim || !victim->GetCharacterBody() || victim->IsDead()) continue;
+		cBoundingVolume* pCharBV = victim->GetCharacterBody()->GetBody()->GetBV();
 		if(cMath::CheckCollisionBV(tempBV, *pCharBV) &&
 			mpSplashBlockCheck->CheckBlock(pCharBV->GetWorldCenter(), avCenter)==false)
 		{
 			float fDist = cMath::Vector3Dist(pCharBV->GetPosition(),avCenter);
-			mpInit->mpPlayer->Damage(CalcSize(fDist,afRadius,afMinDamage,afMaxDamge),ePlayerDamageType_BloodSplash);
+			if(mpInit->mpCoop && mpInit->mpCoop->IsHost()) mpInit->mpCoop->DamagePlayer(victim,CalcSize(fDist,afRadius,afMinDamage,afMaxDamge)); else victim->Damage(CalcSize(fDist,afRadius,afMinDamage,afMaxDamge),ePlayerDamageType_BloodSplash);
 
 			float fForceSize = CalcSize(fDist,afRadius,afMinForce,afMaxForce);
-			cVector3f vForceDir = mpInit->mpPlayer->GetCharacterBody()->GetPosition() - avCenter;
+			cVector3f vForceDir = victim->GetCharacterBody()->GetPosition() - avCenter;
 			vForceDir.Normalise();
 
-			mpInit->mpPlayer->GetCharacterBody()->AddForce(vForceDir * fForceSize * 10);
+			victim->GetCharacterBody()->AddForce(vForceDir * fForceSize * 10);
 		}
 	}
+        }
 	//Enemies now have the user data added to the body, this is not needed.
 	/*if(aTarget & eAttackTargetFlag_Enemy)
 	{
