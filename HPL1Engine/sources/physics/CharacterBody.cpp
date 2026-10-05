@@ -493,6 +493,12 @@ namespace hpl {
 		SetPosition(avPos + cVector3f(0,mpBody->GetShape()->GetSize().y/2,0),abSmooth);
 	}
 
+	void iCharacterBody::SetNetworkHorizontalPosition(float x, float z)
+	{
+		mvPosition.x = mvLastPosition.x = x;
+		mvPosition.z = mvLastPosition.z = z;
+		mpBody->SetPosition(mvPosition);
+	}
 	cVector3f iCharacterBody::GetFeetPosition()
 	{
 		return mvPosition - cVector3f(0,mpBody->GetShape()->GetSize().y/2,0);

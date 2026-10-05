@@ -1,44 +1,66 @@
-# Verifiche del prototipo — 5 ottobre 2026
+# Verifiche della versione 0.2 — 5 ottobre 2026
 
-Ambiente: Windows, MSVC v145 Win32, installazione Steam locale di Overture. Le prove native usano **due processi sullo stesso PC**, profili isolati e i dati originali in `redist`. Non è una certificazione della campagna o una prova su due PC remoti.
+Windows, MSVC v145 Win32, dati originali dell'installazione Steam locale di Overture. Le prove native avviano **due processi sullo stesso PC**, con profili separati e screenshot del motore. Sono prove automatiche con fixture; la campagna non è stata percorsa manualmente dall'inizio alla fine e una sessione fra due PC tramite Radmin resta da verificare.
 
 ## Protocollo
 
-`NetworkTests.exe`: **17 gruppi PASS**, inclusi 80.000 casi di input malformato e 20.000 ulteriori casi dei codec. Sono verificati limiti delle code, messaggi autorevoli, identificazione del giocatore, sequenze/epoch, caricamento bloccante di 6,5 secondi, scadenza del timeout di caricamento di 45 secondi, riconnessione, MTU ridotto e stato di prediction limitato. Per la prova di scadenza viene avanzato l'orologio di ENet; non si attende fisicamente per 45 secondi.
+CTest: **17 gruppi PASS**, 1 suite completata in 29.27 secondi. Include 80.000 casi malformati e 20.000 ulteriori casi dei codec, limiti delle code, ruoli autorevoli, sequenze/epoch, caricamento bloccante di 6,5 secondi, riconnessione, MTU ridotto, prediction limitata e gesti affidabili del martello con valori firmati e deduplicazione. Il timeout di caricamento di 45 secondi viene provato avanzando l'orologio ENet. I 100.000 casi sono generati dal test, non pacchetti corrotti di una partita reale.
 
-Questi 100.000 casi sono dati prodotti appositamente dal test, non pacchetti corrotti ricevuti durante una partita. Alcuni test riguardano strutture di journal, checkpoint e lobby del trasporto ereditato: non dimostrano che tali funzioni siano integrate in Overture.
+Il protocollo 2 rifiuta le build incompatibili. Il timer degli ACK viene riletto dopo il servizio ENet: un ACK appena ricevuto non deve apparire come vecchio per sottrazione unsigned. La conferma della baseline avviene dopo l'applicazione degli eventi di presentazione.
 
-## Gioco nativo
+## Prove nel gioco
 
-| Prova | Risultato verificato |
+| Prova | Risultato |
 | --- | --- |
-| Avvio del gioco ricompilato | Cabina iniziale caricata, uscita pulita |
-| Collegamento host/client | Stessa mappa, baseline applicata, avatar sul client |
-| Movimento del client | Spostamento di circa 1,4 m eseguito dal personaggio nativo sull'host |
-| Presa della bottiglia | Stato Grab nativo; movimento fisico di circa 0,88 m replicato |
-| Chiave del lucchetto | Richiesta del client eseguita dagli script sull'host; chiave rimossa e lucchetto disattivato su entrambi |
-| Porta dell'armadietto | Stato Move nativo; trascinamento del mouse e transform del corpo articolato replicati |
-| Cambio mappa | Cabina → `level01_01_outside.dae`, nuova epoch e barriera completata su entrambi |
-| Introduzione normale | Sblocco dei comandi tramite messaggi e musica della campagna presenti su entrambi |
-| Steam facoltativo | SteamAPI_Init/Shutdown; log Steam registra entrambi i processi come App ID 22180 |
-| Launcher | Cartella principale/redist valide, controllo Steam/runtime e layout renderizzato |
+| Cabina e introduzione originale | Comandi sbloccati, messaggi e musica presenti su entrambi |
+| Movimento e bottiglia | Movimento nativo del client sull'host; presa e spostamento fisico replicati |
+| Chiave e porta | Lucchetto disattivato, chiave consumata e corpi articolati della porta aggiornati su entrambi |
+| Passaggio alla miniera | Cabina → esterno → portello → `level01_02_mine_entrance.dae`; barriere completate su entrambi |
+| Martello originale della miniera | Raccolto attraverso l'interazione del client, presente nei due inventari |
+| Equipaggiamento separato | Entrambi nello stato melee nativo con martello; prima persona locale e modello del partner |
+| Colpi manuali e semplificati | Animazione locale del client e danno deciso dall'host attraverso il combattimento originale |
+| Casse rotte da entrambi | Due casse di asset originale distrutte; oggetti rimossi e dieci frammenti ciascuno sulla replica |
+| Oggetto trattenuto durante la rottura | Stato Push nativo del partner rilasciato prima della distruzione del corpo |
+| Torce | Due torce attive, modello del partner visibile, fascio allineato alla mira nativa e batteria del client aggiornata |
+| Steam facoltativo | Init/Shutdown e tracciamento dei due processi come App ID 22180 |
+| Launcher | Validazione della cartella originale e del runtime Steam a 32 bit superata |
 
-Prova locale completa: `build/qa/coop-20261005-004138`. Prova finale completa con rete simulata e Steam: `build/qa/coop-20261005-005924`. Introduzione finale con Steam disattivato: `build/qa/coop-20261005-010050`. Il log Steam conferma il tracciamento di entrambi i processi del pacchetto sotto App ID 22180. L'eseguibile provato ha SHA256 `15C80305284A445C648D03E5C059F064A8C567D68B6EE5CA72EC6B9EB99EF827`.
+La fixture attiva il cancello del passaggio esterno e usa l'interazione originale del portello. Nella miniera raccoglie il martello vero, crea due casse `modern_mine_woodcrate.ent` per provare i colpi e una terza per la protezione della presa durante la distruzione. La replica delle rotture comprende anche l'invio dell'effetto di polvere; gli altri effetti della campagna restano parziali. I test ignorano l'input hardware dell'utente.
 
-Lo script `tools/Build.ps1` è stato eseguito con successo. CTest sulla build finale: 1 suite superata in 30,42 secondi, contenente i 17 gruppi del protocollo e i 100.000 casi descritti sopra.
+Tutte le quattro prove finali terminano con PASS su entrambi, uscita nativa pulita e memoria residua zero secondo il memory manager HPL. Questo rapporto non equivale a una verifica con AddressSanitizer.
 
-Il test completo usa fixture, aziona input e richiede il cambio mappa: non risolve l'intera campagna mediante una partita manuale. L'introduzione viene provata separatamente, con gli script normali e avanzamento automatico dei messaggi. Le fixture ignorano l'input hardware reale per evitare che l'attività dell'utente modifichi la prova; mirano alla posizione corrente della bottiglia, che oscilla con la fisica della cabina.
+## Ritardi e movimento
 
-## Rete con problemi simulati
+Invio previsto fino a 60 Hz per i giocatori e 30 Hz per gli oggetti, entro la frequenza del gioco. I timer conservano il resto e tollerano l'arrotondamento del timestep, evitando un intervallo involontario di 33 ms. La correzione XZ conserva gravità, velocità verticale e forze. I gesti del martello usano messaggi affidabili; l'animazione in prima persona inizia sul client prima della conferma dei danni.
 
-Il relay introduce **35 ms per direzione** e scarta ogni ventesimo datagramma. Il ritardo aggiunto di andata/ritorno è 70 ms; il RTT misurato comprende anche elaborazione e scheduling delle due istanze. Non è una garanzia di RTT di 70 ms né una misura diretta di Radmin.
+Gli intervalli seguenti usano **steady_clock in tempo reale** fra gli stati applicati dal thread del client, in un tratto di movimento di otto secondi logici. Non sono tempi fra datagrammi catturati sulla scheda di rete né una misura completa del ritardo mouse/schermo.
 
-Nella prova finale: **7.940 datagrammi ricevuti, 7.543 inoltrati e 397 scartati intenzionalmente**; nessuno oltre il limite, dimensione massima 1.198 byte rispetto al tetto di 1.200. Il RTT misurato sul client verso la fine della prova è 124–127 ms. Presa della bottiglia: spostamento 0,881 m sull'host e 0,879 m sulla replica. Chiave, porta e passaggio alla mappa esterna superati su entrambi.
+| Misura | Locale, colpi semplificati | Relay, colpi manuali |
+| --- | --- | --- |
+| Intervallo medio degli stati | 16.67 ms | 18.69 ms |
+| Intervallo massimo | 18 ms | 51 ms |
+| Stati campionati | 480 | 428 |
+| Salti forzati della posizione | 0 | 0 |
+| Massimo spostamento XZ per tick | 0.05 m | 0.085 m |
 
-Il pacchetto è stato provato senza DLL originali vicino all'eseguibile della mod: vengono caricate dalla directory di lavoro `redist`. Gli screenshot esterni confermano cielo, nebbia e illuminazione ambientale simili; la neve a particelle resta presente soltanto sull'host. `validation.json` riporta le prove del binario distribuito; `manifest.json` identifica il commit dei sorgenti e gli hash dei file.
+Il relay aggiunge **35 ms per direzione**, quindi 70 ms di andata/ritorno, e scarta ogni ventesimo datagramma: 8177 ricevuti, 7769 inoltrati e 408 scartati. Nessuno supera il tetto di 1.200 byte; massimo 1199 byte. RTT del client a fine prova: 125, 127, 126 ms, comprensivo di elaborazione e scheduling delle due istanze.
 
-## Limiti delle verifiche
+Dal colpo autorevole che esaurisce la salute alla rimozione della cassa sul client: 95 ms per la cassa colpita dal client e 236 ms per quella colpita dall'host. Questa comparazione usa l'orologio comune dei due processi sullo stesso PC; non va applicata senza sincronizzazione degli orologi a log di PC diversi. Il tempo naturale per caricare e sferrare il colpo è separato.
 
-Nessuna prova completa di nemici, danni/morte del player 2, armi, nascondersi, notebook, salvataggio/ripresa co-op o migrazione host. Nessuna certificazione di assenza di lag su connessioni reali.
+Non sono stati rilevati salti forzati nel tratto campionato. Il risultato non garantisce assenza di micro-scatti su ogni PC, VPN o scena; le interazioni autorevoli richiedono comunque la rete. I log `[COOP/PERF]` misurano il lavoro dell'adattatore di replica, non l'intero rendering del gioco.
 
-Nel log rimangono diagnostiche del codice originale: lo shader motion blur con ciclo dinamico usa il fallback statico previsto; l'asset `boat_dynamicparaffin.dae` segnala un joint/submesh mancante anche nella ricompilazione originale offline. I log delle prove riuscite terminano con `HPL Exit was successful` e memoria residua zero secondo il memory manager del motore; non è una verifica con AddressSanitizer.
+## Identificazione delle prove
+
+- Binario: SHA256 `48411A038F93C192D5A8A06958E0112FB3783DCF30C4282C64B880F0AF8B2964`.
+- Martello locale: `C:\Codice\AmnesiaCoop\PenumbraOnlineCoop\build\qa\coop-20261005-123220`.
+- Martello con relay: `C:\Codice\AmnesiaCoop\PenumbraOnlineCoop\build\qa\coop-20261005-123325`.
+- Interazioni e Steam: `C:\Codice\AmnesiaCoop\PenumbraOnlineCoop\build\qa\coop-20261005-123441`.
+- Introduzione senza Steam: `C:\Codice\AmnesiaCoop\PenumbraOnlineCoop\build\qa\coop-20261005-123531`.
+
+`validation.json` associa le prove e le misure agli hash del binario e del launcher; `manifest.json` identifica il commit dei sorgenti corrispondenti. Il pacchetto provato non ha DLL commerciali accanto al suo eseguibile: usa quelle di `redist`.
+
+## Limiti
+
+Restano da completare o validare scelta dei bersagli nemici, danni/morte/respawn del player 2, combattimento contro tutti i nemici, salvataggio e ripresa co-op, notebook completo, altri strumenti, tutte le interazioni e presentazioni della campagna. Avatar procedurale e animazione approssimata del martello del partner. La neve dell'esterno resta solo sull'host. Alcune strutture di journal/checkpoint/lobby nei test del trasporto non sono integrate in Overture.
+
+I log conservano diagnostiche originali: fallback dello shader motion blur, joint/submesh della lampada della cabina e alcuni asset ambientali mancanti della miniera. Non costituiscono una certificazione della campagna.

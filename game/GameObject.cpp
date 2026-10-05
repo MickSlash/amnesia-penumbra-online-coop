@@ -18,6 +18,7 @@
  */
 #include "StdAfx.h"
 #include "GameObject.h"
+#include "CoopNetwork.h"
 
 #include "Init.h"
 #include "MapHandler.h"
@@ -669,6 +670,7 @@ void cGameObject::SetInteractMode(eObjectInteractMode aInteractMode)
 
 void cGameObject::BreakAction()
 {
+	if(mpInit->mpCoop) mpInit->mpCoop->BeforeObjectBreak(this);
 	if(mvBodies.empty()) return;
 
 	iPhysicsBody *pParentBody = mvBodies[0];
@@ -716,6 +718,7 @@ void cGameObject::BreakAction()
 	//Particle System
     if(mBreakProps.msPS != "")
 	{
+		if(mpInit->mpCoop) mpInit->mpCoop->RelayParticle(mBreakProps.msPS,pParentBody->GetWorldMatrix());
 		cParticleSystem3D *pPS = pWorld->CreateParticleSystem("Break",mBreakProps.msPS,cVector3f(1,1,1),
 															pParentBody->GetWorldMatrix());
 	}

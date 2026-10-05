@@ -17,6 +17,7 @@
  * along with Penumbra Overture.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "HudModel_Weapon.h"
+#include "CoopNetwork.h"
 
 #include "Init.h"
 #include "Player.h"
@@ -322,11 +323,11 @@ bool cHudModel_WeaponMelee::OnMouseMove(const cVector2f &avMovement)
 		{
 			//If right key is down enable looking.
 			cInput *pInput = mpInit->mpGame->GetInput();
-			if(pInput->IsTriggerd("Examine")) return true;
+			if(mpInit->mpPlayer->IsNetworkRemote() ? (mpInit->mpCoop && mpInit->mpCoop->RemoteExamineDown()) : pInput->IsTriggerd("Examine")) return true;
 			
 			if(mpInit->mbSimpleWeaponSwing)
 			{
-				if(mlCurrentAttack != 2 && pInput->IsTriggerd("Interact")==false)
+				if(mlCurrentAttack != 2 && (mpInit->mpCoop && mpInit->mpCoop->IsOnline() ? !mbButtonDown : !pInput->IsTriggerd("Interact")))
 				{
 					mfTime = 0.0f;
 					mfMoveSpeed = 1/mvAttacks[mlCurrentAttack].mfChargeLength;
@@ -509,6 +510,7 @@ void cHudModel_WeaponMelee::ResetExtraData()
 
 void cHudModel_WeaponMelee::Attack()
 {
+	if(mpInit->mpCoop && mpInit->mpCoop->IsClient()) return;
 	mpInit->mbWeaponAttacking = true;
 	//Log("----------------- BEGIN ATTACK WITH WEAPON ------------ \n");
 
@@ -829,6 +831,7 @@ void cHudModel_WeaponMelee::HitBody(iPhysicsBody *apBody)
 	{
 		pEntity->SetLastImpulse(vForceDir *fForceSize);
 		pEntity->Damage(fDamage,mvAttacks[mlCurrentAttack].mlAttackStrength);
+		if(mpInit->mpCoop) mpInit->mpCoop->WeaponHit(pEntity->GetName(),pEntity->GetHealth());
 	}
 }
 

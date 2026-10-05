@@ -1,4 +1,4 @@
-# Penumbra: Overture — Online Co-op 0.1
+# Penumbra: Overture — Online Co-op 0.2
 
 Prototipo sperimentale Windows per due giocatori. Ricostruisce i sorgenti ufficiali di Overture e HPL1 e usa i dati della propria installazione originale. Il progetto è separato dalla mod di Amnesia.
 
@@ -12,6 +12,10 @@ Prototipo sperimentale Windows per due giocatori. Ricostruisce i sorgenti uffici
 Non servono comandi PowerShell per giocare. Il pacchetto non sostituisce gli eseguibili originali e non contiene mappe, texture, audio o DLL commerciali del gioco. Il launcher usa le DLL della propria cartella `redist`. Se manca il runtime MSVC x86, installare il Microsoft Visual C++ Redistributable x86; se manca OpenAL, usare l'installer incluso nel gioco originale.
 
 I comandi restano quelli di Overture, configurabili nelle opzioni: WASD per muoversi, mouse per guardare, tasto di interazione per raccogliere/afferrare, inventario per selezionare la chiave e click sul lucchetto per usarla. Per trascinare porte e cassetti tenere premuto il tasto di interazione e muovere il mouse.
+
+Il martello raccolto nella miniera entra nell'inventario condiviso: entrambi possono equipaggiarlo separatamente. I colpi del client iniziano subito nella sua visuale; l'host decide danni e rotture e invia agli altri lo stato, i frammenti e l'effetto di polvere. La torcia del partner ha un modello visibile e proietta luce su entrambi i PC. Per colpire usare i controlli originali del martello: tenere premuto il tasto di interazione, muovere il mouse per caricare e invertire il gesto per sferrare il colpo; è disponibile anche l'opzione originale dei colpi semplificati.
+
+**Aggiornare entrambi i PC alla 0.2**: il protocollo è versione 2 e rifiuta build incompatibili. Invia gli stati dei giocatori fino a 60 Hz e quelli degli oggetti fino a 30 Hz, entro la frequenza effettiva degli aggiornamenti del gioco. La prediction riduce l'attesa del proprio movimento; conferme delle interazioni e rotture restano soggette alla rete.
 
 ## Steam facoltativo
 
@@ -29,14 +33,14 @@ Sono state provate due istanze sullo stesso PC, anche attraverso un relay con 35
 
 ## Funzioni e limiti
 
-Implementati: host autorevole, ingresso nella stessa mappa, avatar provvisorio, movimento con prediction e correzione, oggetti fisici e corpi articolati replicati, raccolta e inventario condiviso, uso della chiave, mouse per trascinare porte, torcia del partner, messaggi/fade e replica iniziale di suoni e musica, cielo/nebbia/illuminazione ambientale, cambio mappa e tentativi di riconnessione.
+Implementati: host autorevole, ingresso nella stessa mappa, avatar provvisorio, movimento con prediction e correzione che conserva gravità e impulsi, oggetti fisici e corpi articolati replicati, raccolta e inventario condiviso, uso della chiave, mouse per trascinare porte, martello con equipaggiamento indipendente e colpi autorevoli, rotture e frammenti replicati, torcia del partner e batteria del client sincronizzata, messaggi/fade e replica iniziale di suoni e musica, cielo/nebbia/illuminazione ambientale, cambio mappa e tentativi di riconnessione.
 
-Verificati nel gioco: cabina iniziale, movimento del client, presa/spostamento della bottiglia, chiave sul lucchetto, apertura dell'armadietto e caricamento sincronizzato della mappa esterna. Il test posiziona i giocatori e aziona input di prova; il cambio mappa viene richiesto dal test. **Non equivale a una partita completa della campagna.**
+Verificati nel gioco: cabina iniziale, movimento del client, presa/spostamento della bottiglia, chiave sul lucchetto, apertura dell'armadietto, mappa esterna e miniera con il martello. Il test usa due processi sullo stesso PC, posiziona i giocatori e aziona input di prova. La prova della miniera raccoglie il vero martello e crea due casse di un asset originale per verificare i colpi di entrambi. **Non equivale a una partita manuale completa della campagna.**
 
 Ancora da completare o validare:
 
-- Nemici che scelgano e attacchino entrambi i giocatori, danni/morte del secondo giocatore, combattimento, nascondersi e respawn.
-- Salvataggio/ripresa dei due giocatori, notebook/journal completo, consumo degli oggetti, combinazioni, armi e tutte le interazioni della campagna.
+- Nemici che scelgano e attacchino entrambi i giocatori, danni/morte del secondo giocatore, combattimento contro ogni nemico, nascondersi e respawn.
+- Salvataggio/ripresa dei due giocatori, notebook/journal completo, consumo degli oggetti, combinazioni, altre armi e tutte le interazioni della campagna.
 - Animazioni dell'avatar e dei nemici, effetti/particelle, presentazione completa delle scene e tutti gli eventi audio.
 - Ripresa dopo perdita prolungata, migrazione host e test della campagna dall'inizio alla fine.
 

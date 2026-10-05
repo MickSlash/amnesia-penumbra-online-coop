@@ -969,7 +969,7 @@ void cPlayer::OnWorldLoad()
 	// Create body
 	mpCharBody = mpScene->GetWorld3D()->GetPhysicsWorld()->CreateCharacterBody(mbNetworkRemote ? "CoopPlayer2" : "Player", mvSize);
 	
-	mpCharBody->SetCamera(mpCamera);
+	mpCharBody->SetCamera(mbNetworkRemote ? NULL : mpCamera);
 	mpCharBody->SetMass(mfMass);
 	//mpCamera->SetPosition(cVector3f(1,1.2f,-2));
 	

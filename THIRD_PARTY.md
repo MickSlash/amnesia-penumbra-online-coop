@@ -10,7 +10,9 @@ Licenze originali conservate. Le modifiche moderne comprendono comparatori const
 
 AngelScript **2.7.1b / 20701**, copyright Andreas Jönsson, licenza zlib nelle intestazioni originali. Archivio ufficiale: https://www.angelcode.com/angelscript/sdk/files/angelscript_2.7.1b.zip ; SHA256 `FE3C8AFDFCB3D5F352DB6DED75C2F9EE8B2F8E72ED14E02466A1D992FE80D20F`. In `as_config.h` il vecchio alias `vsnprintf` è disabilitato per MSVC moderno. Nessuna libreria AngelScript precompilata del vecchio compilatore viene usata.
 
-ENet **1.3.18**, copyright Lee Salzman, licenza MIT inclusa in `third_party/enet/LICENSE`. La copia proviene dalla mod Amnesia nello stesso workspace e contiene le modifiche Windows per il servizio UDP limitato a 64 buffer e la diagnostica dei pacchetti. Il trasporto applicativo è adattato da quella mod: magic `PO`, protocollo 1, UDP 27120. I due giochi non condividono sessioni.
+ENet **1.3.18**, copyright Lee Salzman, licenza MIT inclusa in `third_party/enet/LICENSE`. La copia proviene dalla mod Amnesia nello stesso workspace e contiene le modifiche Windows per il servizio UDP limitato a 64 buffer e la diagnostica dei pacchetti. Il trasporto applicativo è adattato da quella mod: magic `PO`, protocollo 2, UDP 27120. I due giochi non condividono sessioni. Il protocollo 2 aggiunge gesti affidabili del martello e rifiuta le build della mod con protocollo 1.
+
+L'adattatore usa personaggi e mani nativi separati, equipaggiamento condiviso nell'inventario ma selezionato indipendentemente, danni e rotture decisi dall'host. HPL1 espone una correzione orizzontale di rete che conserva velocità verticale e forze; i sorgenti modificati sono inclusi nello ZIP corrispondente.
 
 Header e import library Win32 di SDL, SDL_image, SDL_ttf, OpenAL, Ogg, Vorbis, Theora, Cg e Newton sono input di compilazione ottenuti dalla cartella `dependencies` di https://github.com/veryjos/penumbra_vr alla revisione `7d7071c74455409c2b6a58dce935b1efc0d5d51d`. Non è stato portato il codice VR. Gli input rimangono in `build/dependencies` e non vengono inclusi nel pacchetto binario o nello ZIP dei sorgenti.
 

@@ -12,10 +12,12 @@
 #include "MainMenu.h"
 #include "EffectHandler.h"
 #include "GameMusicHandler.h"
+#include "HudModel_Weapon.h"
 #include "graphics/Renderer3D.h"
 #include "resources/TextureManager.h"
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <set>
@@ -25,17 +27,19 @@ namespace hpl { extern bool gbGameScriptExecution; }
 namespace hpl { extern bool (*gGameGuiSoundCallback)(const tString&,float); }
 namespace {
 cCoopNetwork* activeNetwork=nullptr;
+uint64_t Milliseconds() { return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); }
 bool ScriptSound(const tString& name,float volume) {
     if(!activeNetwork) return false;
     activeNetwork->RelayGuiSound(name,volume);
     return activeNetwork->IsHost() && activeNetwork->IsRemoteContext();
 }
 struct PlayerScope {
-    cInit* init; cPlayer* player; cPlayerHands* hands;
-    PlayerScope(cInit* i, cPlayer* p, cPlayerHands* h) : init(i), player(i->mpPlayer), hands(i->mpPlayerHands) {
+    cInit* init; cPlayer* player; cPlayerHands* hands; bool simple;
+    PlayerScope(cInit* i, cPlayer* p, cPlayerHands* h) : init(i), player(i->mpPlayer), hands(i->mpPlayerHands), simple(i->mbSimpleWeaponSwing) {
         init->mpPlayer = p; init->mpPlayerHands = h;
+        if(p && p->IsNetworkRemote() && i->mpCoop) init->mbSimpleWeaponSwing=i->mpCoop->RemoteSimpleSwing();
     }
-    ~PlayerScope() { init->mpPlayer = player; init->mpPlayerHands = hands; }
+    ~PlayerScope() { init->mpPlayer = player; init->mpPlayerHands = hands; init->mbSimpleWeaponSwing=simple; }
 };
 float Wrapped(float angle) { while(angle > kPif) angle -= k2Pif; while(angle < -kPif) angle += k2Pif; return angle; }
 cVector3f AimAngles(const cVector3f& from,const cVector3f& target) {
@@ -60,7 +64,7 @@ uint64_t Fingerprint(const std::string& path) {
     while(file) { file.read(block,sizeof block); for(std::streamsize i=0;i<file.gcount();++i) hash=(hash^uint8_t(block[i]))*1099511628211ull; }
     return hash;
 }
-online::PlayerState Capture(cPlayer* p) {
+online::PlayerState Capture(cPlayer* p,cPlayerHands* hands) {
     online::PlayerState s; auto* body=p->GetCharacterBody(); auto* camera=p->GetCamera();
     cVector3f pos=body->GetFeetPosition(); s.x=int32_t(std::round(pos.x*1000)); s.y=int32_t(std::round(pos.y*1000)); s.z=int32_t(std::round(pos.z*1000));
     s.yaw=int16_t(Wrapped(camera->GetYaw())*1000); s.pitch=int16_t(camera->GetPitch()*1000);
@@ -68,6 +72,11 @@ online::PlayerState Capture(cPlayer* p) {
     s.eyeHeight=int16_t((camera->GetPosition().y-pos.y)*1000);
     s.flags=(p->IsActive()?4:0)|(p->IsDead()?8:0)|(p->GetMoveState()==ePlayerMoveState_Crouch?1:0)|(p->GetFlashLight()->IsActive()?2:0);
     if(p->GetState()==ePlayerState_Move) s.flags|=16;
+    if(p->GetState()==ePlayerState_WeaponMelee && hands->GetCurrentModel(1)) {
+        auto* weapon=hands->GetCurrentModel(1);
+        s.tinderboxes=cString::ToLowerCase(weapon->msName)=="hammer"?1:2;
+        if(static_cast<cHudModel_WeaponMelee*>(weapon)->IsAttacking()) s.flags|=64;
+    }
     s.forwardSpeed=int16_t(body->GetMoveSpeed(eCharDir_Forward)*1000); s.sideSpeed=int16_t(body->GetMoveSpeed(eCharDir_Right)*1000);
     s.forwardMax=uint16_t(body->GetMaxPositiveMoveSpeed(eCharDir_Forward)*1000); s.sideMax=uint16_t(body->GetMaxPositiveMoveSpeed(eCharDir_Right)*1000);
     s.backwardMax=uint16_t(-body->GetMaxNegativeMoveSpeed(eCharDir_Forward)*1000);
@@ -116,10 +125,15 @@ void cCoopNetwork::BeforeMapLoad() {
     if(world) {
         for(auto* part:avatar) if(part) world->DestroyMeshEntity(part);
         if(remoteLight) world->DestroyLight(remoteLight);
+        if(remoteTool) world->DestroyMeshEntity(remoteTool);
+        if(remoteFlashlight) world->DestroyMeshEntity(remoteFlashlight);
     }
     for(auto& part:avatar) part=nullptr;
     remoteLight=nullptr; hasAvatarPosition=false; positioned=false; baselineSent=false;
+    remoteTool=nullptr; remoteToolID=0; toolSwing=0; hasClientPosition=false; snapshotAge=0;
+    remoteFlashlight=nullptr;
     prediction.Clear(); motion.clear(); published.clear(); pendingPresentation.clear(); remoteButtons=0; lastInput=0;
+    remoteExamineDown=false;
     mediaBytes.clear(); pendingMedia.clear(); currentMusic.clear(); currentSkybox.clear(); inventoryBytes.clear();
 }
 void cCoopNetwork::AfterMapLoad(const tString& file) {
@@ -139,20 +153,68 @@ void cCoopNetwork::AfterMapLoad(const tString& file) {
     }
     Log("[COOP/MAP] Loaded epoch=%u map=%s role=%s\n",map.epoch,file.c_str(),IsHost()?"host":"client");
 }
-bool cCoopNetwork::ClientAction(online::PlayerAction action, bool pressed,const std::string& item) {
+bool cCoopNetwork::ClientAction(online::PlayerAction action, bool pressed,const std::string& item,const std::string& second) {
     if(!IsClient()) return false;
-    if(action==online::PlayerAction::Interact) interactHeld=pressed;
-    online::ActionRequest request; request.epoch=map.epoch; request.sequence=++actionSequence; request.action=action; request.pressed=pressed; request.item=item;
+    if(action==online::PlayerAction::Interact) { interactHeld=pressed; if(!pressed) gestureYaw=gesturePitch=0; }
+    online::ActionRequest request; request.epoch=map.epoch; request.sequence=++actionSequence; request.action=action; request.pressed=pressed; request.item=item; request.secondItem=second;
     if(action==online::PlayerAction::Interact && pressed && init->mpPlayer->GetState()==ePlayerState_UseItem && init->mpPlayer->GetCurrentItem())
         request.item=init->mpPlayer->GetCurrentItem()->GetName();
     if(Ready()) session.SendAction(request);
     if(action==online::PlayerAction::Interact && pressed && !request.item.empty()) init->mpPlayer->ChangeState(ePlayerState_Normal);
     if(action==online::PlayerAction::Interact && pressed && init->mpGameMessageHandler->HasMessage()) init->mpGameMessageHandler->ShowNext();
-    return true;
+    // Predict the first-person swing immediately; world damage runs only on the host.
+    return !(action==online::PlayerAction::Interact && init->mpPlayer->GetState()==ePlayerState_WeaponMelee);
+}
+void cCoopNetwork::ClientWeaponModel(const std::string& model) {
+    if(!IsClient() || !Ready()) return;
+    if(model.empty()) { ClientAction(online::PlayerAction::UseInventory,false); return; }
+    for(const auto& pair:init->mpInventory->NetworkItems()) {
+        auto* item=pair.second;
+        if(item->GetItemType()==eGameItemType_WeaponMelee && cString::ToLowerCase(item->GetHudModelName())==cString::ToLowerCase(model)) {
+            ClientAction(online::PlayerAction::UseInventory,true,item->GetName(),init->mbSimpleWeaponSwing?"simple":"manual"); return;
+        }
+    }
+}
+void cCoopNetwork::WeaponHit(const std::string& entity,float health) {
+    if(!IsHost()) return;
+    worldDirty=true;
+    if(getenv("PENUMBRA_COOP_QA")) {
+        if(IsRemoteContext()) ++clientHits; else ++hostHits;
+        Log("[COOP/QA] Authoritative hammer hit role=%s entity=%s health=%.1f t_ms=%llu\n",IsRemoteContext()?"client":"host",entity.c_str(),health,(unsigned long long)Milliseconds());
+    }
+}
+void cCoopNetwork::BeforeObjectBreak(iGameEntity* entity) {
+    if(!IsHost() || !remotePlayer || !entity) return;
+    const auto state=remotePlayer->GetState();
+    if(state!=ePlayerState_Grab && state!=ePlayerState_Move && state!=ePlayerState_Push) return;
+    for(int n=0;n<entity->GetBodyNum();++n) if(remotePlayer->GetPushBody()==entity->GetBody(n)) {
+        PlayerScope scope(init,remotePlayer,remoteHands);
+        if(getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Release partner holding broken entity=%s state=%d\n",entity->GetName().c_str(),int(state));
+        remotePlayer->ChangeState(ePlayerState_Normal); remotePlayer->SetPushBody(nullptr);
+        break;
+    }
+}
+void cCoopNetwork::RelayParticle(const std::string& file,const cMatrixf& matrix) {
+    if(!IsHost() || !session.Connected() || file.empty()) return;
+    online::MediaState s; s.kind=online::MediaKind::Particle;
+    s.name="CoopBreak_"+std::to_string(++sequence); s.id=EntityID(s.name); s.file=file; s.transform=Pack(matrix);
+    s.flags=1; s.values[8]=s.values[9]=s.values[10]=1000;
+    if(pendingMedia.size()<256) pendingMedia.push_back(s);
+    worldDirty=true;
 }
 bool cCoopNetwork::ClientLook(float yaw,float pitch) {
     if(!IsClient()) return false;
     lookYaw+=yaw; lookPitch+=pitch;
+    if(interactHeld && init->mpPlayer->GetState()==ePlayerState_WeaponMelee) {
+        auto direction=[](float v) { return v>.015f?1:v<-.015f?-1:0; };
+        const int x=direction(yaw),y=direction(pitch);
+        if((x && x!=gestureYaw) || (y && y!=gesturePitch)) {
+            online::ActionRequest a; a.epoch=map.epoch; a.sequence=++actionSequence; a.action=online::PlayerAction::WeaponLook;
+            a.lookYaw=int16_t(std::clamp(yaw*10000,-31420.0f,31420.0f)); a.lookPitch=int16_t(std::clamp(pitch*10000,-31420.0f,31420.0f));
+            if(Ready()) session.SendAction(a);
+            if(x) gestureYaw=x; if(y) gesturePitch=y;
+        }
+    }
     return interactHeld && (latest.players[1].flags&16);
 }
 bool cCoopNetwork::RelayMessage(const tWString& text) {
@@ -184,20 +246,29 @@ void cCoopNetwork::Update(float dt) {
         if(remotePlayer && remotePlayer->GetCharacterBody()) { remotePlayer->GetCharacterBody()->SetMoveSpeed(eCharDir_Forward,0); remotePlayer->GetCharacterBody()->SetMoveSpeed(eCharDir_Right,0); }
         return;
     }
+    const auto perfStart=std::chrono::steady_clock::now();
     if(IsHost()) UpdateHost(dt); else UpdateClient(dt);
+    const auto elapsed=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-perfStart).count());
+    perfSum+=elapsed; perfMax=std::max(perfMax,elapsed); ++perfSamples; perfTime+=dt;
+    if(perfTime>=5) {
+        Log("[COOP/PERF] role=%s average_us=%llu max_us=%llu samples=%u\n",IsHost()?"host":"client",(unsigned long long)(perfSum/perfSamples),(unsigned long long)perfMax,perfSamples);
+        perfTime=0; perfSum=perfMax=0; perfSamples=0;
+    }
 }
 void cCoopNetwork::UpdateHost(float dt) {
     if(!map.epoch || !remotePlayer->GetCharacterBody()) return;
     const bool canPlay=Ready() && init->mpGame->GetUpdater()->GetCurrentContainerName()=="Default";
-    online::PlayerInput input; const bool hasInput=canPlay && session.ReadInput(input) && input.epoch==map.epoch && !(getenv("PENUMBRA_COOP_QA") && ((qaTime>4 && qaTime<6) || (qaTime>15 && qaTime<18) || (qaTime>24 && qaTime<26)));
+    online::PlayerInput input; const bool hasInput=canPlay && session.ReadInput(input) && input.epoch==map.epoch && !(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))!="hammer" && ((qaTime>4 && qaTime<6) || (qaTime>15 && qaTime<18) || (qaTime>24 && qaTime<26)));
     {
         PlayerScope scope(init,remotePlayer,remoteHands);
         remotePlayer->SetActive((latest.players[0].flags&4)!=0);
         // Local UI and camera effects belong to their owner; remote physics has its own state.
         if(hasInput) {
-            if(remotePlayer->GetState()==ePlayerState_Move) {
-                if(input.sequence!=lastInput) { remotePlayer->AddYaw(input.lookYaw/10000.0f); remotePlayer->AddPitch(input.lookPitch/10000.0f); }
-            } else if(!(getenv("PENUMBRA_COOP_QA") && qaStage==2 && qaTime<8.6f && remotePlayer->GetState()==ePlayerState_Normal)) {
+            if(remotePlayer->GetState()==ePlayerState_Move || remotePlayer->GetState()==ePlayerState_WeaponMelee) {
+                if(input.sequence!=lastInput && remotePlayer->GetState()==ePlayerState_Move) { remotePlayer->AddYaw(input.lookYaw/10000.0f); remotePlayer->AddPitch(input.lookPitch/10000.0f); }
+                if(remotePlayer->GetState()==ePlayerState_WeaponMelee && remoteSimpleSwing) remotePlayer->AddYaw(0);
+                if(remotePlayer->GetState()==ePlayerState_WeaponMelee && !qaAimLocked) { remotePlayer->GetCamera()->SetYaw(input.yaw/1000.0f); remotePlayer->GetCamera()->SetPitch(input.pitch/1000.0f); remotePlayer->GetCharacterBody()->SetYaw(input.yaw/1000.0f); }
+            } else if(!qaAimLocked && !(getenv("PENUMBRA_COOP_QA") && qaStage==2 && qaTime<8.6f && remotePlayer->GetState()==ePlayerState_Normal)) {
                 remotePlayer->GetCamera()->SetYaw(input.yaw/1000.0f); remotePlayer->GetCamera()->SetPitch(input.pitch/1000.0f); remotePlayer->GetCharacterBody()->SetYaw(input.yaw/1000.0f);
             }
             if((input.buttons&4) && !(remoteButtons&4)) remotePlayer->StartRun();
@@ -207,8 +278,16 @@ void cCoopNetwork::UpdateHost(float dt) {
             if((input.buttons&1) && !(remoteButtons&1)) remotePlayer->Jump();
             remotePlayer->SetJumpButtonDown((input.buttons&1)!=0); remoteButtons=input.buttons; lastInput=input.sequence;
             remotePlayer->MoveForwards(input.forward/1000.0f,dt); remotePlayer->MoveSideways(input.strafe/1000.0f,dt);
-        } else { remotePlayer->StopInteract(); remotePlayer->MoveForwards(0,dt); remotePlayer->MoveSideways(0,dt); remoteButtons=0; }
+        } else { remotePlayer->StopInteract(); remotePlayer->MoveForwards(0,dt); remotePlayer->MoveSideways(0,dt); remoteButtons=0; remoteExamineDown=false; }
         remotePlayer->Update(dt);
+        remotePlayer->GetFlashLight()->Update(dt);
+        remoteHands->Update(dt);
+        // The partner's world tool is drawn separately; these private HUD entities drive combat.
+        for(int slot=0;slot<2;++slot) if(auto* model=remoteHands->GetCurrentModel(slot)) {
+            if(model->GetEntity()) model->GetEntity()->SetVisible(false);
+            for(auto* light:model->mvLights) light->SetVisible(false);
+            for(auto* bill:model->mvBillboards) bill->SetVisible(false);
+        }
     }
     online::ActionRequest action;
     while(session.ReadAction(action)) {
@@ -224,12 +303,30 @@ void cCoopNetwork::UpdateHost(float dt) {
                 if(item && entity && entity->IsActive() && remotePlayer->GetPickedDist()<=entity->GetMaxInteractDist())
                     init->mpInventory->GetItemType(item->GetItemType())->OnUse(item,entity);
             } else if(action.pressed) {
-                if(getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Native interact picked=%s distance=%.3f pitch=%.3f\n",remotePlayer->GetPickedBody()?remotePlayer->GetPickedBody()->GetName().c_str():"none",remotePlayer->GetPickedDist(),remotePlayer->GetCamera()->GetPitch());
+                if(getenv("PENUMBRA_COOP_QA")) {
+                    auto eye=remotePlayer->GetCamera()->GetPosition(), forward=remotePlayer->GetCamera()->GetForward();
+                    Log("[COOP/QA] Native interact picked=%s distance=%.3f pitch=%.3f eye=%.3f/%.3f/%.3f forward=%.3f/%.3f/%.3f\n",remotePlayer->GetPickedBody()?remotePlayer->GetPickedBody()->GetName().c_str():"none",remotePlayer->GetPickedDist(),remotePlayer->GetCamera()->GetPitch(),eye.x,eye.y,eye.z,forward.x,forward.y,forward.z);
+                }
                 remotePlayer->StartInteract();
             } else remotePlayer->StopInteract();
         }
-        if(action.action==online::PlayerAction::Attack) { if(action.pressed) remotePlayer->StartExamine(); else remotePlayer->StopExamine(); }
-        if(action.action==online::PlayerAction::Lantern) remotePlayer->GetFlashLight()->SetNetworkActive(action.pressed);
+        if(action.action==online::PlayerAction::Attack) { remoteExamineDown=action.pressed; if(action.pressed) remotePlayer->StartExamine(); else remotePlayer->StopExamine(); }
+        if(action.action==online::PlayerAction::Lantern && (!action.pressed || init->mpInventory->GetItem("flashlight"))) remotePlayer->GetFlashLight()->SetActive(action.pressed);
+        if(action.action==online::PlayerAction::UseInventory) {
+            if(!action.pressed) remotePlayer->StartHolster();
+            else if(auto* item=init->mpInventory->GetItem(action.item)) {
+                if(item->GetItemType()==eGameItemType_WeaponMelee) {
+                    remoteSimpleSwing=action.secondItem=="simple";
+                    auto* equipped=remoteHands->GetCurrentModel(1);
+                    if(!equipped || equipped->msName!=item->GetHudModelName() || remotePlayer->GetState()!=ePlayerState_WeaponMelee)
+                        init->mpInventory->GetItemType(item->GetItemType())->OnAction(item,0);
+                }
+            }
+        }
+        if(action.action==online::PlayerAction::WeaponLook && remotePlayer->GetState()==ePlayerState_WeaponMelee) {
+            if(auto* model=remoteHands->GetCurrentModel(1))
+                static_cast<cHudModel_WeaponMelee*>(model)->OnMouseMove(cVector2f(action.lookYaw/10000.0f,action.lookPitch/10000.0f));
+        }
     }
     if(session.IsMapReady(map.epoch) && !baselineSent) {
         if(PublishWorld(true) && session.SendWorldReady(map.epoch)) baselineSent=true;
@@ -246,11 +343,11 @@ void cCoopNetwork::UpdateHost(float dt) {
             if(session.SendInventory(next)) { inventory=next; inventoryBytes=bytes; }
         }
         for(auto it=pendingPresentation.begin();it!=pendingPresentation.end();) { it->epoch=map.epoch; if(session.SendPresentation(*it)) it=pendingPresentation.erase(it); else break; }
-        worldTime+=dt; if(worldTime>=1.0f/30) { worldTime=0; PublishWorld(false); }
+        worldTime+=dt; if(worldDirty || worldTime+0.000001f>=1.0f/30) { worldTime=std::max(0.0f,worldTime-1.0f/30); worldDirty=false; PublishWorld(false); }
         sendTime+=dt; backupTime+=dt;
-        if(sendTime>=1.0f/60) {
-            sendTime=0; latest.epoch=map.epoch; latest.sequence=++sequence; latest.acknowledgedInput=lastInput;
-            latest.players[0]=Capture(init->mpPlayer); latest.players[1]=Capture(remotePlayer);
+        if(sendTime+0.000001f>=1.0f/60) {
+            sendTime=std::max(0.0f,sendTime-1.0f/60); latest.epoch=map.epoch; latest.sequence=++sequence; latest.acknowledgedInput=lastInput;
+            latest.players[0]=Capture(init->mpPlayer,init->mpPlayerHands); latest.players[1]=Capture(remotePlayer,remoteHands);
             latest.players[1].flags=(latest.players[1].flags&~4)|(canPlay?(latest.players[0].flags&4):0);
             session.SendSnapshot(latest);
             if(backupTime>=0.2f) { session.SendSnapshotBackup(latest); backupTime=0; }
@@ -268,18 +365,24 @@ void cCoopNetwork::UpdateClient(float dt) {
     if(!map.epoch || !init->mpPlayer->GetCharacterBody()) return;
     online::EntityState entity; while(session.ReadEntity(entity)) if(entity.epoch==map.epoch) ApplyEntity(entity);
     online::MediaState media; while(session.ReadMedia(media)) if(media.epoch==map.epoch) ApplyMedia(media);
-    if(session.IsWorldReady(map.epoch)) session.SendWorldApplied(map.epoch);
     online::Snapshot snapshot;
     if(session.ReadSnapshot(snapshot) && snapshot.epoch==map.epoch) {
         latest=snapshot;
         if(snapshot.sequence!=lastSnapshot) {
+            const uint64_t now=Milliseconds();
+            if(lastSnapshotAt && std::string(getenv("PENUMBRA_COOP_QA")?getenv("PENUMBRA_COOP_QA"):"")=="hammer" && hammerTime>40 && hammerTime<48) { const float interval=(now-lastSnapshotAt)/1000.0f; intervalSum+=interval; intervalMax=std::max(intervalMax,interval); ++intervalCount; }
+            lastSnapshotAt=now;
+            snapshotAge=0;
             auto* player=init->mpPlayer; auto* body=player->GetCharacterBody(); const auto& s=snapshot.players[1];
             cVector3f target(s.x/1000.0f,s.y/1000.0f,s.z/1000.0f);
             if(!positioned) {
                 body->SetFeetPosition(target); body->SetYaw(s.yaw/1000.0f); player->GetCamera()->SetYaw(s.yaw/1000.0f); player->GetCamera()->SetPitch(s.pitch/1000.0f);
                 positioned=true; Log("[COOP/STATE] First player baseline applied\n");
-            } else if((target-body->GetFeetPosition()).SqrLength()>4.0f) { body->SetFeetPosition(target); prediction.Clear(); }
-            player->SetActive((s.flags&4)!=0); player->SetHealth(s.health/100.0f);
+            } else if((target-body->GetFeetPosition()).SqrLength()>4.0f) {
+                if(hammerTime>40 && hammerTime<48) ++hardCorrections;
+                body->SetFeetPosition(target); prediction.Clear();
+            }
+            player->SetActive((s.flags&4)!=0); player->SetHealth(s.health/100.0f); player->SetPower(s.oil/100.0f);
             if(s.flags&16) { player->GetCamera()->SetYaw(s.yaw/1000.0f); player->GetCamera()->SetPitch(s.pitch/1000.0f); }
             lastSnapshot=snapshot.sequence;
         }
@@ -295,10 +398,12 @@ void cCoopNetwork::UpdateClient(float dt) {
                 return blocked?from:to;
             };
             auto pos=prediction.ReconcileSmoothed(snapshot.players[1],snapshot.acknowledgedInput,snapshot.sequence,dt,collide);
-            cVector3f feet=body->GetFeetPosition(); feet.x=pos.x; feet.z=pos.z; body->SetFeetPosition(feet,true);
+            if(hammerTime>40 && hammerTime<48) correctionMax=std::max(correctionMax,prediction.CorrectionDistance());
+            body->SetNetworkHorizontalPosition(pos.x,pos.z);
         }
         UpdateAvatar(snapshot.players[0],dt);
     }
+    snapshotAge+=dt;
     for(auto& pair:motion) {
         auto* e=init->mpMapHandler->GetGameEntity(pair.first,false); if(!e) continue;
         auto& m=pair.second; m.age+=dt; const float alpha=std::min(1.0f,m.age/(1.0f/30));
@@ -345,6 +450,8 @@ void cCoopNetwork::UpdateClient(float dt) {
         }
         inventory=items;
     }
+    // Confirm only after every baseline presentation queued in this poll was applied.
+    if(!session.IsWorldApplied(map.epoch) && session.IsWorldReady(map.epoch)) session.SendWorldApplied(map.epoch);
     if(Ready()) {
         online::PlayerInput input; input.epoch=map.epoch; input.sequence=++inputSequence;
         auto* p=init->mpPlayer; auto* keys=init->mpGame->GetInput();
@@ -354,8 +461,13 @@ void cCoopNetwork::UpdateClient(float dt) {
             input.buttons=(keys->IsTriggerd("Jump")?1:0)|(p->GetMoveState()==ePlayerMoveState_Crouch?2:0)|(keys->IsTriggerd("Run")?4:0);
         }
         if(getenv("PENUMBRA_COOP_QA")) { input.forward=input.strafe=0; input.buttons=0; }
-        if(getenv("PENUMBRA_COOP_QA") && qaTime>2 && qaTime<3) {
+        if(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))!="hammer" && qaTime>2 && qaTime<3) {
             input.forward=-1000; input.strafe=0; input.buttons=0; p->MoveForwards(-1,dt);
+        }
+        if(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))=="hammer" && hammerTime>40 && hammerTime<48) {
+            input.forward=(hammerTime<44)?500:-500; p->MoveForwards(input.forward/1000.0f,dt);
+            if(hasClientPosition) { auto delta=p->GetCharacterBody()->GetFeetPosition()-lastClientPosition; delta.y=0; const float step=delta.Length(); stepMax=std::max(stepMax,step); movementDistance+=step; }
+            lastClientPosition=p->GetCharacterBody()->GetFeetPosition(); hasClientPosition=true;
         }
         input.yaw=int16_t(Wrapped(p->GetCamera()->GetYaw())*1000); input.pitch=int16_t(p->GetCamera()->GetPitch()*1000);
         input.lookYaw=int16_t(std::clamp(lookYaw*10000,-31420.0f,31420.0f)); input.lookPitch=int16_t(std::clamp(lookPitch*10000,-31420.0f,31420.0f)); lookYaw=lookPitch=0;
@@ -395,6 +507,7 @@ void cCoopNetwork::ApplyEntity(const online::EntityState& s) {
         entity=init->mpMapHandler->GetGameEntity(s.name,false);
     }
     if(!entity) return;
+    if((s.flags&4) && entity->IsActive() && getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Replica removed entity=%s t_ms=%llu\n",s.name.c_str(),(unsigned long long)Milliseconds());
     entity->SetActive((s.flags&1)!=0 && !(s.flags&4));
     if(s.flags&4) { motion.erase(s.name); return; }
     if(auto* mesh=entity->GetMeshEntity()) if(s.bodies.empty()) mesh->SetMatrix(Unpack(s.transform));
@@ -417,6 +530,8 @@ void cCoopNetwork::UpdateAvatar(const online::PlayerState& s,float dt) {
         }
         remoteLight=world->CreateLightSpot("CoopPartnerFlashlight","player_flashlight_gobo.tga");
         remoteLight->SetIsSaved(false); remoteLight->SetDiffuseColor(cColor(1,1,.85f,1)); remoteLight->SetFarAttenuation(15); remoteLight->SetFOV(cMath::ToRad(50)); remoteLight->SetCastShadows(true);
+        auto* flashlightMesh=init->mpGame->GetResources()->GetMeshManager()->CreateMesh("item_flashlight.dae");
+        if(flashlightMesh) { remoteFlashlight=world->CreateMeshEntity("CoopPartnerFlashlightMesh",flashlightMesh); remoteFlashlight->SetIsSaved(false); remoteFlashlight->SetCastsShadows(true); }
         Log("[COOP/AVATAR] Created partner silhouette\n");
     }
     cVector3f target(s.x/1000.0f,s.y/1000.0f,s.z/1000.0f);
@@ -426,12 +541,33 @@ void cCoopNetwork::UpdateAvatar(const online::PlayerState& s,float dt) {
     const float crouch=(s.flags&1)?0.7f:1;
     const cVector3f offsets[]={cVector3f(0,1.1f,0),cVector3f(0,1.58f,0),cVector3f(-.27f,1.1f,0),cVector3f(.27f,1.1f,0),cVector3f(-.11f,.35f,0),cVector3f(.11f,.35f,0)};
     for(int n=0;n<6;++n) { auto m=cMath::MatrixRotateY(s.yaw/1000.0f); auto offset=offsets[n]; offset.y*=crouch; m.SetTranslation(avatarPosition+cMath::MatrixMul(m,offset)); avatar[n]->SetMatrix(m); avatar[n]->SetVisible(session.Connected() && !(s.flags&8)); }
-    auto lightMatrix=cMath::MatrixRotate(cVector3f(-s.pitch/1000.0f,-s.yaw/1000.0f,0),eEulerRotationOrder_YXZ); lightMatrix.SetTranslation(avatarPosition+cVector3f(0,s.eyeHeight/1000.0f,0));
+    auto lightMatrix=cMath::MatrixMul(cMath::MatrixRotateY(s.yaw/1000.0f),cMath::MatrixRotateX(s.pitch/1000.0f)); lightMatrix.SetTranslation(avatarPosition+cVector3f(0,s.eyeHeight/1000.0f,0));
     remoteLight->SetMatrix(lightMatrix); remoteLight->SetVisible((s.flags&2)!=0);
+    if(remoteFlashlight) {
+        auto m=cMath::MatrixMul(lightMatrix,cMath::MatrixRotateX(kPi2f));
+        m.SetTranslation(lightMatrix.GetTranslation()+cMath::MatrixMul(lightMatrix.GetRotation(),cVector3f(-.23f,-.24f,-.3f)));
+        remoteFlashlight->SetMatrix(m); remoteFlashlight->SetVisible(session.Connected() && (s.flags&2) && !(s.flags&8));
+    }
+    if(s.tinderboxes!=remoteToolID) {
+        if(remoteTool) world->DestroyMeshEntity(remoteTool);
+        remoteTool=nullptr; remoteToolID=s.tinderboxes;
+        if(remoteToolID==1 || remoteToolID==2) {
+            auto* mesh=init->mpGame->GetResources()->GetMeshManager()->CreateMesh(remoteToolID==1?"item_hammer.dae":"items_pickaxe.dae");
+            if(mesh) { remoteTool=world->CreateMeshEntity("CoopPartnerTool",mesh); remoteTool->SetIsSaved(false); remoteTool->SetCastsShadows(true); }
+        }
+    }
+    toolSwing+=( ((s.flags&64)?1.0f:0.0f)-toolSwing)*std::min(1.0f,dt*25);
+    if(remoteTool) {
+        auto frame=cMath::MatrixMul(cMath::MatrixRotateY(s.yaw/1000.0f),cMath::MatrixRotateX(s.pitch/1000.0f));
+        auto m=cMath::MatrixMul(frame,cMath::MatrixRotateX(-.3f-toolSwing*1.0f));
+        m.SetTranslation(avatarPosition+cVector3f(0,s.eyeHeight/1000.0f,0)+cMath::MatrixMul(frame,cVector3f(.23f,-.24f,-.3f)));
+        remoteTool->SetMatrix(m); remoteTool->SetVisible(session.Connected() && !(s.flags&8));
+    }
 }
 void cCoopNetwork::RunQA(float dt) {
     if(!getenv("PENUMBRA_COOP_QA") || (!Ready() && qaTime<=0)) return;
     qaTime+=dt;
+    if(std::string(getenv("PENUMBRA_COOP_QA"))=="hammer") { RunHammerQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="intro") {
         auto* song=init->mpGame->GetSound()->GetMusicHandler()->GetCurrentSong();
         if(qaTime>15 && Ready() && init->mpPlayer->IsActive() && song && song->msFileName.find("penumbra_music_E1_A6")!=std::string::npos) qaPuzzle=true;
@@ -567,6 +703,198 @@ void cCoopNetwork::RunQA(float dt) {
     }
 }
 
+void cCoopNetwork::RunHammerQA(float dt) {
+    if(IsClient()) init->mbSimpleWeaponSwing=getenv("PENUMBRA_COOP_QA_SIMPLE") && std::string(getenv("PENUMBRA_COOP_QA_SIMPLE"))=="1";
+    auto* player=init->mpPlayer;
+    auto* world=init->mpGame->GetScene()->GetWorld3D();
+    auto aim=[](cPlayer* p,iGameEntity* e) {
+        if(!e || !e->GetBodyNum()) return;
+        auto angles=AimAngles(p->GetCamera()->GetPosition(),e->GetBody(0)->GetBV()->GetWorldCenter());
+        p->GetCamera()->SetYaw(angles.y); p->GetCamera()->SetPitch(angles.x); p->GetCharacterBody()->SetYaw(angles.y);
+    };
+    auto pickAim=[&](cPlayer* p,iGameEntity* e) {
+        auto center=e->GetBody(0)->GetBV()->GetWorldCenter(), size=e->GetBody(0)->GetBV()->GetSize();
+        for(int x=-2;x<=2;++x) for(int y=-2;y<=2;++y) for(int z=-2;z<=2;++z) {
+            auto target=center+cVector3f(size.x*x*.2f,size.y*y*.2f,size.z*z*.2f);
+            auto angles=AimAngles(p->GetCamera()->GetPosition(),target);
+            p->GetCamera()->SetYaw(angles.y); p->GetCamera()->SetPitch(angles.x); p->GetCharacterBody()->SetYaw(angles.y);
+            auto* ray=p->GetPickRay(); ray->Clear(); auto start=p->GetCamera()->GetPosition();
+            world->GetPhysicsWorld()->CastRay(ray,start,start+p->GetCamera()->GetForward()*ray->mfMaxDistance,true,false,true);
+            ray->CalculateResults();
+            if(p->GetPickedBody()==e->GetBody(0) && ray->mfPickedDist<=e->GetMaxInteractDist()) return true;
+        }
+        return false;
+    };
+    if(IsHost()) {
+        init->mpGameMessageHandler->Reset(); player->SetActive(true);
+        player->GetLookAt()->SetActive(false); if(qaTime<1 || qaStage==2) init->mpFadeHandler->FadeIn(0); init->mpEffectHandler->GetDepthOfField()->SetActive(false,0);
+        if(qaStage==0 && Ready() && qaTime>.8f) {
+            // Collect the real cabin flashlight through its native pickup path.
+            if(auto* light=init->mpMapHandler->GetGameEntity("flashlight",false)) {
+                auto target=light->GetBody(0)->GetBV()->GetWorldCenter();
+                player->GetCharacterBody()->SetFeetPosition(target+cVector3f(0,-.6f,.5f));
+                player->SetPickedBody(light->GetBody(0)); player->GetPickRay()->mvPickedPos=target; light->PlayerInteract();
+            }
+            init->mpMapHandler->ChangeMap("level01_01_outside.dae","link1","","",.1f,.1f,"",""); qaStage=1;
+        }
+        if(qaStage==1 && map.file=="maps/level01_01_outside.dae" && Ready() && qaTime>4) {
+            // Fixture opens the hatch gate; the original exit interaction changes the map.
+            auto* exit=init->mpMapHandler->GetGameEntity("exitarea",false);
+            if(!exit || !exit->GetBodyNum()) FatalError("[COOP/QA] Missing outside hatch exit\n");
+            auto target=exit->GetBody(0)->GetBV()->GetWorldCenter(); exit->SetActive(true);
+            player->GetCharacterBody()->SetFeetPosition(target+cVector3f(0,-.5f,.1f));
+            player->SetPickedBody(exit->GetBody(0)); player->GetPickRay()->mvPickedPos=target; exit->PlayerInteract(); qaStage=2;
+        }
+    }
+    if(map.file!="maps/level01_02_mine_entrance.dae" || (!Ready() && hammerTime==0)) return;
+    hammerTime+=dt;
+    if(hammerTime>9 && !hammerShared) {
+        Log("[COOP/QA] FAIL native hammer pickup role=%s\n",IsHost()?"host":"client"); init->mpGame->Exit(); return;
+    }
+    init->mpGameMessageHandler->Reset();
+    if(player->GetState()==ePlayerState_Message) player->ChangeState(ePlayerState_Normal);
+    if(IsHost()) {
+        if(qaStage==2) {
+            auto* hammer=init->mpMapHandler->GetGameEntity("hammer",false);
+            if(!hammer) FatalError("[COOP/QA] Missing real mine hammer\n");
+            auto target=hammer->GetBody(0)->GetBV()->GetWorldCenter();
+            qaInitialPosition=remotePlayer->GetCharacterBody()->GetFeetPosition();
+            remotePlayer->ChangeMoveState(ePlayerMoveState_Walk,true);
+            bool accessible=false;
+            for(int side=0;side<16 && !accessible;++side) {
+                const float angle=side*kPi2f/2, radius=side<8?.8f:1.1f;
+                cVector3f feet(target.x+std::cos(angle)*radius,.3f,target.z+std::sin(angle)*radius);
+                auto matrix=cMatrixf::Identity; matrix.SetTranslation(feet+cVector3f(0,remotePlayer->GetSize().y/2,0));
+                const bool blocked=world->GetPhysicsWorld()->CheckShapeWorldCollision(nullptr,remotePlayer->GetCharacterBody()->GetShape(),matrix,remotePlayer->GetCharacterBody()->GetBody(),false,true,nullptr,false);
+                remotePlayer->GetCamera()->SetPosition(feet+cVector3f(0,remotePlayer->GetSize().y+remotePlayer->GetCameraHeightAdd()+remotePlayer->GetHeightAdd(),0));
+                const bool seen=pickAim(remotePlayer,hammer);
+                Log("[COOP/QA] Hammer view side=%d blocked=%d seen=%d center=%.3f/%.3f/%.3f size=%.3f/%.3f/%.3f\n",side,blocked,seen,target.x,target.y,target.z,hammer->GetBody(0)->GetBV()->GetSize().x,hammer->GetBody(0)->GetBV()->GetSize().y,hammer->GetBody(0)->GetBV()->GetSize().z);
+                if(seen && !blocked) { remotePlayer->GetCharacterBody()->SetFeetPosition(feet); accessible=true; }
+            }
+            if(!accessible) { Log("[COOP/QA] FAIL no unobstructed native hammer pickup view\n"); init->mpGame->Exit(); return; }
+            qaStage=3; Log("[COOP/QA] Arrived in hammer level via cabin/outside/hatch epoch=%u\n",map.epoch);
+        }
+        qaAimLocked=hammerTime<6 || (hammerTime>10 && hammerTime<25);
+        if(hammerTime<6) {
+            auto* hammer=init->mpMapHandler->GetGameEntity("hammer",false);
+            // Aim at a solid part of the thin hammer rather than empty space in its AABB.
+            if(hammer && !pickAim(remotePlayer,hammer)) aim(remotePlayer,hammer);
+        }
+        if(hammerTime>6 && !hammerShared) {
+            hammerShared=init->mpInventory->GetItem("hammer")!=nullptr;
+            if(hammerShared) { Log("[COOP/QA] Native hammer pickup shared on host\n"); init->mpInventory->GetItemType(eGameItemType_WeaponMelee)->OnAction(init->mpInventory->GetItem("hammer"),0); }
+        }
+        if(hammerTime>8 && hammerTime<8+dt*2 && !player->GetFlashLight()->IsActive()) player->StartFlashLightButton();
+        if(hammerTime>10 && qaStage==3) {
+            hammerEquipped=player->GetState()==ePlayerState_WeaponMelee && remotePlayer->GetState()==ePlayerState_WeaponMelee;
+            lightsSeen=player->GetFlashLight()->IsActive() && remotePlayer->GetFlashLight()->IsActive() && remoteLight && remoteLight->IsVisible() && remoteFlashlight && remoteFlashlight->IsVisible();
+            if(remoteLight) {
+                const auto direction=cMath::MatrixMul(remoteLight->GetWorldMatrix().GetRotation(),cVector3f(0,0,-1));
+                const float alignment=cMath::Vector3Dot(direction,remotePlayer->GetCamera()->GetForward());
+                lightsSeen=lightsSeen && alignment>.99f;
+                Log("[COOP/QA] Partner flashlight native aim alignment=%.5f\n",alignment);
+            }
+            Log("[COOP/QA] Both native hammer states=%d flashlight pair=%d shared_flashlight=%d power=%.1f/%.1f lights=%d/%d/%d\n",hammerEquipped?1:0,lightsSeen?1:0,init->mpInventory->GetItem("flashlight")?1:0,player->GetPower(),remotePlayer->GetPower(),player->GetFlashLight()->IsActive(),remotePlayer->GetFlashLight()->IsActive(),remoteLight?remoteLight->IsVisible():0);
+            auto matrix=cMatrixf::Identity; matrix.SetTranslation(cVector3f(0,.55f,6.6f));
+            world->CreateEntity("CoopQA_ClientCrate",matrix,"modern_mine_woodcrate.ent",true);
+            matrix.SetTranslation(cVector3f(0,.55f,3.8f)); world->CreateEntity("CoopQA_HostCrate",matrix,"modern_mine_woodcrate.ent",true);
+            remotePlayer->GetCharacterBody()->SetFeetPosition(cVector3f(0,0,7.5f));
+            player->GetCharacterBody()->SetFeetPosition(cVector3f(0,0,4.7f));
+            player->GetCamera()->SetPosition(player->GetCharacterBody()->GetFeetPosition()+cVector3f(0,player->GetSize().y+player->GetCameraHeightAdd()+player->GetHeightAdd(),0));
+            player->ChangeMoveState(ePlayerMoveState_Walk,true);
+            auto view=AimAngles(player->GetCamera()->GetPosition(),remotePlayer->GetCharacterBody()->GetFeetPosition()+cVector3f(0,1.5f,0));
+            player->GetCamera()->SetYaw(view.y); player->GetCamera()->SetPitch(view.x);
+            qaStage=4;
+        }
+        if(hammerTime>10 && hammerTime<25) aim(remotePlayer,init->mpMapHandler->GetGameEntity("CoopQA_ClientCrate",false));
+        if(hammerTime>26 && hammerTime<39) {
+            aim(player,init->mpMapHandler->GetGameEntity("CoopQA_HostCrate",false));
+            const float t=hammerTime-26, phase=std::fmod(t,1.25f); const int cycle=int(t/1.25f);
+            if(cycle!=hammerCycle) { hammerCycle=cycle; player->StopInteract(); player->StartInteract(); }
+            if(phase>.1f && phase<.25f) player->AddYaw(.08f);
+            if(phase>.5f && phase<.65f) player->AddYaw(-.08f);
+            if(phase>1) player->StopInteract();
+        }
+        if(hammerTime>39 && qaStage==4) {
+            player->StopInteract();
+            auto* a=init->mpMapHandler->GetGameEntity("CoopQA_ClientCrate_broken",false);
+            auto* b=init->mpMapHandler->GetGameEntity("CoopQA_HostCrate_broken",false);
+            clientBroke=a && a->IsActive() && clientHits>=7; hostBroke=b && b->IsActive() && hostHits>=7;
+            Log("[COOP/QA] Native crate destruction client=%d host=%d client_hits=%u host_hits=%u\n",clientBroke?1:0,hostBroke?1:0,clientHits,hostHits);
+            {
+                PlayerScope scope(init,remotePlayer,remoteHands); remotePlayer->StartHolster();
+                auto matrix=cMatrixf::Identity; matrix.SetTranslation(cVector3f(0,.55f,6.6f));
+                world->CreateEntity("CoopQA_HeldCrate",matrix,"modern_mine_woodcrate.ent",true);
+                auto* held=init->mpMapHandler->GetGameEntity("CoopQA_HeldCrate",false);
+                if(held) {
+                    remotePlayer->SetPickedBody(held->GetBody(0)); remotePlayer->GetPickRay()->mvPickedPos=held->GetBody(0)->GetBV()->GetWorldCenter();
+                    held->PlayerInteract(); const auto holding=remotePlayer->GetState();
+                    heldCrateStarted=holding==ePlayerState_Grab || holding==ePlayerState_Move || holding==ePlayerState_Push;
+                    Log("[COOP/QA] Held crate native state=%d distance=%.3f maximum=%.3f\n",int(holding),remotePlayer->GetPickedDist(),held->GetMaxInteractDist());
+                    held->Damage(100,10);
+                }
+            }
+            // Exercise removal before a later input release can mask the held-body case.
+            init->mpMapHandler->Update(0);
+            qaStage=5;
+        }
+        if(hammerTime>39.5f && qaStage==5) {
+            heldCrateReleased=heldCrateStarted && remotePlayer->GetState()==ePlayerState_Normal && init->mpMapHandler->GetGameEntity("CoopQA_HeldCrate_broken",false);
+            Log("[COOP/QA] Held crate safely released before destruction=%d\n",heldCrateReleased?1:0);
+            remotePlayer->GetCharacterBody()->SetFeetPosition(qaInitialPosition);
+            remotePlayer->GetCamera()->SetYaw(0); remotePlayer->GetCamera()->SetPitch(0); remotePlayer->GetCharacterBody()->SetYaw(0); qaStage=6;
+        }
+    } else {
+        if(hammerTime>10 && hammerTime<25) { player->GetCamera()->SetYaw(latest.players[1].yaw/1000.0f); player->GetCamera()->SetPitch(latest.players[1].pitch/1000.0f); }
+        if(hammerTime<6) {
+            const auto& s=latest.players[1]; player->GetCamera()->SetYaw(s.yaw/1000.0f); player->GetCamera()->SetPitch(s.pitch/1000.0f);
+        }
+        if(hammerTime>4 && qaStage==0) { player->StartInteract(); qaStage=1; }
+        if(hammerTime>4.5f && qaStage==1) { player->StopInteract(); qaStage=2; }
+        if(hammerTime>7 && qaStage==2) {
+            auto* item=init->mpInventory->GetItem("hammer"); hammerShared=item!=nullptr;
+            if(item) init->mpInventory->GetItemType(item->GetItemType())->OnAction(item,0);
+            if(!player->GetFlashLight()->IsActive()) player->StartFlashLightButton();
+            qaStage=3;
+        }
+        if(hammerTime>10 && qaStage==3) {
+            hammerEquipped=player->GetState()==ePlayerState_WeaponMelee && latest.players[0].tinderboxes==1 && latest.players[1].tinderboxes==1;
+            lightsSeen=player->GetFlashLight()->IsActive() && remoteLight && remoteLight->IsVisible() && remoteFlashlight && remoteFlashlight->IsVisible();
+            Log("[COOP/QA] Replica shared hammer=%d both equipped=%d flashlight pair=%d\n",hammerShared?1:0,hammerEquipped?1:0,lightsSeen?1:0); qaStage=4;
+        }
+        if(hammerTime>12 && hammerTime<25) {
+            player->GetCamera()->SetYaw(latest.players[1].yaw/1000.0f); player->GetCamera()->SetPitch(latest.players[1].pitch/1000.0f);
+            const float t=hammerTime-12, phase=std::fmod(t,1.25f); const int cycle=int(t/1.25f);
+            if(cycle!=hammerCycle) { hammerCycle=cycle; player->StopInteract(); player->StartInteract(); }
+            if(phase>.1f && phase<.25f) player->AddYaw(.08f);
+            if(phase>.5f && phase<.65f) player->AddYaw(-.08f);
+            if(phase>1) player->StopInteract();
+        }
+        if(hammerTime>39 && qaStage==4) {
+            player->StopInteract(); player->StartHolster();
+            auto* a=init->mpMapHandler->GetGameEntity("CoopQA_ClientCrate",false); auto* b=init->mpMapHandler->GetGameEntity("CoopQA_HostCrate",false);
+            auto* ab=init->mpMapHandler->GetGameEntity("CoopQA_ClientCrate_broken",false); auto* bb=init->mpMapHandler->GetGameEntity("CoopQA_HostCrate_broken",false);
+            clientBroke=(!a || !a->IsActive()) && ab && ab->IsActive(); hostBroke=(!b || !b->IsActive()) && bb && bb->IsActive();
+            Log("[COOP/QA] Replica crate destruction client=%d host=%d fragments=%d/%d\n",clientBroke?1:0,hostBroke?1:0,ab?ab->GetBodyNum():0,bb?bb->GetBodyNum():0);
+            player->GetCamera()->SetYaw(0); player->GetCamera()->SetPitch(0); qaStage=5;
+        }
+    }
+    if(hammerTime>49 && hammerTime<51) {
+        if(player->GetState()!=ePlayerState_WeaponMelee) {
+            if(auto* item=init->mpInventory->GetItem("hammer")) init->mpInventory->GetItemType(item->GetItemType())->OnAction(item,0);
+        }
+        const auto& partner=latest.players[IsHost()?1:0];
+        auto angles=AimAngles(player->GetCamera()->GetPosition(),cVector3f(partner.x/1000.0f,(partner.y+partner.eyeHeight)/1000.0f,partner.z/1000.0f));
+        player->GetCamera()->SetYaw(angles.y); player->GetCamera()->SetPitch(angles.x); player->GetCharacterBody()->SetYaw(angles.y);
+    }
+    if(hammerTime>(IsHost()?56:52)) {
+        if(IsClient()) Log("[COOP/QA] Movement intervals average_ms=%.2f max_ms=%.2f samples=%u correction_max_m=%.4f max_horizontal_step_m=%.4f path_m=%.3f hard_corrections=%u\n",intervalCount?intervalSum*1000/intervalCount:0,intervalMax*1000,intervalCount,correctionMax,stepMax,movementDistance,hardCorrections);
+        const bool smooth=IsHost() || (movementDistance>.5f && stepMax<.2f && hardCorrections==0 && intervalMax<.2f);
+        const bool ok=hammerShared && hammerEquipped && clientBroke && hostBroke && lightsSeen && smooth && (IsClient() || heldCrateReleased);
+        Log("[COOP/QA] %s hammer, independent equipment, both crate attackers and flashlight pair role=%s\n",ok?"PASS":"FAIL",IsHost()?"host":"client"); init->mpGame->Exit();
+    }
+}
+
 void cCoopNetwork::OnStart(cSoundEntity* sound) {
     if(!IsHost() || !session.Connected() || !sound || !sound->GetData()) return;
     online::MediaState s; s.kind=online::MediaKind::Sound; s.id=EntityID(sound->GetName()); s.name=sound->GetName(); s.file=sound->GetData()->GetName(); s.flags=1;
@@ -612,6 +940,8 @@ void cCoopNetwork::PublishEnvironment() {
 }
 void cCoopNetwork::ApplyMedia(const online::MediaState& s) {
     auto* world=init->mpGame->GetScene()->GetWorld3D();
+    if(s.kind==online::MediaKind::Particle && (s.flags&1) && !world->GetParticleSystem(s.name))
+        world->CreateParticleSystem(s.name,s.file,cVector3f(1,1,1),Unpack(s.transform));
     if(s.kind==online::MediaKind::Sound) {
         auto* sound=world->GetSoundEntity(s.name);
         if(!sound && (s.flags&1)) sound=world->CreateSoundEntity(s.name,s.file,false);
@@ -627,9 +957,23 @@ void cCoopNetwork::ApplyMedia(const online::MediaState& s) {
     }
 }
 void cCoopNetwork::OnPostSceneDraw() {
-    if(!getenv("PENUMBRA_COOP_QA") || !Ready() || qaTime<15) return;
+    if(!getenv("PENUMBRA_COOP_QA") || !Ready()) return;
     const char* path=getenv("PENUMBRA_COOP_SCREENSHOT");
     if(!path || !*path) return;
+    if(std::string(getenv("PENUMBRA_COOP_QA"))=="hammer") {
+        auto save=[&](uint8_t bit,const std::string& suffix) {
+            if(qaScreenshots&bit) return;
+            std::string name(path); name=name.substr(0,name.find_last_of('.'))+suffix+".bmp";
+            init->mpGame->GetGraphics()->GetLowLevel()->SaveScreenToBMP(name); qaScreenshots|=bit;
+        };
+        if(hammerTime>2.5f) save(8,"_pickup");
+        if(hammerTime>10.5f) save(1,"_hammer");
+        if(hammerTime>25) save(2,"_client_crate");
+        if(hammerTime>41) save(4,"_both_crates");
+        if(hammerTime>50) save(16,"_pair");
+        return;
+    }
+    if(qaTime<15) return;
     if(!(qaScreenshots&1)) { init->mpGame->GetGraphics()->GetLowLevel()->SaveScreenToBMP(path); qaScreenshots|=1; }
     if(qaTime>32 && map.file=="maps/level01_01_outside.dae" && !(qaScreenshots&2) &&
        (IsHost() || (init->mpGame->GetGraphics()->GetRenderer3D()->GetFogActive() && init->mpGame->GetGraphics()->GetRenderer3D()->GetSkyBoxActive()))) {

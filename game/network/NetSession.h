@@ -11,7 +11,7 @@
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 1;
+constexpr uint16_t ProtocolVersion = 2;
 constexpr uint32_t VoluntaryDisconnectReason = 0x504f0001;
 constexpr uint16_t DefaultPort = 27120;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
@@ -54,7 +54,7 @@ struct PlayerState {
     int16_t yaw = 0, pitch = 0;
     uint16_t health = 10000, sanity = 10000, oil = 10000;
     int16_t eyeHeight = 1700;
-    uint16_t tinderboxes = 0;
+    uint16_t tinderboxes = 0; // Overture: equipped tool ID (1 hammer, 2 pickaxe)
     int16_t roll = 0, cameraX = 0, cameraZ = 0; // radians *1000; head offsets in mm
     uint16_t fov = 1200, aspect = 1000, lookSpeed = 1000; // *1000; aspect multiplier
     uint8_t flags = 4; // crouching, flashlight, active, dead, native door-controlled look
@@ -66,8 +66,8 @@ struct Snapshot {
     PlayerState players[2]; // stable network IDs 1 (host), 2 (client)
 };
 struct MapState { uint32_t epoch = 0; uint64_t fingerprint = 0; std::string file; };
-enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6 };
-struct ActionRequest { uint32_t epoch = 0, sequence = 0; PlayerAction action = PlayerAction::Interact; bool pressed = false; std::string item, secondItem; };
+enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, WeaponLook = 7 };
+struct ActionRequest { uint32_t epoch = 0, sequence = 0; PlayerAction action = PlayerAction::Interact; bool pressed = false; std::string item, secondItem; int16_t lookYaw = 0, lookPitch = 0; };
 struct InventoryItem {
     std::string name, subtype, image, value, extraValue, nameEntry, descriptionEntry;
     uint8_t type = 0;

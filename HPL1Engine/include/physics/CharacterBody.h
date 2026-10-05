@@ -196,6 +196,8 @@ namespace hpl {
 		const cVector3f& GetPosition();
 		const cVector3f& GetLastPosition();
 		void SetFeetPosition(const cVector3f& avPos, bool abSmooth=false);
+		// Network XZ corrections preserve gravity, jump velocity and queued forces.
+		void SetNetworkHorizontalPosition(float x, float z);
 		cVector3f GetFeetPosition();
 
 		void SetYaw(float afX);

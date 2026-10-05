@@ -181,6 +181,12 @@ static void InputLifetimeTest() {
     action.sequence = 3; action.action = PlayerAction::Ignite; action.pressed = true;
     Check(client.SendAction(action), "reliable tinderbox intent"); pump(20);
     Check(host.ReadAction(receivedAction) && receivedAction.action == PlayerAction::Ignite, "host receives tinderbox intent");
+    action.sequence=4; action.action=PlayerAction::WeaponLook; action.lookYaw=-800; action.lookPitch=250;
+    Check(client.SendAction(action),"reliable native weapon gesture"); pump(20);
+    Check(host.ReadAction(receivedAction) && receivedAction.action==PlayerAction::WeaponLook && receivedAction.lookYaw==-800 && receivedAction.lookPitch==250,"host receives signed weapon gesture exactly once");
+    Check(client.SendAction(action),"duplicate weapon gesture submission"); pump(20);
+    Check(!host.ReadAction(receivedAction),"duplicate weapon gesture ignored");
+    action.lookYaw=32767; Check(!client.SendAction(action),"out-of-range weapon gesture rejected");
     Presentation story; story.epoch = 7; story.kind = PresentationKind::Voice;
     story.text[0] = "voice/test.ogg"; story.text[2] = "Intro"; story.values[0] = -1234;
     Check(host.SendPresentation(story), "host story event transport"); pump(20);

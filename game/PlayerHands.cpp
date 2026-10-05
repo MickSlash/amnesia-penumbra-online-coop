@@ -17,6 +17,7 @@
  * along with Penumbra Overture.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "PlayerHands.h"
+#include "CoopNetwork.h"
 
 #include "Init.h"
 #include "Player.h"
@@ -495,6 +496,7 @@ bool cPlayerHands::AddModelFromFile(const tString &asFile)
 
 void cPlayerHands::SetCurrentModel(int alNum,const tString& asName)
 {
+	if(alNum==1 && mpInit->mpCoop) mpInit->mpCoop->ClientWeaponModel(asName);
 	//Log("Setting current %d to '%s'\n",alNum,asName.c_str());
 	
 	//////////////////////////////////////////////

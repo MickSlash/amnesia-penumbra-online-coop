@@ -540,12 +540,14 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         if(hasMap_ && R32(p + 5) == map_.epoch) worldReadyEpoch_ = map_.epoch;
         return;
     }
-    if(ready_ && role_ == Role::Host && channel == 0 && n >= 19 && p[4] == uint8_t(Message::Action)) {
-        if(p[13] < 1 || p[13] > 6 || p[14] > 1) { Reject("invalid player action"); return; }
+    if(ready_ && role_ == Role::Host && channel == 0 && n >= 23 && p[4] == uint8_t(Message::Action)) {
+        if(p[13] < 1 || p[13] > 7 || p[14] > 1) { Reject("invalid player action"); return; }
         ActionRequest action; action.epoch = R32(p + 5); action.sequence = R32(p + 9);
         action.action = PlayerAction(p[13]); action.pressed = p[14] != 0;
         size_t cursor = 15;
-        if(!ReadString(p, n, cursor, action.item, 128) || !ReadString(p, n, cursor, action.secondItem, 128) || cursor != n) { Reject("invalid inventory action fields"); return; }
+        if(!ReadString(p, n-4, cursor, action.item, 128) || !ReadString(p, n-4, cursor, action.secondItem, 128) || cursor+4 != n) { Reject("invalid inventory action fields"); return; }
+        action.lookYaw=Signed16(p+cursor); action.lookPitch=Signed16(p+cursor+2);
+        if(std::abs(int(action.lookYaw))>31420 || std::abs(int(action.lookPitch))>31420) { Reject("invalid weapon gesture"); return; }
         if(!IsMapReady(action.epoch)) return;
         uint32_t delta = action.sequence - lastAction_;
         if(hasAction_ && (!delta || delta >= 0x80000000u)) return;
@@ -622,7 +624,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
 }
 void Session::Poll() {
     if (!host_) return;
-    const uint32_t now = enet_time_get();
+    uint32_t now = enet_time_get();
     if(closing_) {
         ENetEvent event;
         for(unsigned count=0; count<64 && enet_host_service(host_,&event,0)>0; ++count) {
@@ -687,7 +689,10 @@ void Session::Poll() {
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
         }
     }
-    if (peer_ && !ready_ && uint32_t(enet_time_get() - started_) > 5000) { Reject("handshake timeout"); fatal_ = false; }
+    // Service updates lastReceiveTime using its own newer clock. Refresh before
+    // subtracting ages so a fresh ACK cannot underflow into a false long stall.
+    now = enet_time_get();
+    if (peer_ && !ready_ && uint32_t(now - started_) > 5000) { Reject("handshake timeout"); fatal_ = false; }
     bool hasOldest = false; uint32_t oldestQueue = 0;
     if(peer_ && ready_ && loading_ && role_ == Role::Host && readyEpoch_)
         for(auto* queue : {&peer_->sentReliableCommands,&peer_->outgoingSendReliableCommands})
@@ -808,9 +813,10 @@ bool Session::ReadEntity(EntityState& e) {
     return true;
 }
 bool Session::SendAction(const ActionRequest& a) {
-    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 6 || a.item.size() > 128 || a.secondItem.size() > 128) return false;
+    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 7 || a.item.size() > 128 || a.secondItem.size() > 128 || std::abs(int(a.lookYaw))>31420 || std::abs(int(a.lookPitch))>31420) return false;
     auto out = Header(Message::Action); U32(out, a.epoch); U32(out, a.sequence); out.push_back(uint8_t(a.action)); out.push_back(a.pressed ? 1 : 0);
     String(out, a.item); String(out, a.secondItem);
+    U16(out,uint16_t(a.lookYaw)); U16(out,uint16_t(a.lookPitch));
     return Send(out, 0, true);
 }
 bool Session::ReadAction(ActionRequest& a) { if(actions_.empty()) return false; a = actions_.front(); actions_.pop_front(); return true; }
