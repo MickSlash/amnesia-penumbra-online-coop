@@ -288,6 +288,7 @@ void cLuxNetwork::Update(float timeStep) {
     }
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_VISIBILITY_PROPS")) UpdateVisibilityPropsTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_EFFECTS")) UpdateEffectsTest(gpBase->mpMapHandler->GetCurrentMap());
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_STAIRS")) UpdateStairsTest(gpBase->mpMapHandler->GetCurrentMap(),timeStep);
     UpdateRecoveryTest();
     UpdateMenuTest();
     UpdateCampaignStartTest();
@@ -478,7 +479,7 @@ void cLuxNetwork::UpdateCampaignStartTest() {
     }
 }
 bool cLuxNetwork::UpdateQADrive(float timeStep) {
-    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_EFFECTS")) return true;
+    if(mSmokeSeconds && (TestFlag("AMNESIA_NET_TEST_EFFECTS") || TestFlag("AMNESIA_NET_TEST_STAIRS"))) return true;
     if(mQADriveFile.empty() || !mSmokeSeconds) return false;
     cLuxPlayer* player = gpBase->mpPlayer;
     cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
@@ -1115,13 +1116,14 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             const auto predictionStart = std::chrono::steady_clock::now();
             online::PredictionCollisionCache collisionCache;
             auto predicted = mPrediction.ReconcileSmoothed(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,[&](online::PredictedPosition from, online::PredictedPosition to) {
-                const float y = local.y/1000.0f + body->GetCurrentShape()->GetSize().y/2;
                 auto query = [&](float x,float z) {
-                    cVector3f push;
-                    const bool collision = map->GetWorld()->GetPhysicsWorld()->CheckShapeWorldCollision(&push,body->GetCurrentShape(),cMath::MatrixTranslate(cVector3f(x,y,z)),body->GetCurrentBody(),false,true,NULL,false);
-                    return collision && (std::fabs(push.x) > 0.00001f || std::fabs(push.z) > 0.00001f || push.y < 0 || push.y > 0.04f);
+                    return online::StepBlocked(local.y/1000.0f,body->GetMaxStepSize(),local.grounded && !mVerticalPrediction.Pending(),[&](float feet) {
+                        cVector3f push;
+                        map->GetPhysicsWorld()->CheckShapeWorldCollision(&push,body->GetCurrentShape(),cMath::MatrixTranslate(cVector3f(x,feet+body->GetCurrentShape()->GetSize().y/2,z)),body->GetCurrentBody(),false,true,NULL,true,0,eFlagBit_All,false,body->GetIgnoreBody());
+                        return online::PredictionContact{push.x,push.y,push.z};
+                    });
                 };
-                // Slide against walls; the host resolves slopes, jumps and props.
+                // Native-sized steps remain reachable; walls still slide.
                 online::PredictedPosition result = from;
                 if(to.x != from.x && !collisionCache.Blocked(to.x,from.z,query)) result.x = to.x;
                 if(to.z != from.z && !collisionCache.Blocked(result.x,to.z,query)) result.z = to.z;
@@ -1130,6 +1132,15 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             const auto predictionUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-predictionStart).count();
             if(predictionUs >= 5000) NetLog("[NET/PERF] Replica prediction item_us=" + std::to_string(predictionUs) +
                 " collision_queries=" + std::to_string(collisionCache.Queries()) + " reused=" + std::to_string(collisionCache.Hits()));
+            float groundHeight=local.y/1000.0f;
+            if(local.grounded && !mVerticalPrediction.Pending() &&
+               (std::fabs(predicted.x-local.x/1000.0f)+std::fabs(predicted.z-local.z/1000.0f)>.001f)) {
+                groundHeight=online::StepSupport(groundHeight,body->GetMaxStepSize(),[&](float feet) {
+                    cVector3f push;
+                    map->GetPhysicsWorld()->CheckShapeWorldCollision(&push,body->GetCurrentShape(),cMath::MatrixTranslate(cVector3f(predicted.x,feet+body->GetCurrentShape()->GetSize().y/2,predicted.z)),body->GetCurrentBody(),false,true,NULL,true,0,eFlagBit_All,false,body->GetIgnoreBody());
+                    return online::PredictionContact{push.x,push.y,push.z};
+                });
+            }
             local.x = int32_t(predicted.x*1000); local.z = int32_t(predicted.z*1000);
             const float poseAge=std::chrono::duration<float>(now-mSnapshots.back().received).count();
             const float y=mVerticalPrediction.Update(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,poseAge,[&](float from,float to) {
@@ -1144,11 +1155,11 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                     const float candidate=from+(to-from)*i/steps; cVector3f push;
                     const cVector3f center(local.x/1000.0f,candidate+body->GetCurrentShape()->GetSize().y/2,local.z/1000.0f);
                     const bool blocked=map->GetPhysicsWorld()->CheckShapeWorldCollision(&push,body->GetCurrentShape(),cMath::MatrixTranslate(center),body->GetCurrentBody(),false,true,NULL,true,0,eFlagBit_All,false,body->GetIgnoreBody());
-                    if(blocked && ((to>from && push.y<-.001f) || (to<from && push.y>.001f))) break;
+                    if(blocked && ((to>from && push.y<-.001f) || (to<from && push.y>.001f && (!local.grounded || mVerticalPrediction.Pending())))) break;
                     safe=candidate;
                 }
                 return safe;
-            });
+            },groundHeight);
             local.y=int32_t(y*1000);
             if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_PREDICTION") && !mPredictionSmoothTestObserved && mPrediction.CorrectionDistance() > 0.002f) {
                 mPredictionSmoothTestObserved = true; NetLog("[NET/TEST] Small authoritative movement correction smoothed with collision checks");
@@ -2103,6 +2114,77 @@ void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& ev
         break;
     }
     }
+}
+void cLuxNetwork::UpdateStairsTest(cLuxMap* map,float dt) {
+    if(!map || !mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || !gpBase->mpPlayer2) return;
+    if(!mStairsBuilt) {
+        auto* world=map->GetPhysicsWorld();
+        world->SetWorldSize(cVector3f(-200,-100,-200),cVector3f(200,100,200));
+        auto box=[&](const char* name,cVector3f size,cVector3f position) {
+            auto* shape=world->CreateBoxShape(size,NULL);
+            auto* body=world->CreateBody(name,shape);
+            body->SetMass(0); body->SetPosition(position); body->SetCollideCharacter(true);
+            if(auto* material=world->GetMaterialFromName("Glass")) body->SetMaterial(material);
+        };
+        box("online_qa_stair_floor",cVector3f(10,.3f,20),mStairsOrigin+cVector3f(0,-.15f,-3));
+        for(int i=1;i<=8;++i) {
+            const std::string name="online_qa_stair_"+std::to_string(i);
+            box(name.c_str(),cVector3f(2,i*.15f,.5f),mStairsOrigin+cVector3f(0,i*.075f,-.75f-i*.5f));
+        }
+        box("online_qa_stair_landing",cVector3f(2,1.2f,2),mStairsOrigin+cVector3f(0,.6f,-6));
+        mStairsBuilt=true;
+        if(!IsClientReplica()) {
+            auto* host=gpBase->mpPlayer; auto* peer=gpBase->mpPlayer2;
+            host->GetCharacterBody()->SetFeetPosition(mStairsOrigin+cVector3f(3,0,0));
+            peer->GetCharacterBody()->SetFeetPosition(mStairsOrigin);
+            peer->GetCharacterBody()->SetForceVelocity(cVector3f(0,0,0));
+            peer->GetCharacterBody()->SetYaw(0); peer->GetCamera()->SetYaw(0);
+            cLuxSoundExtraData data; data.mfVolume=99; data.mfMaxDistance=99;
+            const bool played=gpBase->mpHelpFuncs->PlayGuiSoundData("online_qa_missing_step",eSoundEntryType_World,1,eSoundEntityType_Main,true,&data);
+            const bool safe=!played && data.mfVolume==0 && data.mfMaxDistance==0 && data.mpSoundEntry==NULL;
+            NetLog(std::string("[NET/TEST] ")+(safe?"PASS missing footstep data safely initialized":"FAILED stairs missing sound safety"));
+        }
+    }
+    if(!IsClientReplica()) {
+        const auto feet=gpBase->mpPlayer2->GetCharacterBody()->GetFeetPosition();
+        mStairsApex=std::max(mStairsApex,feet.y-mStairsOrigin.y);
+        if(!mStairsHostPassed && mStairsApex>1 && feet.z>mStairsOrigin.z-.15f && std::fabs(feet.y-mStairsOrigin.y)<.06f) {
+            mStairsHostPassed=true; NetLog("[NET/TEST] PASS host authoritative stair ascent and descent apex="+std::to_string(mStairsApex));
+        }
+        return;
+    }
+    auto* player=gpBase->mpPlayer; auto* body=player->GetCharacterBody();
+    const auto feet=body->GetFeetPosition();
+    online::PlayerInput input; input.yaw=0;
+    const float yaw=player->GetCamera()->GetYaw();
+    const float add=std::atan2(std::sin(-yaw),std::cos(-yaw));
+    player->AddYaw(add); input.lookYaw=int16_t(add*10000);
+    if(mStairsStage==0 && (feet-mStairsOrigin).Length()<.05f) {
+        mStairsStage=1; mStairsAge=0; mStairsPrevious=feet;
+    }
+    if(mStairsStage>0 && mStairsStage<5) {
+        mStairsAge+=dt;
+        mStairsApex=std::max(mStairsApex,feet.y-mStairsOrigin.y);
+        mStairsMaxStep=std::max(mStairsMaxStep,std::fabs(feet.y-mStairsPrevious.y));
+        const float reverse=mStairsStage==1?feet.z-mStairsPrevious.z:mStairsStage==3?mStairsPrevious.z-feet.z:0;
+        mStairsMaxReverse=std::max(mStairsMaxReverse,reverse);
+        mStairsPrevious=feet;
+        if(mStairsStage==1) {
+            input.forward=1000;
+            if(feet.z<mStairsOrigin.z-5.6f) {mStairsStage=2;mStairsAge=0;input.forward=0;}
+        } else if(mStairsStage==2 && mStairsAge>1) {mStairsStage=3;mStairsAge=0;}
+        else if(mStairsStage==3) {
+            input.forward=-1000;
+            if(feet.z>mStairsOrigin.z) {mStairsStage=4;mStairsAge=0;input.forward=0;}
+        } else if(mStairsStage==4 && mStairsAge>1) {
+            const bool ok=mStairsApex>1 && std::fabs(feet.y-mStairsOrigin.y)<.06f && mStairsMaxStep<.12f && mStairsMaxReverse<.12f;
+            NetLog(std::string("[NET/TEST] ")+(ok?"PASS client stair ascent and descent":"FAILED stairs client motion")+
+                " apex="+std::to_string(mStairsApex)+" final_height="+std::to_string(feet.y-mStairsOrigin.y)+" max_vertical_step="+std::to_string(mStairsMaxStep)+" max_reverse="+std::to_string(mStairsMaxReverse));
+            mStairsStage=5;
+        }
+        if(mStairsAge>15) {NetLog("[NET/TEST] FAILED stairs traversal timeout stage="+std::to_string(mStairsStage));mStairsStage=5;input.forward=0;}
+    }
+    SendLocalInput(input,dt);
 }
 void cLuxNetwork::UpdateEffectsTest(cLuxMap* map) {
     if(!map || !mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || !gpBase->mpPlayer2) return;

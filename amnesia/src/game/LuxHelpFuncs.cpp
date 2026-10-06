@@ -158,6 +158,7 @@ void cLuxHelpFuncs::LoadFonts()
 bool cLuxHelpFuncs::PlayGuiSoundData(const tString& asName,eSoundEntryType aDestType, float afVolMul, eSoundEntityType aSoundType, bool abSkipPreviousRandom,
 									cLuxSoundExtraData *apOutputData)
 {
+	if(apOutputData) *apOutputData = cLuxSoundExtraData();
 	if(asName=="") return false;
 
 	cSoundHandler *pSoundHandler = gpBase->mpEngine->GetSound()->GetSoundHandler();

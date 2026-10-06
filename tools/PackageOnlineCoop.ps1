@@ -11,6 +11,11 @@ if (!(Test-Path -LiteralPath $runtime)) { throw 'Place the installed x64 OpenAL3
 $destination = Join-Path $repo ('build/packages/AmnesiaOnlineCoop_' + [DateTime]::UtcNow.ToString('yyyyMMdd_HHmmss') + '_' + [Guid]::NewGuid().ToString('N').Substring(0,6))
 New-Item -ItemType Directory -Path "$destination/bin", "$destination/tools" -Force | Out-Null
 Copy-Item -LiteralPath $exe -Destination "$destination/bin/Lux.exe"
+$symbols = Join-Path (Split-Path -Parent $exe) 'Lux.pdb'
+if (Test-Path -LiteralPath $symbols) {
+    New-Item -ItemType Directory -Path "$destination/symbols" -Force | Out-Null
+    Copy-Item -LiteralPath $symbols -Destination "$destination/symbols/Lux.pdb"
+}
 Copy-Item -LiteralPath "$repo/build/AmnesiaCoop.exe" -Destination "$destination/AmnesiaCoop.exe"
 Copy-Item -LiteralPath $runtime -Destination "$destination/bin/OpenAL32.dll"
 # The Creative router needs its software backend; OpenAL Soft needs no backend
@@ -33,6 +38,7 @@ $manifest = [ordered]@{
     sourceCommit = $commit
     sourceRepository = 'https://github.com/TheBorn/Amnesia-The-Dark-Descent---Local-Co-op-Mod'
     builtExecutableSha256 = (Get-FileHash -LiteralPath "$destination/bin/Lux.exe" -Algorithm SHA256).Hash
+    builtSymbolsSha256 = $(if (Test-Path -LiteralPath "$destination/symbols/Lux.pdb") { (Get-FileHash -LiteralPath "$destination/symbols/Lux.pdb" -Algorithm SHA256).Hash } else { $null })
     launcherSha256 = (Get-FileHash -LiteralPath "$destination/AmnesiaCoop.exe" -Algorithm SHA256).Hash
     steamIntegration = 'Optional App ID 57300 presence; original installed steam_api64.dll and active Steam license required; no Steam runtime redistributed.'
     openALSha256 = (Get-FileHash -LiteralPath "$destination/bin/OpenAL32.dll" -Algorithm SHA256).Hash

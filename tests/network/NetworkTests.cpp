@@ -2,6 +2,7 @@
 #include "../../amnesia/src/game/network/NetSession.h"
 #include "../../amnesia/src/game/network/Prediction.h"
 #include "../../amnesia/src/game/network/ScriptPreloads.h"
+#include "../../amnesia/src/game/network/CrashDiagnostics.h"
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -478,6 +479,15 @@ static void LifeQueueLimitTest() {
     std::cout << "PASS: bounded life queue, overflow rejection and reconnect reset\n";
 }
 static void RecoveryTests() {
+    auto floor=[](float surface) { return [=](float feet) { return PredictionContact{0,std::max(0.0f,surface-feet),0}; }; };
+    Check(!StepBlocked(0,.3f,true,floor(.15f)),"grounded capsule predicts climbable stair instead of stopping at riser");
+    Check(StepBlocked(0,.3f,false,floor(.15f)),"airborne capsule cannot use grounded stair allowance");
+    Check(StepBlocked(0,.3f,true,floor(.5f)),"native step limit keeps tall obstacles blocked");
+    Check(StepBlocked(0,.3f,true,[](float){return PredictionContact{.1f,0,0};}),"raising capsule cannot bypass a full wall");
+    Check(StepBlocked(0,.3f,true,[](float feet){return PredictionContact{0,feet<.15f?.15f-feet:-.1f,0};}),"low ceiling vetoes raised stair capsule");
+    Check(std::fabs(StepSupport(0,.3f,floor(.15f))-.15f)<.004f,"capsule locates ascending tread support");
+    Check(std::fabs(StepSupport(.15f,.3f,floor(0)))<.004f,"capsule locates descending tread support");
+    Check(StepSupport(0,.3f,floor(-2))==0,"ledge outside native step range never snaps down");
     PredictionCollisionCache collisionCache; unsigned queries=0;
     auto wall=[&](float x,float) { ++queries; return x>=1; };
     Check(collisionCache.Blocked(1,0,wall) && collisionCache.Blocked(1,0,wall) && queries==1 && collisionCache.Hits()==1,"repeated contact reuses exact blocked result within one reconciliation");
@@ -565,12 +575,30 @@ static void RecoveryTests() {
     height=vertical.Update(motor,7,4,1.0f/60,0,[](float from,float){return from;});
     Check(height==0 && !vertical.Pending(),"ceiling blocks predicted takeoff");
     vertical.Clear(); vertical.StartJump(motor,8);
-    for(int i=0;i<30;++i) height=vertical.Update(motor,7,4,1.0f/60,1,air);
+    for(int i=0;i<60;++i) height=vertical.Update(motor,7,4,1.0f/60,1,air);
     Check(!vertical.Pending() && std::fabs(height)<.05f,"unacknowledged jump has bounded horizon and returns to host state");
+    VerticalPrediction lateJump; motor.y=0; motor.grounded=1; motor.jumpSpeed=4666; motor.verticalAcceleration=-20000;
+    lateJump.Update(motor,0,1,1.0f/60,0,air); lateJump.StartJump(motor,9);
+    float previousHeight=0,largestJumpStep=0;
+    for(int i=0;i<60;++i) {
+        height=lateJump.Update(motor,0,1,1.0f/60,0,air);
+        largestJumpStep=std::max(largestJumpStep,std::fabs(height-previousHeight));previousHeight=height;
+    }
+    Check(largestJumpStep<.2f && !lateJump.Pending() && std::fabs(height)<.001f,"late or rejected takeoff returns smoothly after full-height anticipation instead of snapping");
     motor.y=3000; height=vertical.Update(motor,8,5,1.0f/60,0,air); Check(height==3,"teleport never vertically smoothed through geometry");
     motor.x=2000; motor.y=3400; height=vertical.Update(motor,8,6,1.0f/60,0,air);
     Check(std::fabs(height-3.4f)<.0001f,"horizontal teleport with smaller height change resets vertical prediction");
     motor.flags|=8; vertical.Update(motor,8,6,1.0f/60,0,air); Check(!vertical.Pending(),"death cancels jump prediction");
+    VerticalPrediction stairs; motor=PlayerState{}; motor.grounded=1;
+    float stairHeight=stairs.Update(motor,0,1,1.0f/60,0,air,0);
+    float largestStairStep=0;
+    for(int i=0;i<120;++i) {
+        const float target=i<60?.15f:0;
+        height=stairs.Update(motor,0,1,1.0f/60,0,air,target);
+        largestStairStep=std::max(largestStairStep,std::fabs(height-stairHeight)); stairHeight=height;
+    }
+    Check(largestStairStep<.055f && std::fabs(height)<.001f,"terrain rise and descent smooth even between unchanged authoritative poses");
+    std::cout << "PASS: bounded stair reachability, wall/ceiling/ledge safety and terrain-height smoothing\n";
     Session host(Log), client(Log), stranger(Log);
     host.SetLobbyReady(false); client.SetLobbyReady(false);
     Check(host.StartHost(27047) && client.StartClient("127.0.0.1",27047), "recovery transport startup");
@@ -643,6 +671,16 @@ static void PropMotionTransportTest() {
     std::cout << "PASS: live prop coalescing, reliable backpressure bypass, stale pose rejection, removal, articulated fragments and sequence wrap\n";
 }
 int main(int argc, char** argv) {
+    if(argc==2 && std::string(argv[1])=="--prediction-test") {RecoveryTests(); return 0;}
+    if(argc==3 && std::string(argv[1])=="--crash-probe") {
+#ifdef _WIN32
+        const std::string path=argv[2]; const std::wstring directory(path.begin(),path.end());
+        SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
+        online::crash::Install(directory.c_str());
+        RaiseException(0xe0424242,EXCEPTION_NONCONTINUABLE,0,nullptr);
+#endif
+        return 2;
+    }
     if(argc == 1) PropMotionTransportTest();
     ScriptPreloadTest();
     MediaCodecTest();

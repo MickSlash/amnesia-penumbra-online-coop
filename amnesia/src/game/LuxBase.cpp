@@ -18,6 +18,7 @@
  */
 
 #include "LuxBase.h"
+#include "network/CrashDiagnostics.h"
 #include "LuxNetwork.h"
 #include "LuxSteam.inl"
 
@@ -1110,6 +1111,7 @@ bool cLuxBase::InitApp()
 	/////////////////////////
 	//Set up log file locations
 	SetLogFile(msBaseSavePath + _W("hpl.log"));
+	online::crash::Install(msBaseSavePath.c_str());
 	SetUpdateLogFile(msBaseSavePath + _W("hpl_update.log"));
 
 	return true;

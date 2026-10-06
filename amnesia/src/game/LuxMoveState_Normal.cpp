@@ -845,10 +845,15 @@ void cLuxMoveState_Normal::FootSound(eLuxFootSound aType)
 		sSoundDataName = "step_run_"+sMaterialStep;
 	}
 
+	// Some original materials refer to absent generic-hard step assets.
+	// Keep a real asset when present; otherwise use the native rock footsteps.
+	if(sMaterialStep == "generic_hard" && gpBase->mpEngine->GetResources()->GetFileSearcher()->GetFilePath(sSoundDataName+".snt").empty())
+		sSoundDataName = cString::ReplaceStringTo(sSoundDataName,"generic_hard","rock");
+
 	///////////////////////
 	//Play sound
 	cLuxSoundExtraData extraData;
-	gpBase->mpHelpFuncs->PlayGuiSoundData(sSoundDataName, eSoundEntryType_World,1,eSoundEntityType_Main, true,&extraData);
+	if(!gpBase->mpHelpFuncs->PlayGuiSoundData(sSoundDataName, eSoundEntryType_World,1,eSoundEntityType_Main, true,&extraData)) return;
 
 	cLuxMap *pMap = gpBase->mpMapHandler->GetCurrentMap();
 

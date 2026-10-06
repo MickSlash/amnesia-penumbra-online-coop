@@ -11,6 +11,7 @@ param(
     [switch]$OnlineMenu,
     [switch]$VisibilityProps,
     [switch]$Effects,
+    [switch]$Stairs,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
@@ -21,7 +22,7 @@ if ($Media) { $Campaign = $true }
 if ($Campaign) { $Replication = $true }
 if ($Enemy) { $MapOnly = $true }
 if ($OnlineMenu) { $MapOnly = $true }
-if ($VisibilityProps -or $Effects) { $MapOnly = $true }
+if ($VisibilityProps -or $Effects -or $Stairs) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $repoPath = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
@@ -39,7 +40,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS','AMNESIA_NET_TEST_STAIRS')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -61,6 +62,7 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_VISIBILITY_PROPS', $(if ($VisibilityProps) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_MENU', $(if ($OnlineMenu) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_EFFECTS', $(if ($Effects) { '1' } else { $null }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_STAIRS', $(if ($Stairs) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DRIVE_FILE', $null)
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$(if ($role -eq 'client' -and $ClientPort -gt 0) { $ClientPort } else { $Port }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ADDRESS', '127.0.0.1')
@@ -95,6 +97,12 @@ try {
             throw "$role did not finish a handshake and clean smoke exit: $($profiles[$role])"
         }
         Write-Output "PASS: $role game handshake and clean exit ($($profiles[$role]))"
+        if($Stairs) {
+            $marker=if($role -eq 'client'){'PASS client stair ascent and descent'}else{'PASS host authoritative stair ascent and descent'}
+            if(!$log.Contains($marker) -or $log.Contains('FAILED stairs')) {throw "Missing $role stairs regression proof"}
+            if($role -eq 'host' -and !$log.Contains('PASS missing footstep data safely initialized')) {throw 'Missing sound failure safety proof'}
+            Write-Output "PASS: $role native staircase ascent, descent and clean exit"
+        }
         if($Effects) {
             if(!$log.Contains('[NET/TEST] PASS objective flash and emotion page recovery') -or $log.Contains('[NET/TEST] FAILED effects')) {throw "Missing $role effects regression proof"}
             if($role -eq 'client' -and !$log.Contains('Blue objective flash visible on local client viewport')) {throw 'Client did not render objective flash'}

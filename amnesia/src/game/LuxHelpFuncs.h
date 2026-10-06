@@ -29,6 +29,7 @@
 class cLuxSoundExtraData
 {
 public:
+	cLuxSoundExtraData() : mfMinDistance(0), mfMaxDistance(0), mfVolume(0), mpSoundEntry(NULL) {}
 	float mfMinDistance;
 	float mfMaxDistance;
 	float mfVolume;

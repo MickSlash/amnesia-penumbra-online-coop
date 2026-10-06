@@ -202,6 +202,11 @@ private:
     void UpdateCampaignStartTest();
     void UpdateMediaTest(cLuxMap* map, float elapsed);
     void UpdateEffectsTest(cLuxMap* map);
+    void UpdateStairsTest(cLuxMap* map, float dt);
+    bool mStairsBuilt=false,mStairsReady=false,mStairsHostPassed=false;
+    unsigned mStairsStage=0;
+    cVector3f mStairsOrigin=cVector3f(100,30,100),mStairsPrevious;
+    float mStairsAge=0,mStairsApex=0,mStairsMaxStep=0,mStairsMaxReverse=0;
     unsigned mEffectsTestStage = 0, mEffectsTestStarts = 0, mEffectsTestEnds = 0;
     bool mEffectsTestProgressSeen = false, mEffectsTestRemoteSkip = false;
     std::chrono::steady_clock::time_point mEffectsTestAt;

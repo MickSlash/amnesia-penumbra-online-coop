@@ -4,8 +4,38 @@
 #include <algorithm>
 #include <cmath>
 #include <array>
+#include <limits>
 namespace online {
 struct PredictedPosition { float x = 0, z = 0; };
+struct PredictionContact { float x=0,y=0,z=0; };
+// Reachability at the authoritative height. Raising a complete capsule also
+// checks the ceiling; a wall or a step above the native limit remains blocked.
+template<class Query>
+bool StepBlocked(float feet, float step, bool grounded, Query query) {
+    auto blocked=[](const PredictionContact& p) {
+        return std::fabs(p.x)>.001f || std::fabs(p.z)>.001f || p.y<-.001f || p.y>.04f;
+    };
+    if(!blocked(query(feet))) return false;
+    return !grounded || step<=0 || blocked(query(feet+step));
+}
+// Find capsule support only within one native step. No floor in that range is
+// a ledge, so leave falling to the authoritative motor instead of snapping down.
+template<class Query>
+float StepSupport(float feet, float step, Query query) {
+    const float top=feet+step;
+    auto clear=[](const PredictionContact& p) {
+        return std::fabs(p.x)<.001f && std::fabs(p.z)<.001f && p.y>=-.001f && p.y<=.001f;
+    };
+    if(step<=0 || !clear(query(top))) return feet;
+    float low=feet-step,high=top;
+    if(clear(query(low))) return feet;
+    // A capsule sweep, rather than a point ray, keeps support at stair edges.
+    for(int i=0;i<8;++i) {
+        const float middle=(low+high)*.5f;
+        if(clear(query(middle))) high=middle; else low=middle;
+    }
+    return high;
+}
 // One reconciliation only: the collision world, shape and height are fixed.
 // Exact coordinates avoid changing contacts; never retain results across ticks.
 class PredictionCollisionCache {
@@ -105,7 +135,8 @@ public:
         return true;
     }
     template<class Collision>
-    float Update(const PlayerState& state,uint32_t acknowledged,uint32_t poseSequence,float dt,float poseAge,Collision collide) {
+    float Update(const PlayerState& state,uint32_t acknowledged,uint32_t poseSequence,float dt,float poseAge,Collision collide,
+                 float groundHeight=std::numeric_limits<float>::quiet_NaN()) {
         const float base=state.y/1000.0f;
         if(!std::isfinite(dt) || dt<=0 || !(state.flags&4) || (state.flags&(1|8|16|32|64))) { Clear(); return base; }
         dt=std::min(dt,.05f);
@@ -117,16 +148,20 @@ public:
         float raw=base;
         if(pending_) raw=jumpBase_+jumpSpeed_*jumpAge_+.5f*jumpAcceleration_*jumpAge_*jumpAge_;
         else if(!state.grounded) raw+=state.verticalSpeed/1000.0f*age+.5f*state.verticalAcceleration/1000.0f*age*age;
+        else if(std::isfinite(groundHeight)) raw=groundHeight;
         const float dx=state.x/1000.0f-previousX_,dz=state.z/1000.0f-previousZ_;
         if(valid_ && (std::fabs(base-previousBase_)>.75f || dx*dx+dz*dz>1)) { Clear(); raw=base; }
-        if(valid_ && poseSequence!=previousSequence_) correction_=shown_-raw;
-        if(std::fabs(correction_)>.5f) correction_=0;
-        correction_*=std::exp(-dt/.04f);
+        if(valid_ && (poseSequence!=previousSequence_ || (state.grounded && !pending_ && std::fabs(raw-previousRaw_)>.001f))) correction_=shown_-raw;
+        // A late takeoff acknowledgement or the bounded anticipation timeout
+        // can disagree by a full jump height. Preserve that correction;
+        // genuine teleports were already reset using authoritative positions.
+        if(std::fabs(correction_)>1.25f) correction_=0;
+        correction_*=std::exp(-dt/(std::fabs(correction_)>.1f?.1f:.04f));
         float next=raw+correction_;
         if(valid_) next=collide(shown_,next);
         else next=collide(base,next);
         if(std::fabs(next-(raw+correction_))>.001f) { pending_=false; correction_=next-raw; }
-        shown_=next; previousBase_=base; previousX_=state.x/1000.0f; previousZ_=state.z/1000.0f; previousSequence_=poseSequence; valid_=true;
+        shown_=next; previousRaw_=raw; previousBase_=base; previousX_=state.x/1000.0f; previousZ_=state.z/1000.0f; previousSequence_=poseSequence; valid_=true;
         return next;
     }
 private:
@@ -134,5 +169,6 @@ private:
     uint32_t previousSequence_=0,jumpSequence_=0;
     float shown_=0,previousBase_=0,correction_=0,jumpAge_=0,jumpBase_=0,jumpSpeed_=0,jumpAcceleration_=0;
     float previousX_=0,previousZ_=0;
+    float previousRaw_=0;
 };
 }

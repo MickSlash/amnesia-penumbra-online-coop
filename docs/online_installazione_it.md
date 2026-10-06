@@ -2,6 +2,21 @@
 
 Build sperimentale Windows x64, protocollo 11, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono nei documenti QA dentro `source.zip`.
 
+L'aggiornamento del 6 ottobre corregge la previsione del client sui gradini:
+controlla lo spazio per il corpo entro l'altezza massima originale e accompagna
+salita e discesa fra gli aggiornamenti dell'host. Corregge anche l'uso di dati
+non inizializzati quando manca un suono dei passi; sui materiali `generic_hard`
+usa i passi originali sulla roccia se l'asset richiesto manca.
+Prove e limiti in `docs/qa_crash_scale_2026-10-06.md` dentro `source.zip`.
+
+In caso di eccezione Windows non gestita, questa build tenta di scrivere
+`coop-crash-*.txt` e `coop-crash-*.dmp` accanto a `hpl.log`, normalmente in
+`Documenti\Amnesia\AmnesiaOnlineCoop_Host`. Conservare questi file insieme al
+log e al `manifest.json` della build utilizzata. La cartella `symbols` contiene
+il file per interpretare gli stack del dump; non serve spostarla nel gioco.
+La diagnostica non ricostruisce retroattivamente i crash delle vecchie build
+e non intercetta ogni tipo di arresto forzato del processo.
+
 Il protocollo 11 sincronizza sul client il flash blu e il suono originali del
 recupero di sanità assegnato dagli obiettivi della campagna. Conserva le regole
 originali: un obiettivo deve prevedere quella ricompensa e, con sanità già al
