@@ -22,9 +22,11 @@ if($OneWayDelayMs -gt 0) {
     $relayScript=Join-Path $root 'tests/network/Relay.ps1'
     $duration=if($Mode-eq'campaign'){150}elseif($Mode-eq'hammer'){75}else{55}
     $relay=Start-Process -FilePath $shell -ArgumentList @('-NoProfile','-File', ('"'+$relayScript+'"'),'-Port', "$Port",'-Delay',"$OneWayDelayMs",'-DropEvery',"$DropEvery",'-Duration',"$duration",'-StopFile',('"'+(Join-Path $run 'relay-stop')+'"')) -WindowStyle Hidden -RedirectStandardOutput (Join-Path $run 'relay.log') -RedirectStandardError (Join-Path $run 'relay-error.log') -PassThru
+    $null=$relay.Handle
     Start-Sleep -Milliseconds 1500
 }
 $hostProcess=Start-Process -FilePath $exe -WorkingDirectory $GameDirectory -WindowStyle Hidden -PassThru
+$null=$hostProcess.Handle # Windows PowerShell reports a null ExitCode otherwise
 $env:PENUMBRA_COOP_ROLE='client'
 $env:PENUMBRA_COOP_QA_SIMPLE=if($ClientSimpleSwing){'1'}else{'0'}
 $env:PENUMBRA_COOP_PORT="$Port"
@@ -32,6 +34,7 @@ $env:PENUMBRA_COOP_ADDRESS='127.0.0.1'
 $env:PENUMBRA_COOP_PROFILE_ROOT=Join-Path $run 'client'
 $env:PENUMBRA_COOP_SCREENSHOT=Join-Path $run 'client.bmp'
 $clientProcess=Start-Process -FilePath $exe -WorkingDirectory $GameDirectory -WindowStyle Hidden -PassThru
+$null=$clientProcess.Handle
 @($hostProcess.Id,$clientProcess.Id) | Set-Content (Join-Path $run 'pids.txt')
 $deadline=(Get-Date).AddSeconds($(if($Mode-eq'campaign'){180}elseif($Mode-eq'hammer'){95}else{65}))
 while((Get-Date)-lt $deadline -and (!$hostProcess.HasExited -or !$clientProcess.HasExited)) { Start-Sleep -Milliseconds 250 }
