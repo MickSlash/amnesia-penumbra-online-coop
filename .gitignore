@@ -355,3 +355,9 @@ MigrationBackup/
 # Online co-op test/build outputs and local diagnostic logs
 /build/
 /*-build.log
+
+# Extracted from HPL2/dependencies.zip (third-party headers and prebuilt libs)
+/HPL2/OALWrapper/
+/HPL2/include/
+/HPL2/lib/
+/HPL2/sources/
