@@ -2,11 +2,72 @@
 using System;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
+
+// Artwork is embedded by tools/BuildLauncher.ps1 (/resource and /win32icon), so
+// the launcher stays a single file. A missing resource must never block play.
+static class LauncherArt {
+    static Stream Open(string name) { return typeof(LauncherArt).Assembly.GetManifestResourceStream(name); }
+    public static Icon WindowIcon() {
+        var stream = Open("launcher.ico");
+        return stream == null ? null : new Icon(stream);
+    }
+    public static Image Splash() {
+        var stream = Open("launcher_splash.png");
+        // Image.FromStream keeps reading the stream lazily: copy into a bitmap
+        // that owns its pixels, then release the resource stream.
+        if(stream == null) return null;
+        using(stream) using(var image = Image.FromStream(stream)) return new Bitmap(image);
+    }
+}
+
+// Borderless loading screen: shown while the launcher scans for the game and
+// again while Lux starts, until the game opens its own window.
+sealed class LauncherSplash : Form {
+    readonly Image art = LauncherArt.Splash();
+    string status;
+    public LauncherSplash(string text) {
+        status = text;
+        FormBorderStyle = FormBorderStyle.None; StartPosition = FormStartPosition.CenterScreen;
+        ShowInTaskbar = true; Text = "Amnesia - Campagna co-op"; Icon = LauncherArt.WindowIcon();
+        BackColor = Color.Black; DoubleBuffered = true;
+        // Logical size; WinForms scales it on high-DPI displays.
+        ClientSize = new Size(420, 420);
+        // The artwork is a rounded tile: clip the window to the same shape
+        // (corner radius 19% of the side, matching the image frame).
+        using(var shape = new GraphicsPath()) {
+            int d = (int)(ClientSize.Width * 0.38f), w = ClientSize.Width, h = ClientSize.Height;
+            shape.AddArc(0, 0, d, d, 180, 90); shape.AddArc(w - d, 0, d, d, 270, 90);
+            shape.AddArc(w - d, h - d, d, d, 0, 90); shape.AddArc(0, h - d, d, d, 90, 90);
+            shape.CloseFigure();
+            Region = new Region(shape);
+        }
+    }
+    public void SetStatus(string text) { status = text; Invalidate(); Update(); }
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics;
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        if(art != null) g.DrawImage(art, ClientRectangle);
+        // Status band over the lower part of the art, readable on any frame.
+        var band = new Rectangle(0, ClientSize.Height - 74, ClientSize.Width, 40);
+        using(var shade = new SolidBrush(Color.FromArgb(170, 0, 0, 0))) g.FillRectangle(shade, band);
+        using(var font = new Font("Segoe UI", 11, FontStyle.Bold))
+        using(var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            g.DrawString(status, font, Brushes.Gainsboro, band, format);
+    }
+    protected override void Dispose(bool disposing) { if(disposing && art != null) art.Dispose(); base.Dispose(disposing); }
+    // Pump messages for a bounded time so the splash keeps painting.
+    public static void Wait(int milliseconds, Func<bool> done) {
+        var watch = Stopwatch.StartNew();
+        while(watch.ElapsedMilliseconds < milliseconds && (done == null || !done())) { Application.DoEvents(); Thread.Sleep(15); }
+    }
+}
 
 public sealed class CoopLauncher : Form {
     readonly TextBox folder = new TextBox();
@@ -19,7 +80,7 @@ public sealed class CoopLauncher : Form {
             if(!Regex.IsMatch(testProfile,"^OnlineCoopMenuQA_[a-zA-Z0-9_]+$")) throw new ArgumentException("Invalid QA profile");
             state = Path.Combine(state,testProfile); saveFolder = testProfile;
         }
-        Text = "Amnesia - Campagna co-op"; ClientSize = new Size(660,225);
+        Text = "Amnesia - Campagna co-op"; ClientSize = new Size(660,225); Icon = LauncherArt.WindowIcon();
         FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI",10);
         Controls.Add(new Label { Text = "Seleziona la tua installazione di Amnesia: The Dark Descent.", AutoSize = true, Location = new Point(20,20) });
@@ -31,7 +92,19 @@ public sealed class CoopLauncher : Form {
         folder.TextChanged += delegate { steamPresence.Checked = SteamInstallation(folder.Text); };
         Controls.Add(new Label { Text = "Nel gioco: Co-op online > Ospita / Connetti > entrambi Pronto.\r\nL'host sceglie Nuova campagna o Continua salvataggio.", Location = new Point(20,130), Size = new Size(620,50) });
         var launch = new Button { Text = "Avvia Amnesia co-op", Location = new Point(390,185), Size = new Size(250,32) };
-        launch.Click += delegate { try { Launch(folder.Text, fullscreen.Checked, steamPresence.Checked); Close(); } catch(Exception error) { MessageBox.Show(this, error.Message, "Avvio non riuscito", MessageBoxButtons.OK, MessageBoxIcon.Error); } }; Controls.Add(launch); AcceptButton = launch;
+        launch.Click += delegate {
+            Process game;
+            try { game = Launch(folder.Text, fullscreen.Checked, steamPresence.Checked); }
+            catch(Exception error) { MessageBox.Show(this, error.Message, "Avvio non riuscito", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+            Hide();
+            // Lux needs a few seconds before its window exists; keep the art on
+            // screen meanwhile. Give up after 30 s: the game keeps loading anyway.
+            using(game) using(var splash = new LauncherSplash("Avvio di Amnesia...")) {
+                splash.Show();
+                LauncherSplash.Wait(30000, delegate { game.Refresh(); return game.HasExited || game.MainWindowHandle != IntPtr.Zero; });
+            }
+            Close();
+        }; Controls.Add(launch); AcceptButton = launch;
         var saved = Path.Combine(state,"game-folder.txt");
         if(File.Exists(saved)) folder.Text = File.ReadAllText(saved).Trim();
         if(!Valid(folder.Text)) folder.Text = Discover();
@@ -61,7 +134,7 @@ public sealed class CoopLauncher : Form {
         }
         return "";
     }
-    public void Launch(string path, bool full, bool steam) {
+    public Process Launch(string path, bool full, bool steam) {
         if(!Valid(path)) throw new IOException("Questa cartella non contiene i dati di Amnesia. Scegli la cartella del gioco originale.");
         path = Path.GetFullPath(path);
         if(steam) {
@@ -95,7 +168,20 @@ public sealed class CoopLauncher : Form {
             start.EnvironmentVariables["SteamAppId"] = "57300";
             start.EnvironmentVariables["SteamGameId"] = "57300";
         }
-        Process.Start(start);
+        return Process.Start(start);
     }
-    [STAThread] public static void Main(string[] args) { Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false); Application.Run(new CoopLauncher(args.Length == 2 && args[0] == "--test-profile" ? args[1] : null)); }
+    [STAThread] public static void Main(string[] args) {
+        Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+        string testProfile = args.Length == 2 && args[0] == "--test-profile" ? args[1] : null;
+        CoopLauncher launcher;
+        using(var splash = new LauncherSplash("Caricamento...")) {
+            splash.Show(); splash.Update();
+            // The constructor may scan Steam libraries and fixed drives.
+            var watch = Stopwatch.StartNew();
+            launcher = new CoopLauncher(testProfile);
+            // Keep the art visible briefly even on fast PCs; QA runs skip the pause.
+            if(testProfile == null) LauncherSplash.Wait(1200 - (int)Math.Min(1200, watch.ElapsedMilliseconds), null);
+        }
+        Application.Run(launcher);
+    }
 }
