@@ -1,0 +1,162 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# CI: every push to main and every pull request builds both mods and runs the
+# protocol/transport suites. Native game tests stay local: they need the
+# commercial game data, which must never be uploaded to GitHub.
+#
+# CD: pushing a tag v* reuses the same build jobs and publishes a DRAFT GitHub
+# Release with one zip per game. A human reviews and publishes the draft.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Never cancel a tag build half way through a release.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  # GitHub's Windows image ships Visual Studio 2022. The projects keep their
+  # checked-in toolsets for local VS versions; CI overrides them explicitly.
+  MSVC_TOOLSET: v143
+
+jobs:
+  amnesia-windows:
+    name: Amnesia - Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        # The test scripts target Windows PowerShell 5.1, like the players' PCs.
+        shell: powershell
+        working-directory: amnesia
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Extract HPL2 dependencies
+        # Tracked as one archive; its extraction is git-ignored.
+        run: Expand-Archive -LiteralPath HPL2/dependencies.zip -DestinationPath HPL2 -Force
+
+      - name: Build protocol tests
+        run: msbuild tests/network/NetworkTests.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:MSVC_TOOLSET /v:minimal /nologo
+
+      - name: Protocol and UDP transport tests
+        run: ./tests/network/RunTransportTests.ps1
+
+      - name: Build game (Lux.exe)
+        run: msbuild amnesia/src/game/Lux.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:MSVC_TOOLSET /v:minimal /nologo
+
+      - name: Build launcher
+        run: ./tools/BuildLauncher.ps1
+
+      - name: Stage package layout
+        # Same layout as tools/PackageOnlineCoop.ps1: the launcher looks for bin/Lux.exe.
+        run: |
+          $out = "$env:RUNNER_TEMP/amnesia"
+          New-Item -ItemType Directory -Force "$out/bin", "$out/symbols" | Out-Null
+          Copy-Item amnesia/src/game/x64/Release/Lux.exe "$out/bin/"
+          Copy-Item amnesia/src/game/x64/Release/Lux.pdb "$out/symbols/"
+          Copy-Item build/AmnesiaCoop.exe "$out/"
+          Copy-Item docs/online_installazione_it.md "$out/LEGGIMI.md"
+          Copy-Item LICENSE "$out/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amnesia-windows-x64
+          path: ${{ runner.temp }}/amnesia
+          if-no-files-found: error
+
+  amnesia-server-linux:
+    name: Amnesia dedicated config - Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S amnesia/server -B build/server -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build/server --parallel
+
+      - name: Test
+        run: ctest --test-dir build/server --output-on-failure
+
+  penumbra-windows:
+    name: Penumbra - Windows x86
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: powershell
+        working-directory: penumbra
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build game and launcher
+        # Build.ps1 fetches only SDK headers/import libs at a pinned revision.
+        # Win32 is mandatory: the original Newton runtime is 32-bit.
+        run: ./tools/Build.ps1 -Generator 'Visual Studio 17 2022' -Toolset $env:MSVC_TOOLSET
+
+      - name: Protocol tests
+        run: |
+          ./build/windows/Release/NetworkTests.exe
+          if ($LASTEXITCODE -ne 0) { throw "NetworkTests failed with exit code $LASTEXITCODE" }
+
+      - name: Stage package layout
+        run: |
+          $out = "$env:RUNNER_TEMP/penumbra"
+          New-Item -ItemType Directory -Force "$out/bin" | Out-Null
+          Copy-Item build/bin/Release/PenumbraCoop.exe "$out/bin/"
+          Copy-Item build/PenumbraCoopLauncher.exe "$out/"
+          foreach ($file in 'README.md','BUILD.md','TESTS.md','THIRD_PARTY.md','LICENSE','upstream.json') { Copy-Item $file "$out/" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: penumbra-windows-x86
+          path: ${{ runner.temp }}/penumbra
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [amnesia-windows, amnesia-server-linux, penumbra-windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Zip packages
+        run: |
+          cd artifacts
+          (cd amnesia-windows-x64 && zip -qr "../AmnesiaOnlineCoop-${GITHUB_REF_NAME}.zip" .)
+          (cd penumbra-windows-x86 && zip -qr "../PenumbraOnlineCoop-${GITHUB_REF_NAME}.zip" .)
+          sha256sum *.zip > SHA256SUMS.txt
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          Build automatica dalla CI. **Bozza**: verificare in gioco prima di pubblicarla.
+
+          - Le prove native con i dati del gioco originale non girano in CI: vanno eseguite in locale (vedi `amnesia/tests/network` e `penumbra/TESTS.md`).
+          - Amnesia: il pacchetto non include il runtime OpenAL x64. Copiare `OpenAL32.dll` x64 in `bin/` (per esempio da un pacchetto locale creato con `tools/PackageOnlineCoop.ps1`).
+          - Nessun file del gioco originale e' incluso: serve una copia legittima su entrambi i PC.
+          EOF
+          gh release create "$GITHUB_REF_NAME" artifacts/*.zip artifacts/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --draft --title "$GITHUB_REF_NAME" --notes-file notes.md
