@@ -654,9 +654,11 @@ void cLuxMainMenu::ExitMenu(eLuxMainMenuExit aMessage)
 			gpBase->mpEngine->GetSound()->GetSoundHandler()->PlayGui(msZoomSound, false,1.0f);
 	}
 
-	if (aMessage == eLuxMainMenuExit_QuitToMenu || aMessage == eLuxMainMenuExit_QuitAndSave)
+	// An online session can unload the replica map while this menu stays open.
+	cLuxMap* pCurrentMap = gpBase->mpMapHandler->GetCurrentMap();
+	if (pCurrentMap && (aMessage == eLuxMainMenuExit_QuitToMenu || aMessage == eLuxMainMenuExit_QuitAndSave))
 	{
-		tString mapName = gpBase->mpMapHandler->GetCurrentMap()->GetName();
+		tString mapName = pCurrentMap->GetName();
 		if (mapName == "00_rainy_hall" || mapName == "01_old_archives")
 		{
 			gpBase->mpAchievementHandler->UnlockAchievement(eLuxAchievement_NOPE);
@@ -755,8 +757,9 @@ void cLuxMainMenu::OnMenuExit()
 		{
 			gpBase->mpLoadScreenHandler->DrawMenuScreen();
 
-			//Save
-			gpBase->mpSaveHandler->AutoSave();
+			//Save (nothing to save once an online session unloaded the replica map)
+			if(gpBase->mpMapHandler->GetCurrentMap())
+				gpBase->mpSaveHandler->AutoSave();
             // Capture the host save before ending authority; clients never save a replica.
             if(gpBase->mpNetwork) gpBase->mpNetwork->Disconnect(true);
 
