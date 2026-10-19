@@ -1,5 +1,15 @@
 # Amnesia: The Dark Descent — Local and Online Co-op Mod
 
+## Linux dedicated server preparation
+
+The proposed [Linux VPS configuration](server/config/linux-vps.ini) has a
+standalone C++14 parser, validator and tests in `server/` (CMake build).
+**The headless dedicated game runtime is not implemented yet.** The current
+Lux executable does not consume this configuration. See the
+[Italian dedicated server design and status](docs/server_dedicato_linux_it.md)
+for the required engine changes, two remote player connections and validation
+criteria. This preparation does not change the playable Windows mod.
+
 ## Online co-op: experimental Windows x64 build
 
 Two players with an authoritative host, shared inventory/campaign, world and
