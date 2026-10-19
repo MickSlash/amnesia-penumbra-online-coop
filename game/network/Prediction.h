@@ -6,6 +6,26 @@
 #include <array>
 namespace online {
 struct PredictedPosition { float x = 0, z = 0; };
+// Resolution push of a shape test (resolved position minus tested position);
+// all zero when nothing was touched.
+struct PredictionContact { float x=0,y=0,z=0; };
+// Native character bodies are pushed out of floors and climb slopes and steps;
+// only a contact that still pushes sideways one native step higher is a wall.
+// A raised shape also checks the ceiling.
+//
+// Treating every contact as a wall froze the client at the delayed host pose
+// whenever it walked uphill, then released it on flat ground: the rubber
+// banding on outdoor maps. Shares the rule and tests of the Amnesia port.
+template<class Query>
+bool StepBlocked(float height, float step, bool grounded, Query query) {
+    // Tolerances: 1 mm of sideways or downward push is numeric noise; up to
+    // 4 cm upward is the body resting on (or easing up) the ground.
+    auto blocked=[](const PredictionContact& p) {
+        return std::fabs(p.x)>.001f || std::fabs(p.z)>.001f || p.y<-.001f || p.y>.04f;
+    };
+    if(!blocked(query(height))) return false;
+    return !grounded || step<=0 || blocked(query(height+step));
+}
 // One reconciliation only: the collision world, shape and height are fixed.
 // Exact coordinates avoid changing contacts; never retain results across ticks.
 class PredictionCollisionCache {

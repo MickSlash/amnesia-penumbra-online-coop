@@ -484,6 +484,14 @@ static void LifeQueueLimitTest() {
     std::cout << "PASS: bounded life queue, overflow rejection and reconnect reset\n";
 }
 static void RecoveryTests() {
+    auto floor=[](float surface) { return [=](float feet) { return PredictionContact{0,std::max(0.0f,surface-feet),0}; }; };
+    Check(!StepBlocked(0,.3f,true,[](float){return PredictionContact{0,.001f,0};}),"resting floor contact does not freeze prediction");
+    Check(!StepBlocked(0,.3f,true,[](float feet){return feet<.1f?PredictionContact{-.02f,.05f,0}:PredictionContact{};}),"grounded body predicts up a slope instead of snapping back");
+    Check(!StepBlocked(0,.3f,true,floor(.15f)),"grounded body predicts climbable step instead of stopping at riser");
+    Check(StepBlocked(0,.3f,false,floor(.15f)),"airborne body cannot use grounded step allowance");
+    Check(StepBlocked(0,.3f,true,floor(.5f)),"native step limit keeps tall obstacles blocked");
+    Check(StepBlocked(0,.3f,true,[](float){return PredictionContact{.1f,0,0};}),"raising body cannot bypass a full wall");
+    Check(StepBlocked(0,.3f,true,[](float feet){return PredictionContact{0,feet<.15f?.15f-feet:-.1f,0};}),"low ceiling vetoes raised step");
     PredictionCollisionCache collisionCache; unsigned queries=0;
     auto wall=[&](float x,float) { ++queries; return x>=1; };
     Check(collisionCache.Blocked(1,0,wall) && collisionCache.Blocked(1,0,wall) && queries==1 && collisionCache.Hits()==1,"repeated contact reuses exact blocked result within one reconciliation");

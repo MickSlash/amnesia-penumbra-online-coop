@@ -520,11 +520,19 @@ void cCoopNetwork::UpdateClient(float dt) {
         if(positioned && (snapshot.players[1].flags&4) && !(snapshot.players[1].flags&(1|8))) {
             auto* body=init->mpPlayer->GetCharacterBody(); auto* physics=init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld();
             online::PredictionCollisionCache cache;
-            const float height=body->GetPosition().y;
+            const float height=body->GetPosition().y, step=body->GetMaxStepSize();
+            const bool grounded=body->IsOnGround();
             auto collide=[&](online::PredictedPosition from,online::PredictedPosition to) {
                 const bool blocked=cache.Blocked(to.x,to.z,[&](float x,float z) {
-                    cMatrixf matrix=cMatrixf::Identity; matrix.SetTranslation(cVector3f(x,height,z));
-                    return physics->CheckShapeWorldCollision(nullptr,body->GetShape(),matrix,body->GetBody(),false,true,nullptr,false);
+                    // Resting floor and slope contacts must not freeze the replay at
+                    // the delayed host pose (rubber banding on outdoor terrain).
+                    // Same query parameters as before; only the push is now inspected.
+                    return online::StepBlocked(height,step,grounded,[&](float y) {
+                        cMatrixf matrix=cMatrixf::Identity; matrix.SetTranslation(cVector3f(x,y,z));
+                        cVector3f pushed;
+                        if(!physics->CheckShapeWorldCollision(&pushed,body->GetShape(),matrix,body->GetBody(),false,true,nullptr,false)) return online::PredictionContact{};
+                        return online::PredictionContact{pushed.x-x,pushed.y-y,pushed.z-z};
+                    });
                 });
                 return blocked?from:to;
             };
