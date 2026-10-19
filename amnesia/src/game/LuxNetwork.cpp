@@ -1513,6 +1513,10 @@ void cLuxNetwork::ReplicateWorld(cLuxMap* map) {
         std::replace(state.file.begin(), state.file.end(), '\\', '/');
         state.scale = {{int32_t(scale.x * 1000), int32_t(scale.y * 1000), int32_t(scale.z * 1000)}};
         if(mesh) for(int i = 0; i < mesh->GetAnimationStateNum() && state.animations.size() < 32; ++i) {
+        // Scripts may root asset names, e.g. 07_archives_cellar creates its bait
+        // from "/organic/...". The engine resolves both forms by name; the wire
+        // format keeps rejecting rooted paths.
+        state.file.erase(0, state.file.find_first_not_of('/'));
             cAnimationState* animation = mesh->GetAnimationState(i);
             if(!animation->IsActive() || animation->GetWeight() <= 0.001f) continue;
             online::Animation a; a.index = uint16_t(i); a.weight = uint16_t(std::max(0.0f, std::min(1.0f, animation->GetWeight())) * 10000);
