@@ -1,0 +1,20 @@
+[
+  {
+    "name": "PenumbraOverture",
+    "url": "https://github.com/FrictionalGames/PenumbraOverture",
+    "revision": "6a6953a9e02a6b0c152f3de78b2dc9b3a28948dc",
+    "directory": "game"
+  },
+  {
+    "name": "HPL1Engine",
+    "url": "https://github.com/FrictionalGames/HPL1Engine",
+    "revision": "5e441bbb247a7473e75cc0f05ca8a5b62c6ec64c",
+    "directory": "HPL1Engine"
+  },
+  {
+    "name": "OALWrapper",
+    "url": "https://github.com/FrictionalGames/OALWrapper",
+    "revision": "668ad1f2ae88241d244a171388e929991a97de30",
+    "directory": "OALWrapper"
+  }
+]

@@ -1,0 +1,9 @@
+build/
+packages/
+*.user
+*.log
+*.pdb
+*.obj
+*.lib
+*.exe
+*.dll
