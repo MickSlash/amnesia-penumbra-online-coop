@@ -6,6 +6,8 @@ $logDir = [IO.Path]::GetDirectoryName($exePath)
 if ($LASTEXITCODE -ne 0) { throw 'Protocol validation failed' }
 function Test-Connection([int]$TestPort, [bool]$RejectVersion, [bool]$Malformed = $false) {
     $hostProcess = Start-Process -FilePath $exePath -ArgumentList 'host', $TestPort -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logDir/host-$TestPort.log" -RedirectStandardError "$logDir/host-$TestPort.err"
+    # Windows PowerShell reports a null ExitCode unless the handle was opened early.
+    $null = $hostProcess.Handle
     try {
         if ($RejectVersion) {
             & $exePath bad-version $TestPort

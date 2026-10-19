@@ -92,6 +92,8 @@ Add-Type -Path $Source
 $shellPath = (Get-Process -Id $PID).Path
 $relay = Start-Process -FilePath $shellPath -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-File',$relayScript,'-Source',$sourceFile,'-Port',$Port,'-Delay',$OneWayDelayMs,'-DropEvery',$DropEvery,'-Ceiling',$MaxDatagramBytes,'-Duration',$(if($Effects){85}else{75})) -RedirectStandardOutput "$run/relay.log" -RedirectStandardError "$run/relay.err"
 try {
+# Windows PowerShell reports a null ExitCode unless the handle was opened early.
+$null = $relay.Handle
     Start-Sleep -Seconds 2
     if($relay.HasExited) { throw 'UDP relay failed to start; inspect build/impaired-network/relay.err' }
     & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Executable $Executable -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly -and !$VisibilityProps) -Media:$Media -Prediction:$Prediction -SnapshotBlackout:$SnapshotBlackout -OnlineMenu:$OnlineMenu -VisibilityProps:$VisibilityProps -Effects:$Effects -Stairs:$Stairs -StartMap $StartMap -MapOnly:($MapOnly -or $VisibilityProps)
