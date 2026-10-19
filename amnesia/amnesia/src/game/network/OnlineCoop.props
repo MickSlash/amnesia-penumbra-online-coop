@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link><AdditionalDependencies>ws2_32.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="$(MSBuildThisFileDirectory)NetSession.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\callbacks.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\compress.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\host.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\list.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\packet.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\peer.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\protocol.c" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\win32.c">
+      <PreprocessorDefinitions>_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemGroup>
+</Project>
