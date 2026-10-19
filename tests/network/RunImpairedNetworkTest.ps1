@@ -11,13 +11,14 @@ param(
     [switch]$VisibilityProps,
     [switch]$Effects,
     [switch]$Stairs,
+    [switch]$Gate,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$MapOnly,
     [ValidateRange(576,65507)][int]$MaxDatagramBytes = 65507,
     [string]$Executable = "$PSScriptRoot/../../amnesia/src/game/x64/Release/Lux.exe"
 )
 $ErrorActionPreference = 'Stop'
-if($OnlineMenu -or $Effects -or $Stairs) { $MapOnly = $true }
+if($OnlineMenu -or $Effects -or $Stairs -or $Gate) { $MapOnly = $true }
 $run = Join-Path (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path 'build/impaired-network'
 $gameLogs = Join-Path "$PSScriptRoot/../../build" $(if($OnlineMenu) { 'online-menu' } elseif($MapOnly -or $VisibilityProps) { "visual-qa/$($StartMap.Replace('.map',''))" } else { 'player-replication' })
 New-Item -ItemType Directory -Force -Path $run | Out-Null
@@ -91,12 +92,12 @@ Add-Type -Path $Source
 '@ | Set-Content -LiteralPath $relayScript -Encoding utf8
 $shellPath = (Get-Process -Id $PID).Path
 $relay = Start-Process -FilePath $shellPath -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-File',$relayScript,'-Source',$sourceFile,'-Port',$Port,'-Delay',$OneWayDelayMs,'-DropEvery',$DropEvery,'-Ceiling',$MaxDatagramBytes,'-Duration',$(if($Effects){85}else{75})) -RedirectStandardOutput "$run/relay.log" -RedirectStandardError "$run/relay.err"
-try {
 # Windows PowerShell reports a null ExitCode unless the handle was opened early.
 $null = $relay.Handle
+try {
     Start-Sleep -Seconds 2
     if($relay.HasExited) { throw 'UDP relay failed to start; inspect build/impaired-network/relay.err' }
-    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Executable $Executable -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly -and !$VisibilityProps) -Media:$Media -Prediction:$Prediction -SnapshotBlackout:$SnapshotBlackout -OnlineMenu:$OnlineMenu -VisibilityProps:$VisibilityProps -Effects:$Effects -Stairs:$Stairs -StartMap $StartMap -MapOnly:($MapOnly -or $VisibilityProps)
+    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Executable $Executable -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly -and !$VisibilityProps) -Media:$Media -Prediction:$Prediction -SnapshotBlackout:$SnapshotBlackout -OnlineMenu:$OnlineMenu -VisibilityProps:$VisibilityProps -Effects:$Effects -Stairs:$Stairs -Gate:$Gate -StartMap $StartMap -MapOnly:($MapOnly -or $VisibilityProps)
     if (!$relay.WaitForExit(15000)) { throw 'UDP relay did not exit on its timer' }
     $relay.Refresh()
     if($relay.ExitCode -ne 0) { throw 'UDP relay failed; inspect relay.err' }

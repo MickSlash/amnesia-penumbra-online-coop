@@ -59,6 +59,13 @@ mani, lanterna, avatar e presentazione continuano ad aggiornarsi.
 Il mondo online resta attivo durante inventario e journal tramite il modulo
 globale, conservando un solo aggiornamento della simulazione.
 
+Le aree collegate a "Player" scattano per il primo giocatore che entra. Fanno
+eccezione i trigger che negli script originali chiudono il passaggio alle spalle
+del giocatore: `CoopCallbackNeedsAllPlayers` (`LuxTypes.cpp`) li elenca per mappa
+e nome e li fa scattare solo quando entrambi li hanno attraversati almeno una
+volta. Oggi contiene `07_archives_cellar`/`PastFirstGate` (grata della leva);
+`RunImpairedNetworkTest.ps1 -Gate` ne verifica il comportamento.
+
 L'host resta proprietario degli script e degli effetti sul gameplay. Il client
 non esegue una seconda copia di AngelScript. Gli eventi di presentazione coprono
 solo i tipi elencati: questo non implica che ogni funzione script della campagna

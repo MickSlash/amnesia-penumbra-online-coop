@@ -12,6 +12,7 @@
 #include "LuxHandObject.h"
 #include "LuxPlayerAvatar.h"
 #include "LuxProp.h"
+#include "LuxArea.h"
 #include "LuxProp_Lamp.h"
 #include "LuxProp_EmotionStone.h"
 #include "LuxMoveState_Normal.h"
@@ -289,6 +290,7 @@ void cLuxNetwork::Update(float timeStep) {
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_VISIBILITY_PROPS")) UpdateVisibilityPropsTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_EFFECTS")) UpdateEffectsTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_STAIRS")) UpdateStairsTest(gpBase->mpMapHandler->GetCurrentMap(),timeStep);
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_GATE")) UpdateGateTest(gpBase->mpMapHandler->GetCurrentMap());
     UpdateRecoveryTest();
     UpdateMenuTest();
     UpdateCampaignStartTest();
@@ -1511,12 +1513,12 @@ void cLuxNetwork::ReplicateWorld(cLuxMap* map) {
             if(enemy->GetCharacterBody()) state.bodies.push_back(PackTransform(enemy->GetBody(0)->GetLocalMatrix()));
         }
         std::replace(state.file.begin(), state.file.end(), '\\', '/');
-        state.scale = {{int32_t(scale.x * 1000), int32_t(scale.y * 1000), int32_t(scale.z * 1000)}};
-        if(mesh) for(int i = 0; i < mesh->GetAnimationStateNum() && state.animations.size() < 32; ++i) {
         // Scripts may root asset names, e.g. 07_archives_cellar creates its bait
         // from "/organic/...". The engine resolves both forms by name; the wire
         // format keeps rejecting rooted paths.
         state.file.erase(0, state.file.find_first_not_of('/'));
+        state.scale = {{int32_t(scale.x * 1000), int32_t(scale.y * 1000), int32_t(scale.z * 1000)}};
+        if(mesh) for(int i = 0; i < mesh->GetAnimationStateNum() && state.animations.size() < 32; ++i) {
             cAnimationState* animation = mesh->GetAnimationState(i);
             if(!animation->IsActive() || animation->GetWeight() <= 0.001f) continue;
             online::Animation a; a.index = uint16_t(i); a.weight = uint16_t(std::max(0.0f, std::min(1.0f, animation->GetWeight())) * 10000);
@@ -2117,6 +2119,41 @@ void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& ev
         }
         break;
     }
+    }
+}
+// 07_archives_cellar: reaching PastFirstGate slams the lever gate and locks the
+// lever. The host moves one player through, back out, then the partner; the
+// original callback (which also wakes waterlurker_2) must wait for both.
+void cLuxNetwork::UpdateGateTest(cLuxMap* map) {
+    if(!map || IsClientReplica() || !mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || !gpBase->mpPlayer2 || mGateTestStage >= 4) return;
+    auto* area = static_cast<iLuxArea*>(map->GetEntityByName("PastFirstGate", eLuxEntityType_Area));
+    iLuxEntity* lurker = map->GetEntityByName("waterlurker_2");
+    if(!area || !lurker) { NetLog("[NET/TEST] FAILED gate fixture missing on " + map->GetName()); mGateTestStage = 4; return; }
+    const auto now = std::chrono::steady_clock::now();
+    auto place = [&](cLuxPlayer* player, const cVector3f& feet) {
+        player->GetCharacterBody()->SetFeetPosition(feet); player->GetCharacterBody()->SetForceVelocity(cVector3f(0,0,0));
+    };
+    auto elapsed = [&](int ms) { return now - mGateTestAt >= std::chrono::milliseconds(ms); };
+    if(mGateTestStage == 0) {
+        if(!mGateTestAt.time_since_epoch().count()) { mGateTestAt = now; return; }
+        if(!elapsed(2000)) return;
+        if(lurker->IsActive()) { NetLog("[NET/TEST] FAILED gate fixture already triggered"); mGateTestStage = 4; return; }
+        mGateTestHostStart = gpBase->mpPlayer->GetCharacterBody()->GetFeetPosition();
+        place(gpBase->mpPlayer, area->GetPosition());
+        NetLog("[NET/TEST] Host player moved past the lever gate; partner still outside");
+        mGateTestStage = 1; mGateTestAt = now;
+    } else if(mGateTestStage == 1 && elapsed(1500)) {
+        if(lurker->IsActive()) { NetLog("[NET/TEST] FAILED gate closed while the partner was outside"); mGateTestStage = 4; return; }
+        NetLog("[NET/TEST] PASS gate stays open while one player is past it");
+        place(gpBase->mpPlayer, mGateTestHostStart); // leaving again must not reset the latch
+        mGateTestStage = 2; mGateTestAt = now;
+    } else if(mGateTestStage == 2 && elapsed(500)) {
+        place(gpBase->mpPlayer2, area->GetPosition());
+        NetLog("[NET/TEST] Partner moved past the lever gate");
+        mGateTestStage = 3; mGateTestAt = now;
+    } else if(mGateTestStage == 3 && elapsed(1500)) {
+        NetLog(lurker->IsActive() ? "[NET/TEST] PASS gate closes once both players passed" : "[NET/TEST] FAILED gate did not close after both players passed");
+        mGateTestStage = 4;
     }
 }
 void cLuxNetwork::UpdateStairsTest(cLuxMap* map,float dt) {

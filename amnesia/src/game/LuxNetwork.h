@@ -206,6 +206,11 @@ private:
     void UpdateMediaTest(cLuxMap* map, float elapsed);
     void UpdateEffectsTest(cLuxMap* map);
     void UpdateStairsTest(cLuxMap* map, float dt);
+    // AMNESIA_NET_TEST_GATE: both-players latch on the 07_archives_cellar lever gate.
+    void UpdateGateTest(cLuxMap* map);
+    unsigned mGateTestStage = 0;
+    std::chrono::steady_clock::time_point mGateTestAt;
+    cVector3f mGateTestHostStart;
     bool mStairsBuilt=false,mStairsReady=false,mStairsHostPassed=false;
     unsigned mStairsStage=0;
     cVector3f mStairsOrigin=cVector3f(100,30,100),mStairsPrevious;

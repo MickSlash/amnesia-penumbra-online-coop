@@ -703,13 +703,20 @@ public:
 	 */
 	int mlCoopTriggerPlayer;
 
+	/**
+	 * Players (bit 0 = P1, bit 1 = P2) that have entered at least once, for the
+	 * few triggers that must wait for both players (see CoopCallbackNeedsAllPlayers).
+	 * Runtime only: after a load both players simply pass the trigger again.
+	 */
+	int mlCoopEnteredMask;
+
 	//There was no constructor at all, and the savegame load path builds one of
 	//these bare (LuxSavedGameTypes.cpp: hplNew then ToCallback) -- ToCallback never
 	//wrote mlCoopTriggerPlayer and only AddCollideCallback did, so a loaded callback
 	//read uninitialised memory to decide which player had walked in.
 	cLuxCollideCallback() : mpCollideEntity(NULL), mbDeleteWhenColliding(false),
 							mlStates(0), mbColliding(false),
-							mlCoopOnlyPlayer(-1), mlCoopTriggerPlayer(0) {}
+							mlCoopOnlyPlayer(-1), mlCoopTriggerPlayer(0), mlCoopEnteredMask(0) {}
 };
 
 typedef std::list<cLuxCollideCallback*> tLuxCollideCallbackList;

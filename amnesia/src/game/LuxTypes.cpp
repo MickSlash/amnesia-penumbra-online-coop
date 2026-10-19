@@ -24,6 +24,8 @@
 #include "LuxArea.h"
 #include "LuxProp.h"
 #include "LuxMap.h"
+#include "LuxMapHandler.h"
+#include "LuxNetwork.h"
 
 //////////////////////////////////////////////////////////////////////////
 // TYPE CONVERSIONS
@@ -151,6 +153,17 @@ void iLuxCollideCallbackContainer::DestroyCollideCallbacks()
 
 //-----------------------------------------------------------------------
 
+// Single-player triggers that shut the way behind "the player". Firing on the
+// first player would lock the partner out, so these wait until both players
+// have passed. Keyed by map and trigger, so every other story beat keeps the
+// first-player behaviour.
+static bool CoopCallbackNeedsAllPlayers(cLuxMap *apMap, iLuxEntity *apEntity)
+{
+	// The lever gate drops at once and the lever stays stuck when the player
+	// reaches PastFirstGate; the original 42.5 s timer still lowers it otherwise.
+	return apMap->GetName() == "07_archives_cellar" && apEntity->GetName() == "PastFirstGate";
+}
+
 void iLuxCollideCallbackContainer::CheckCollisionCallback(const tString& asName, cLuxMap *apMap)
 {
 	mbUpdatingCollideCallbacks = true;
@@ -179,7 +192,26 @@ void iLuxCollideCallbackContainer::CheckCollisionCallback(const tString& asName,
 		//body and this container is the only possible trigger.
 		cLuxPlayer *pTriggerPlayer = NULL;
 
-		if(pCallback->mlCoopOnlyPlayer < 0)
+		const bool bCoopPlayers = gpBase->mpPlayer2 &&
+			(gpBase->mpMapHandler->GetCoopMode() || (gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers()));
+		if(pCallback->mlCoopOnlyPlayer < 0 && bCoopPlayers && GetCoopOwnerPlayer() &&
+			CoopCallbackNeedsAllPlayers(apMap, pEntity))
+		{
+			// Latch each player's first entry; the last one to arrive trips it.
+			cLuxPlayer *vPlayers[2] = { gpBase->mpPlayer, gpBase->mpPlayer2 };
+			for(int i=0; i<2; ++i)
+			{
+				if(pCallback->mlCoopEnteredMask & (1<<i)) continue;
+				if(vPlayers[i]->GetCharacterBody() && vPlayers[i]->CheckEntityCollision(pEntity, apMap))
+				{
+					pCallback->mlCoopEnteredMask |= 1<<i;
+					pTriggerPlayer = vPlayers[i];
+				}
+			}
+			bCollide = pCallback->mlCoopEnteredMask == 3;
+			if(bCollide == false) pTriggerPlayer = NULL;
+		}
+		else if(pCallback->mlCoopOnlyPlayer < 0)
 			bCollide = CheckCoopCollision(pEntity, apMap, bCollide, &pTriggerPlayer);
 		else if(bCollide)
 			pTriggerPlayer = GetCoopOwnerPlayer();
