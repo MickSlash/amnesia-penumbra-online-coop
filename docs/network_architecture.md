@@ -260,7 +260,9 @@ Dopo un'assenza prolungata il precedente host cede l'autorità (circa 8 secondi)
 il client con un checkpoint valido tenta la promozione (circa 12 secondi), scambia
 P1/P2 nel salvataggio e attende il partner. Sono timer del recupero dopo il
 rilevamento della disconnessione, non garanzie di tempo dalla caduta del cavo.
-Un checkpoint ogni 20 secondi più il trasferimento comporta possibile rollback.
+Un checkpoint ogni 60 secondi (20 nelle prove QA) più il trasferimento comporta
+possibile rollback. Se l'RTT supera il minimo recente di max(40 ms, metà del
+minimo), l'invio scende da 60 a 4 KiB/s per non accodare gli snapshot.
 Raggiungibilità bidirezionale, identità conservate e checkpoint valido sono
 necessari. Crash/restart dei PC e partizioni WAN non sono certificati.
 

@@ -468,7 +468,12 @@ void cLuxNetwork::UpdateCheckpoint(float timeStep) {
     }
     if(mSession.GetRole() != online::Role::Host || !mSession.IsMapReady(mEpoch) || !mBaselineSent || WaitingForMap() || !HasNetworkPlayers()) return;
     mCheckpointTimer += timeStep;
-    if(!mCheckpointCapture && mSendingCheckpoint.bytes.empty() && (mCheckpointTimer >= 20 || mLastCheckpointEpoch != mEpoch)) {
+    // The full save grows to several MB of XML during the campaign. A minute
+    // between captures keeps most of the uplink for gameplay; map changes still
+    // capture at once. Trade-off: a host migration can roll back up to ~60 s
+    // plus transfer time. QA sessions keep the short interval their timers expect.
+    const float checkpointInterval = mSmokeSeconds ? 20.0f : 60.0f;
+    if(!mCheckpointCapture && mSendingCheckpoint.bytes.empty() && (mCheckpointTimer >= checkpointInterval || mLastCheckpointEpoch != mEpoch)) {
         const auto start = std::chrono::steady_clock::now();
         auto job = std::make_shared<cLuxCheckpointCapture>();
         job->work = std::make_shared<cLuxCheckpointCapture::Work>();
@@ -487,8 +492,22 @@ void cLuxNetwork::UpdateCheckpoint(float timeStep) {
     }
     // One non-fragmented 1 KiB chunk per 60 Hz tick, on its own bulk channel.
     // Slow links keep movement/audio queues independent of the checkpoint.
+    // While path queues inflate the RTT, drop to 4 KiB/s so snapshots are not
+    // delayed further, without letting a congested link starve the checkpoint.
+    const bool linkClear = mSession.BulkLinkClear();
+    // Equality means the link state just flipped; log entering the slow state
+    // only, rate-limited, so a flapping link cannot flood hpl.log.
+    if(!mSendingCheckpoint.bytes.empty() && linkClear == mCheckpointSlowed) {
+        mCheckpointSlowed = !linkClear;
+        const auto now = std::chrono::steady_clock::now();
+        if(mCheckpointSlowed && now - mCheckpointSlowLogAt >= std::chrono::seconds(5)) {
+            mCheckpointSlowLogAt = now;
+            NetLog("[NET/STATS] Checkpoint stream slowed rtt_ms=" + std::to_string(mSession.Ping()) +
+                " baseline_ms=" + std::to_string(mSession.RttBaseline()));
+        }
+    }
     mCheckpointPacer += timeStep;
-    if(mCheckpointPacer < 1.0f/60) return;
+    if(mCheckpointPacer < (linkClear ? 1.0f/60 : 0.25f)) return;
     mCheckpointPacer = 0;
     for(unsigned i = 0; i < 1 && !mSendingCheckpoint.bytes.empty(); ++i) {
         online::CheckpointChunk chunk; chunk.epoch = mSendingCheckpoint.epoch; chunk.id = mSendingCheckpoint.id;

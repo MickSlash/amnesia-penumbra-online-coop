@@ -665,6 +665,7 @@ void Session::Poll() {
             loading_ = false; worldAppliedEpoch_ = mapReadyAt_ = 0;
             entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+            rttWindowMin_ = rttPreviousMin_ = rttWindowAt_ = 0;
             enet_peer_timeout(peer_, 8, 3000, 10000);
             // BulkReady regulates the large reliable stream. RTT spikes during
             // loading/ACK bursts must not make ENet discard every player pose.
@@ -715,6 +716,13 @@ void Session::Poll() {
     if(peer_ && ready_ && loading_ && uint32_t(enet_time_get()-loadingStarted_) > 45000) {
         RecoverConnection("map loading barrier timeout");
     }
+    if(peer_ && ready_ && !loading_) {
+        // Two 15 s windows: a congestion episode cannot become its own baseline
+        // quickly, while a lasting route change is adopted within 30 s.
+        // Map loads are excluded: their stalled ACKs are not path delay.
+        if(!rttWindowAt_ || uint32_t(now-rttWindowAt_) >= 15000) { rttPreviousMin_ = rttWindowMin_; rttWindowMin_ = 0; rttWindowAt_ = now; }
+        if(!rttWindowMin_ || peer_->roundTripTime < rttWindowMin_) rttWindowMin_ = std::max<uint32_t>(1,peer_->roundTripTime);
+    }
     enet_host_flush(host_);
     if(peer_ && ready_ && (!lastDiagnostic_ || uint32_t(now - lastDiagnostic_) >= 5000)) {
         lastDiagnostic_ = now;
@@ -729,6 +737,7 @@ void Session::Poll() {
             " reliable_queued_bytes=" + std::to_string(queuedBytes) +
             " reliable_in_flight_bytes=" + std::to_string(peer_->reliableDataInTransit) +
             " receive_waiting_bytes=" + std::to_string(peer_->totalWaitingData) + " bulk_paused=" + std::to_string(!BulkReady(0)) +
+            " rtt_baseline_ms=" + std::to_string(RttBaseline()) + " bulk_link_clear=" + std::to_string(BulkLinkClear()) +
             " loading=" + std::to_string(loading_) + " map_ready_epoch=" + std::to_string(readyEpoch_) + " world_applied_epoch=" + std::to_string(worldAppliedEpoch_) +
             " application_age_ms=" + std::to_string(uint32_t(now - lastPacket_)) +
             " ack_age_ms=" + std::to_string(uint32_t(now - peer_->lastReceiveTime)) +
@@ -741,6 +750,24 @@ bool Session::ReadInput(PlayerInput& input) const {
     input = input_; return true;
 }
 uint32_t Session::Ping() const { return peer_ && ready_ ? peer_->roundTripTime : 0; }
+uint32_t Session::RttBaseline() const {
+    if(!rttPreviousMin_) return rttWindowMin_;
+    return rttWindowMin_ ? std::min<uint32_t>(rttWindowMin_,rttPreviousMin_) : rttPreviousMin_;
+}
+// Delay-based congestion signal (LEDBAT-like). Loss is a poor signal on VPN
+// paths: relays buffer datagrams for seconds before dropping any, so ENet's
+// loss estimate stays near zero while snapshots queue behind bulk data. RTT
+// growth over the uncongested baseline measures that queue directly.
+//
+// ENet only exposes the smoothed RTT (1/8 gain), which already filters single
+// late ACKs. The margin is absolute for short paths (40 ms covers scheduling and
+// ACK delay on LAN/VPN) and relative for long ones (+50% on intercontinental
+// paths) so jitter alone never throttles the stream.
+bool Session::BulkLinkClear() const {
+    const uint32_t baseline = RttBaseline();
+    if(!peer_ || !ready_ || !baseline) return true;
+    return peer_->roundTripTime <= baseline + std::max<uint32_t>(40,baseline/2);
+}
 void Session::SetLobbyReady(bool ready) {
     localReady_ = ready;
     if(!ready_) return;

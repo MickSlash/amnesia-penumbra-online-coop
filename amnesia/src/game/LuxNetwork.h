@@ -150,6 +150,9 @@ private:
     uint64_t mCheckpointHash = 0;
     float mCheckpointTimer = 0;
     float mCheckpointPacer = 0;
+    // Checkpoint stream is in its 4 KiB/s congestion mode (diagnostics only).
+    bool mCheckpointSlowed = false;
+    std::chrono::steady_clock::time_point mCheckpointSlowLogAt;
     bool mMigrationHost = false, mMigrationAttempted = false;
     bool mInputLeaseSeen = false, mInputLeasePaused = false;
     std::chrono::steady_clock::time_point mInputLeaseAt;

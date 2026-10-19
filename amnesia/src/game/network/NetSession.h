@@ -169,6 +169,10 @@ public:
     bool ReadCheckpoint(Checkpoint& checkpoint);
     bool AcknowledgeCheckpoint(uint32_t id);
     uint32_t CheckpointAcknowledged() const { return checkpointAck_; }
+    // Uncongested path delay: minimum smoothed RTT over the last 15-30 s.
+    uint32_t RttBaseline() const;
+    // False while queues on the path inflate the RTT above that baseline.
+    bool BulkLinkClear() const;
     bool Connected() const { return ready_; }
     Role GetRole() const { return role_; }
     uint32_t Ping() const;
@@ -202,6 +206,7 @@ private:
     uint32_t started_ = 0, lastInput_ = 0;
     uint32_t lastPoll_ = 0, lastPacket_ = 0;
     uint32_t lastDiagnostic_ = 0;
+    uint32_t rttWindowMin_ = 0, rttPreviousMin_ = 0, rttWindowAt_ = 0;
     uint32_t transportDatagramBytes_ = TransportDatagramBytes, lastSocketError_ = 0;
     PlayerInput input_;
     Snapshot snapshot_;

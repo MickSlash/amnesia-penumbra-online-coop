@@ -40,7 +40,8 @@ See the [Steam integration QA report](docs/qa_steam_2026-10-03.md).
 Disconnects pause the campaign while the client retries. After a prolonged host
 outage the client can restore a complete validated native save checkpoint and
 become host, retaining both players and waiting for its partner. Checkpoints are
-captured every 20 seconds and on map changes: progress since the last received
+captured every 60 seconds and on map changes, and their transfer slows to 4 KiB/s
+while the RTT rises above its recent baseline: progress since the last received
 checkpoint may be lost. Bidirectional reachability and retained player identities
 are required; no NAT traversal, relay or matchmaking is included.
 
