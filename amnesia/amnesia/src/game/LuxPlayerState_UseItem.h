@@ -57,6 +57,9 @@ public:
 	void ImplementedUpdate(float afTimeStep);
 
 	cGuiGfxElement* GetCrosshair();
+	//The item in hand; cLuxInventory::RemoveItem drops the holder back to
+	//normal before deleting it.
+	cLuxInventory_Item* GetCurrentItem(){ return mpCurrentItem; }
 	bool OnDrawCrossHair(cGuiGfxElement *apGfx, const cVector3f& avPos, const cVector2f &avSize);
 	
 	/////////////////////////////////

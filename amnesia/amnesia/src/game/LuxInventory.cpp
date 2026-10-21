@@ -20,6 +20,7 @@
 #include "LuxInventory.h"
 #include "LuxNetwork.h"
 #include "LuxPlayerState.h"
+#include "LuxPlayerState_UseItem.h"
 #include <algorithm>
 
 #include "LuxPlayer.h"
@@ -1387,6 +1388,24 @@ void cLuxInventory::RemoveItem(cLuxInventory_Item *apItem)
 	if(mpPickedItem == apItem) mpPickedItem = NULL;
 	if(mpEquippedItem == apItem) mpEquippedItem = NULL;
 	if(mpEquippedItemP2 == apItem) mpEquippedItemP2 = NULL;
+
+	// Shared inventory: a player can be holding this item in the use-item state
+	// while the partner consumes or combines it, or while a replicated inventory
+	// replaces it. The state keeps a raw pointer and draws the item's image as
+	// its crosshair, so deleting the item under it is a use-after-free. Drop the
+	// holder back to normal first. ChangeState ignores a no-op change, so the
+	// original flow -- the holder's own use removing the item, then the state
+	// returning to normal -- is unaffected. gpBase->mpPlayer may be swapped to
+	// the acting player during scripts, so also check the swapped-out one.
+	if(cLuxPlayerStateVars::mpInventoryItem == apItem) cLuxPlayerStateVars::SetupUseItem(NULL);
+	cLuxPlayer *vHolders[3] = { gpBase->mpPlayer, cLuxPlayer::CoopGetSwappedOutPlayer(), gpBase->mpPlayer2 };
+	for(int i=0; i<3; ++i)
+	{
+		cLuxPlayer *pPlayer = vHolders[i];
+		if(pPlayer == NULL || pPlayer->GetCurrentState() != eLuxPlayerState_UseItem) continue;
+		cLuxPlayerState_UseItem *pUse = static_cast<cLuxPlayerState_UseItem*>(pPlayer->GetStateData(eLuxPlayerState_UseItem));
+		if(pUse->GetCurrentItem() == apItem) pPlayer->ChangeState(eLuxPlayerState_Normal);
+	}
 
 	// Search P1's items
 	std::vector<cLuxInventory_Item*>::iterator it = mvItems.begin();
