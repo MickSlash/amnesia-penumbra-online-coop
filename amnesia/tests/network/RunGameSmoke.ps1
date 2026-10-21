@@ -13,6 +13,7 @@ param(
     [switch]$Effects,
     [switch]$Stairs,
     [switch]$Gate,
+    [switch]$Flashback,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
@@ -23,7 +24,7 @@ if ($Media) { $Campaign = $true }
 if ($Campaign) { $Replication = $true }
 if ($Enemy) { $MapOnly = $true }
 if ($OnlineMenu) { $MapOnly = $true }
-if ($VisibilityProps -or $Effects -or $Stairs -or $Gate) { $MapOnly = $true }
+if ($VisibilityProps -or $Effects -or $Stairs -or $Gate -or $Flashback) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $repoPath = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
@@ -41,7 +42,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS','AMNESIA_NET_TEST_STAIRS','AMNESIA_NET_TEST_GATE')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS','AMNESIA_NET_TEST_STAIRS','AMNESIA_NET_TEST_GATE','AMNESIA_NET_TEST_FLASHBACK')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -65,6 +66,7 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_EFFECTS', $(if ($Effects) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_STAIRS', $(if ($Stairs) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_GATE', $(if ($Gate -and $role -eq 'host') { '1' } else { $null }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_FLASHBACK', $(if ($Flashback) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DRIVE_FILE', $null)
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$(if ($role -eq 'client' -and $ClientPort -gt 0) { $ClientPort } else { $Port }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ADDRESS', '127.0.0.1')
@@ -104,6 +106,13 @@ try {
             if(!$log.Contains($marker) -or $log.Contains('FAILED stairs')) {throw "Missing $role stairs regression proof"}
             if($role -eq 'host' -and !$log.Contains('PASS missing footstep data safely initialized')) {throw 'Missing sound failure safety proof'}
             Write-Output "PASS: $role native staircase ascent, descent and clean exit"
+        }
+        if($Flashback) {
+            $markers = if($role -eq 'client') { @('PASS flashback sepia applied on client') } else { @('Host flashback started','PASS removing a held item returns its holder to normal','PASS destroyed GUI element drawn for 30 frames without crashing') }
+            foreach($marker in $markers) { if(!$log.Contains($marker)) {throw "Missing $role flashback/GUI proof: $marker"} }
+            if($role -eq 'host' -and (!($log -match 'skipped \d+ draw of destroyed') -or !($log -match 'skipped \d+ render of destroyed'))) {throw 'Destroyed GUI elements were not skipped at draw and render'}
+            if($log.Contains('FAILED held item')) {throw 'Held item regression failed'}
+            Write-Output "PASS: $role flashback effects and GUI lifetime regressions"
         }
         if($Gate -and $role -eq 'host') {
             foreach($marker in @('PASS gate stays open while one player is past it','PASS gate closes once both players passed')) { if(!$log.Contains($marker)) {throw "Missing lever gate proof: $marker"} }

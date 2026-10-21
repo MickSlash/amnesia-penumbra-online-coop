@@ -855,6 +855,20 @@ void cLuxPlayerHurt::OnDraw(float afFrameTime)
 
 //-----------------------------------------------------------------------
 
+// Online: flashback areas trigger on the host, and this helper drives the
+// global effect handler directly. Screen effects only reach the client when
+// a script function queues them, so mirror the helper's calls with the same
+// events and units as the script hooks (seconds/amounts * 1000). Voices are
+// already replicated inside cLuxEffect_PlayVoice. QueuePresentation is a
+// no-op unless this process is the host.
+static void QueueFlashbackEffect(online::PresentationKind aKind, float afA, float afB = 0, float afC = 0)
+{
+	if(gpBase->mpNetwork == NULL) return;
+	online::Presentation event; event.kind = aKind;
+	event.values[0] = int32_t(afA * 1000); event.values[1] = int32_t(afB * 1000); event.values[2] = int32_t(afC * 1000);
+	gpBase->mpNetwork->QueuePresentation(event);
+}
+
 cLuxPlayerFlashback::cLuxPlayerFlashback (cLuxPlayer *apPlayer) : iLuxPlayerHelper(apPlayer, "LuxPlayerFlashback")
 {
 	mfRadialBlurSize = gpBase->mpGameCfg->GetFloat("Player_General","FlashbackRadialBlurSize", 0.12f);
@@ -898,6 +912,12 @@ void cLuxPlayerFlashback::Start(const tString &asFlashbackFile, const tString &a
 
 	mfFlashDelay = 0.5f; //Show flash effect after a little delay
 	gpBase->mpHelpFuncs->PlayGuiSoundData("flashback_flash", eSoundEntryType_Gui);
+	if(gpBase->mpNetwork)
+	{
+		online::Presentation sound; sound.kind = online::PresentationKind::GuiSound;
+		sound.text[0] = "flashback_flash"; sound.values[0] = 1000;
+		gpBase->mpNetwork->QueuePresentation(sound);
+	}
 	
 	cLuxMap *pMap = gpBase->mpMapHandler->GetCurrentMap();
 	pMap->AddCompletionAmount(gpBase->mpCompletionCountHandler->mlFlashbackCompletionValue, 2.5f);
@@ -941,6 +961,7 @@ void cLuxPlayerFlashback::Update(float afTimeStep)
 		if(mfFlashDelay < 0)
 		{
 			gpBase->mpEffectHandler->GetFlash()->Start(0.5f, 0.5f, 2.5f);
+			QueueFlashbackEffect(online::PresentationKind::Flash, 0.5f, 0.5f, 2.5f);
 
 			//Apply to the player this helper belongs to, not to whoever gpBase->mpPlayer
 			//currently points at (the codebase swaps that pointer during P2 interactions).
@@ -973,7 +994,10 @@ void cLuxPlayerFlashback::Update(float afTimeStep)
 			gpBase->mpEffectHandler->SetRadialBlurOwner(mpPlayer);
 			gpBase->mpEffectHandler->GetRadialBlur()->SetBlurStartDist(mfRadialBlurStartDist);
 			gpBase->mpEffectHandler->GetRadialBlur()->FadeTo(mfRadialBlurSize, mfRadialBlurSize / 3.5f);
-			
+			QueueFlashbackEffect(online::PresentationKind::Sepia, 1, 1.0f / 3.5f);
+			QueueFlashbackEffect(online::PresentationKind::BlurStart, mfRadialBlurStartDist);
+			QueueFlashbackEffect(online::PresentationKind::RadialBlur, mfRadialBlurSize, mfRadialBlurSize / 3.5f);
+
 			//Play voices
 			LoadAndPlayFlashbackFile(msFlashbackFile);
 		}
@@ -995,6 +1019,9 @@ void cLuxPlayerFlashback::Update(float afTimeStep)
 			//Post effects
 			gpBase->mpEffectHandler->GetSepiaColor()->FadeTo(0, 1.0f / fFadeTime);
 			gpBase->mpEffectHandler->GetRadialBlur()->FadeTo(0, mfRadialBlurSize / fFadeTime);
+			QueueFlashbackEffect(online::PresentationKind::Flash, 1.0f, 0.1f, 2.5f);
+			QueueFlashbackEffect(online::PresentationKind::Sepia, 0, 1.0f / fFadeTime);
+			QueueFlashbackEffect(online::PresentationKind::RadialBlur, 0, mfRadialBlurSize / fFadeTime);
 
 			//World sounds
 			gpBase->mpEngine->GetSound()->GetSoundHandler()->FadeGlobalVolume(1, 1 / fFadeTime,eSoundEntryType_World,eLuxGlobalVolumeType_Flashback,true);

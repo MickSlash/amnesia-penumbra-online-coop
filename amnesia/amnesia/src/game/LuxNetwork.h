@@ -206,6 +206,13 @@ private:
     void UpdateMediaTest(cLuxMap* map, float elapsed);
     void UpdateEffectsTest(cLuxMap* map);
     void UpdateStairsTest(cLuxMap* map, float dt);
+    // AMNESIA_NET_TEST_FLASHBACK: flashback effects reach the client; destroyed
+    // GUI elements and held-item removal no longer use freed memory.
+    void UpdateFlashbackTest(cLuxMap* map);
+    unsigned mFlashbackTestStage = 0;
+    std::chrono::steady_clock::time_point mFlashbackTestAt;
+    cGuiGfxElement* mTestDeadGfx = NULL; // deliberately dangling after DestroyGfx
+    int mTestDeadGfxFrames = 0;
     // AMNESIA_NET_TEST_GATE: both-players latch on the 07_archives_cellar lever gate.
     void UpdateGateTest(cLuxMap* map);
     unsigned mGateTestStage = 0;

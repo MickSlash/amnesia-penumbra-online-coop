@@ -291,6 +291,7 @@ void cLuxNetwork::Update(float timeStep) {
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_EFFECTS")) UpdateEffectsTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_STAIRS")) UpdateStairsTest(gpBase->mpMapHandler->GetCurrentMap(),timeStep);
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_GATE")) UpdateGateTest(gpBase->mpMapHandler->GetCurrentMap());
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_FLASHBACK")) UpdateFlashbackTest(gpBase->mpMapHandler->GetCurrentMap());
     UpdateRecoveryTest();
     UpdateMenuTest();
     UpdateCampaignStartTest();
@@ -2154,6 +2155,59 @@ void cLuxNetwork::UpdateGateTest(cLuxMap* map) {
     } else if(mGateTestStage == 3 && elapsed(1500)) {
         NetLog(lurker->IsActive() ? "[NET/TEST] PASS gate closes once both players passed" : "[NET/TEST] FAILED gate did not close after both players passed");
         mGateTestStage = 4;
+    }
+}
+// Regressions for the 2026-10-21 report. The host starts a real flashback (the
+// client must show its sepia) and exercises the GUI use-after-free paths that
+// used to crash in cGuiSet::RenderClipRegion; the PowerShell side also requires
+// the GuiSet warnings that prove the dead elements were skipped.
+void cLuxNetwork::UpdateFlashbackTest(cLuxMap* map) {
+    if(!map || !mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || !gpBase->mpPlayer2 || mFlashbackTestStage >= 3) return;
+    const auto now = std::chrono::steady_clock::now();
+    if(!mFlashbackTestAt.time_since_epoch().count()) { mFlashbackTestAt = now; return; }
+    if(IsClientReplica()) {
+        if(gpBase->mpEffectHandler->GetSepiaColor()->GetAmount() > 0.5f) {
+            NetLog("[NET/TEST] PASS flashback sepia applied on client");
+            mFlashbackTestStage = 3;
+        }
+        return;
+    }
+    cGui* gui = gpBase->mpEngine->GetGui();
+    cGuiSet* hud = gpBase->mpGameHudSet;
+    if(mFlashbackTestStage == 0) {
+        if(now - mFlashbackTestAt < std::chrono::seconds(2)) return;
+        // 1. A caller that keeps drawing after DestroyGfx (drawn below for 30 frames).
+        mTestDeadGfx = gui->CreateGfxFilledRect(cColor(1,1), eGuiMaterial_Alpha);
+        hud->DrawGfx(mTestDeadGfx, cVector3f(10,10,5), cVector2f(4,4), cColor(1,1));
+        gui->DestroyGfx(mTestDeadGfx);
+        // 2. A font destroyed after its text was queued: glyphs die before Render.
+        auto* fonts = gpBase->mpEngine->GetResources()->GetFontManager();
+        if(iFontData* font = fonts->CreateFontData("viewer.fnt")) {
+            hud->DrawFont(font, cVector3f(10,30,5), cVector2f(12,12), cColor(1,1), _W("online font regression"));
+            fonts->Destroy(font);
+        }
+        // 3. The held item is removed under the use-item state (partner consumed it).
+        cLuxPlayer* holder = gpBase->mpPlayer;
+        cLuxInventory_Item* item = gpBase->mpInventory->AddItem("online_test_held_item", eLuxItemType_Puzzle, "", "potion_health.tga", 0, "", "");
+        if(item) {
+            cLuxPlayerStateVars::SetupUseItem(item);
+            holder->ChangeState(eLuxPlayerState_UseItem);
+            gpBase->mpInventory->RemoveItem(item);
+            NetLog(holder->GetCurrentState() == eLuxPlayerState_UseItem ? "[NET/TEST] FAILED held item removed while still in use" :
+                "[NET/TEST] PASS removing a held item returns its holder to normal");
+        } else NetLog("[NET/TEST] FAILED held item fixture");
+        // 4. A real flashback from the campaign data.
+        holder->GetHelperFlashback()->Start("CH01L02_JourneyToSanctum01.flash", "");
+        NetLog("[NET/TEST] Host flashback started");
+        mFlashbackTestStage = 1; mTestDeadGfxFrames = 0;
+    } else if(mFlashbackTestStage == 1) {
+        // The deferred delete has run after the first frame: these draws reach a
+        // freed element unless DrawGfx rejects it.
+        hud->DrawGfx(mTestDeadGfx, cVector3f(10,10,5), cVector2f(4,4), cColor(1,1));
+        if(++mTestDeadGfxFrames >= 30) {
+            NetLog("[NET/TEST] PASS destroyed GUI element drawn for 30 frames without crashing");
+            mTestDeadGfx = NULL; mFlashbackTestStage = 3;
+        }
     }
 }
 void cLuxNetwork::UpdateStairsTest(cLuxMap* map,float dt) {
