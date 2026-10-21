@@ -292,6 +292,17 @@ void cLuxNetwork::Update(float timeStep) {
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_STAIRS")) UpdateStairsTest(gpBase->mpMapHandler->GetCurrentMap(),timeStep);
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_GATE")) UpdateGateTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_FLASHBACK")) UpdateFlashbackTest(gpBase->mpMapHandler->GetCurrentMap());
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_LEVEL_DOOR") && !IsClientReplica() && !mLevelDoorTestStarted &&
+        mSession.Connected() && mSession.IsWorldApplied(mEpoch) && gpBase->mpMapHandler->GetCurrentMap()) {
+        // 12_storage's door back to 09_back_hall, verbatim from the original map.
+        const auto now = std::chrono::steady_clock::now();
+        if(!mLevelDoorTestAt.time_since_epoch().count()) mLevelDoorTestAt = now;
+        else if(now - mLevelDoorTestAt >= std::chrono::seconds(2)) {
+            mLevelDoorTestStarted = true;
+            NetLog("[NET/TEST] Host using level door map file C:/SVN/amnesia/redist/maps/main/ch01/09_back_hall.map");
+            gpBase->mpMapHandler->ChangeMap("C:/SVN/amnesia/redist/maps/main/ch01/09_back_hall.map", "", "", "");
+        }
+    }
     UpdateRecoveryTest();
     UpdateMenuTest();
     UpdateCampaignStartTest();
@@ -1270,7 +1281,10 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         online::MapState state; state.epoch = ++mEpoch; state.file = map->GetFileName();
         std::replace(state.file.begin(), state.file.end(), '\\', '/');
         state.fingerprint = MapFingerprint(state.file);
-        if(!mSession.SendMap(state)) { NetLog("[NET/MAP] Cannot announce map; closing session"); mSession.Stop(); return; }
+        if(!mSession.SendMap(state)) {
+            NetLog("[NET/MAP] Cannot announce map file=" + state.file + " fingerprint=" + std::to_string(state.fingerprint) + "; closing session");
+            mSession.Stop(); return;
+        }
         mHostMapFile = map->GetFileName(); mMapAnnounced = true; mMapWaitStart = now;
         // The client cannot send input for the new epoch until its baseline is
         // applied. Start the input lease again after the first new input.

@@ -213,6 +213,10 @@ private:
     std::chrono::steady_clock::time_point mFlashbackTestAt;
     cGuiGfxElement* mTestDeadGfx = NULL; // deliberately dangling after DestroyGfx
     int mTestDeadGfxFrames = 0;
+    // AMNESIA_NET_TEST_LEVEL_DOOR: a level door with an authoring path
+    // ("C:/SVN/...") must still produce a valid map announcement.
+    bool mLevelDoorTestStarted = false;
+    std::chrono::steady_clock::time_point mLevelDoorTestAt;
     // AMNESIA_NET_TEST_GATE: both-players latch on the 07_archives_cellar lever gate.
     void UpdateGateTest(cLuxMap* map);
     unsigned mGateTestStage = 0;

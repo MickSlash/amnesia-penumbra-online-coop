@@ -2396,8 +2396,15 @@ cLuxMap* cLuxMapHandler::LoadMap(const tString& asFileName, bool abLoadEntities)
     if(gpBase->mpNetwork) gpBase->mpNetwork->GetSession().BeginMapLoad();
 
 	cLuxMap *pMap = hplNew( cLuxMap, ( FileToMapName(asFileName)) );
-	
-	pMap->LoadFromFile(msMapFolder+asFileName, abLoadEntities);
+
+	// Keep the map's file name canonical: map folder + file name. Callers pass
+	// more than a name: nine original level doors hold authoring paths
+	// ("C:/SVN/amnesia/redist/maps/main/ch01/09_back_hall.map"), scripts use
+	// "ch02/...", and a loaded save stores the folder-prefixed name, which grew
+	// by one "maps/main/" per save/load. HPL resolves maps by file name only,
+	// so dropping the directory loads the same file, while the online map
+	// announcement (which rejects drive letters) and saves stay clean.
+	pMap->LoadFromFile(msMapFolder + cString::GetFileName(asFileName), abLoadEntities);
 
 	mlstMaps.push_back(pMap);
 
