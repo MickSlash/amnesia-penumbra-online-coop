@@ -19,6 +19,8 @@
 
 #include "gui/GuiGfxElement.h"
 
+#include <unordered_set>
+
 #include "system/LowLevelSystem.h"
 
 #include "math/Math.h"
@@ -62,8 +64,22 @@ namespace hpl {
 
 	//-----------------------------------------------------------------------
 
+	//Function-local so it outlives every element: font glyphs are destroyed by
+	//the resource manager after the GUI module has shut down.
+	static std::unordered_set<const cGuiGfxElement*>& LiveGfxElements()
+	{
+		static std::unordered_set<const cGuiGfxElement*> setLive;
+		return setLive;
+	}
+
+	bool cGuiGfxElement::IsAlive(const cGuiGfxElement* apGfx)
+	{
+		return apGfx && LiveGfxElements().count(apGfx) != 0;
+	}
+
 	cGuiGfxElement::cGuiGfxElement(cGui* apGui)
 	{
+		LiveGfxElements().insert(this);
 		mpGui = apGui;
 
 		mpResources = mpGui->GetResources();
@@ -126,6 +142,7 @@ namespace hpl {
 
 	cGuiGfxElement::~cGuiGfxElement()
 	{
+		LiveGfxElements().erase(this);
 		STLDeleteAll(mvAnimations);
 
 		////////////////////////////////

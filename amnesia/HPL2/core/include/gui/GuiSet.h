@@ -490,6 +490,10 @@ namespace hpl {
 								
 
 		void RenderClipRegion();
+		//Logs draws of destroyed elements, rate-limited; the set name tells which
+		//module kept a dead pointer.
+		void ReportDeadGfx(int alCount, const char* asStage);
+		int mlDeadGfxReports = 0;
 
 		void AddWidget(iWidget *apWidget,iWidget *apParent);
 

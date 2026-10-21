@@ -570,8 +570,23 @@ namespace hpl {
 		}
 		
 		///////////////////////////////
+		// Drop objects whose element died after it was queued: font glyphs are
+		// deleted at once with their font, bypassing DestroyGfx's deferral.
+		// Rendering one of them dereferenced freed memory (crash dump 2026-10-21,
+		// cGuiSet::RenderClipRegion reading the vertices of a destroyed element).
+		{
+			int lDropped = 0;
+			for(tGuiRenderObjectSetIt it = m_setRenderObjects.begin(); it != m_setRenderObjects.end(); )
+			{
+				if(cGuiGfxElement::IsAlive(it->mpGfx)) ++it;
+				else { it = m_setRenderObjects.erase(it); ++lDropped; }
+			}
+			if(lDropped > 0) ReportDeadGfx(lDropped, "render");
+		}
+
+		///////////////////////////////
 		// Render all clip regions
-		
+
 		RenderClipRegion();
 
 		///////////////////////////////
@@ -601,6 +616,18 @@ namespace hpl {
 
 	//-----------------------------------------------------------------------
 
+	void cGuiSet::ReportDeadGfx(int alCount, const char* asStage)
+	{
+		//First few in full, then a sample: a module stuck on a dead pointer
+		//would otherwise log every frame.
+		++mlDeadGfxReports;
+		if(mlDeadGfxReports <= 5 || mlDeadGfxReports % 600 == 0)
+			Warning("GuiSet '%s': skipped %d %s of destroyed gfx element(s) (report %d)\n",
+					msName.c_str(), alCount, asStage, mlDeadGfxReports);
+	}
+
+	//-----------------------------------------------------------------------
+
 	void cGuiSet::ClearRenderObjects()
 	{
 		m_setRenderObjects.clear();
@@ -622,6 +649,9 @@ namespace hpl {
 	{
 		if(mpCurrentClipRegion==NULL) return;
 		if(mpCurrentClipRegion->mRect.w ==0 || mpCurrentClipRegion->mRect.h==0) return;
+		//A stale pointer to an element that is already gone must not be queued:
+		//the sort comparator below would read it, and so would Render.
+		if(cGuiGfxElement::IsAlive(apGfx)==false) { ReportDeadGfx(1, "draw"); return; }
 
 		//Log("Bug:Drawing gfx: %p\n", apGfx);
 

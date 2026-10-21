@@ -71,6 +71,20 @@ namespace hpl {
 		cGuiGfxElement(cGui* apGui);
 		~cGuiGfxElement();
 
+		//Registered on construction, unregistered on destruction. Copies would
+		//escape the registry, and nothing copies an element by value anyway.
+		cGuiGfxElement(const cGuiGfxElement&) = delete;
+		cGuiGfxElement& operator=(const cGuiGfxElement&) = delete;
+
+		/**
+		 * True while apGfx points at a constructed, not yet destroyed element.
+		 * cGuiSet checks it before queuing and before rendering: a render object
+		 * can outlive its element (font glyphs are deleted with their font at once,
+		 * and a caller that keeps drawing after DestroyGfx reaches the element
+		 * once the deferred delete has run). Main thread only, like the GUI.
+		 */
+		static bool IsAlive(const cGuiGfxElement* apGfx);
+
 		void Update(float afTimeStep);
 
 		void AddImage(cFrameSubImage* apImage);
