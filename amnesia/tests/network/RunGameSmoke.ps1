@@ -16,6 +16,7 @@ param(
     [switch]$Flashback,
     [switch]$LevelDoor,
     [switch]$Spawn,
+    [switch]$Fairness,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
@@ -26,7 +27,7 @@ if ($Media) { $Campaign = $true }
 if ($Campaign) { $Replication = $true }
 if ($Enemy) { $MapOnly = $true }
 if ($OnlineMenu) { $MapOnly = $true }
-if ($VisibilityProps -or $Effects -or $Stairs -or $Gate -or $Flashback -or $LevelDoor -or $Spawn) { $MapOnly = $true }
+if ($VisibilityProps -or $Effects -or $Stairs -or $Gate -or $Flashback -or $LevelDoor -or $Spawn -or $Fairness) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $repoPath = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
@@ -44,7 +45,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS','AMNESIA_NET_TEST_STAIRS','AMNESIA_NET_TEST_GATE','AMNESIA_NET_TEST_FLASHBACK','AMNESIA_NET_TEST_LEVEL_DOOR','AMNESIA_NET_TEST_SPAWN')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS','AMNESIA_NET_TEST_STAIRS','AMNESIA_NET_TEST_GATE','AMNESIA_NET_TEST_FLASHBACK','AMNESIA_NET_TEST_LEVEL_DOOR','AMNESIA_NET_TEST_SPAWN','AMNESIA_NET_TEST_FAIRNESS')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -71,6 +72,7 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_FLASHBACK', $(if ($Flashback) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_LEVEL_DOOR', $(if ($LevelDoor -and $role -eq 'host') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_SPAWN', $(if ($Spawn -and $role -eq 'host') { '1' } else { $null }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_FAIRNESS', $(if ($Fairness) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DRIVE_FILE', $null)
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$(if ($role -eq 'client' -and $ClientPort -gt 0) { $ClientPort } else { $Port }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ADDRESS', '127.0.0.1')
@@ -110,6 +112,11 @@ try {
             if(!$log.Contains($marker) -or $log.Contains('FAILED stairs')) {throw "Missing $role stairs regression proof"}
             if($role -eq 'host' -and !$log.Contains('PASS missing footstep data safely initialized')) {throw 'Missing sound failure safety proof'}
             Write-Output "PASS: $role native staircase ascent, descent and clean exit"
+        }
+        if($Fairness) {
+            $marker = if($role -eq 'host') { 'Host moved the late target once' } else { 'PASS late entity update reached client despite 80 moving props' }
+            if(!$log.Contains($marker)) {throw "Missing $role fairness proof: $marker"}
+            Write-Output "PASS: $role late entity update not starved by 80 moving props"
         }
         if($Spawn) {
             if($role -eq 'host' -and (!$log.Contains('Remote spawn fallback: sharing the host position crouched') -or !$log.Contains('Host crouched in a closed crawl space'))) {throw 'Host did not use the crouched spawn fallback'}

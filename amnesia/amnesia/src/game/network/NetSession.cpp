@@ -579,7 +579,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         if(!DecodeEntity(p, n, entity)) { Reject("invalid world entity"); return; }
         if(!hasMap_ || entity.epoch != map_.epoch) return;
         entity.liveMotion = channel == 1;
-        if(channel == 1 && (!IsWorldApplied(entity.epoch) || entity.type != 0 || (entity.flags & 4))) return;
+        if(channel == 1 && (!IsWorldApplied(entity.epoch) || (entity.type != 0 && entity.type != 2) || (entity.flags & 4))) return;
         if(entity.sequence) {
             auto previous = entitySequences_.find(entity.id);
             if(previous != entitySequences_.end() &&
@@ -827,7 +827,8 @@ bool Session::SendMapReady(uint32_t epoch) {
 bool Session::IsMapReady(uint32_t epoch) const { return ready_ && hasMap_ && epoch && readyEpoch_ == epoch; }
 bool Session::SendEntity(const EntityState& e) { return role_ == Role::Host && IsMapReady(e.epoch) && Send(EncodeEntity(e), 2, true, true); }
 bool Session::SendEntityMotion(const EntityState& e) {
-    if(role_ != Role::Host || !IsWorldApplied(e.epoch) || e.type != 0 || (e.flags & 4) || !peer_) return false;
+    // Props (type 0) and enemies (type 2) stream motion; areas never move.
+    if(role_ != Role::Host || !IsWorldApplied(e.epoch) || (e.type != 0 && e.type != 2) || (e.flags & 4) || !peer_) return false;
     auto bytes = EncodeEntity(e); if(bytes.empty()) return false;
     // Small packets are unsequenced. Large articulated props use unreliable
     // fragments; a missing part is replaced by the next complete pose.

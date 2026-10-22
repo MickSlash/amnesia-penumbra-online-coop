@@ -292,6 +292,7 @@ void cLuxNetwork::Update(float timeStep) {
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_STAIRS")) UpdateStairsTest(gpBase->mpMapHandler->GetCurrentMap(),timeStep);
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_GATE")) UpdateGateTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_FLASHBACK")) UpdateFlashbackTest(gpBase->mpMapHandler->GetCurrentMap());
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_FAIRNESS")) UpdateFairnessTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_SPAWN") && !IsClientReplica() && !mSpawnTestStarted &&
         mSession.Connected() && mSession.IsWorldApplied(mEpoch) && gpBase->mpPlayer2 && gpBase->mpMapHandler->GetCurrentMap()) {
         // A crouch-height crawl space with no room around the host (as under the
@@ -662,7 +663,7 @@ void cLuxNetwork::Reset() {
     mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0; mLastSnapshotAt = {};
     mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0;
     mEntityBytes.clear(); mEntityStates.clear(); mReplicaIDs.clear(); mLoggedWorldReplica = false;
-    mEntityMotionAt.clear(); mEntityMotionSettled.clear(); mPropMotion.clear();
+    mEntityMotionAt.clear(); mEntityMotionSettled.clear(); mEntitySentAt.clear(); mPropMotion.clear();
     mFillRemoteStartingOil = false;
     mBaselineApplied = false; mBaselineSent = false; mClientMoved = false;
     mAppliedInventory = false; mInventoryBytes.clear();
@@ -1344,7 +1345,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         // applied. Start the input lease again after the first new input.
         mInputLeaseSeen = mInputLeasePaused = false;
         mSendingCheckpoint.bytes.clear(); mLastCheckpointEpoch = 0;
-        mEntityBytes.clear(); mEntityStates.clear(); mEntityMotionAt.clear(); mEntityMotionSettled.clear();
+        mEntityBytes.clear(); mEntityStates.clear(); mEntityMotionAt.clear(); mEntityMotionSettled.clear(); mEntitySentAt.clear();
         mBaselineSent = false;
         mHasHostLife = false; mSnapshotAccumulator = mSnapshotBackupAccumulator = mWorldReplicationAccumulator = 0;
         mHasLookSequence = false;
@@ -1554,6 +1555,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
 }
 void cLuxNetwork::ReplicateWorld(cLuxMap* map) {
     std::map<uint32_t, bool> present;
+    std::vector<PendingEntity> pending;
     unsigned sent = 0;
     cLuxEntityIterator it = map->GetEntityIterator();
     while(it.HasNext()) {
@@ -1607,25 +1609,47 @@ void cLuxNetwork::ReplicateWorld(cLuxMap* map) {
             previous->second.file != state.file || previous->second.scale != state.scale ||
             previous->second.bodies.size() != state.bodies.size();
         const auto now = std::chrono::steady_clock::now();
-        const bool liveProp = state.type == eLuxEntityType_Prop && mSession.IsWorldApplied(mEpoch);
-        const bool settling = liveProp && !changed && !mEntityMotionSettled[state.id] &&
+        // Props and enemies move every tick: stream their poses as replaceable
+        // unreliable motion and confirm the resting pose reliably once settled.
+        // Enemies used to send every pose reliably, in the bulk window shared
+        // with checkpoint fragments, so a checkpoint froze the monster on the
+        // client until the backlog drained and it "teleported" (2026-10-22).
+        const bool liveMover = (state.type == eLuxEntityType_Prop || state.type == eLuxEntityType_Enemy) &&
+            mSession.IsWorldApplied(mEpoch);
+        const bool settling = liveMover && !changed && !mEntityMotionSettled[state.id] &&
             now - mEntityMotionAt[state.id] >= std::chrono::milliseconds(250);
-        const bool repeat = liveProp && !changed && !mEntityMotionSettled[state.id] && !settling;
-        if(sent >= 64 || (!changed && !settling && !repeat)) continue;
+        const bool repeat = liveMover && !changed && !mEntityMotionSettled[state.id] && !settling;
+        if(!changed && !settling && !repeat) continue;
+        pending.push_back({std::move(state), std::move(bytes), changed, settling, propertiesChanged, liveMover});
+    }
+    // At most 64 entity messages per tick. The scan order is fixed, so sending
+    // in scan order let the first 64 constantly moving entities (chains, swinging
+    // bodies, animated enemies) take every slot and starve the rest -- a door
+    // late in the list stayed closed on the client. Serve the longest-unsent first.
+    std::stable_sort(pending.begin(), pending.end(), [&](const PendingEntity& a, const PendingEntity& b) {
+        const auto ia = mEntitySentAt.find(a.state.id), ib = mEntitySentAt.find(b.state.id);
+        const auto ta = ia == mEntitySentAt.end() ? std::chrono::steady_clock::time_point() : ia->second;
+        const auto tb = ib == mEntitySentAt.end() ? std::chrono::steady_clock::time_point() : ib->second;
+        return ta < tb;
+    });
+    for(auto& candidate : pending) {
+        if(sent >= 64) break;
+        auto& state = candidate.state;
+        const auto now = std::chrono::steady_clock::now();
         state.sequence = ++mEntitySequence; if(!state.sequence) state.sequence = ++mEntitySequence;
-        const bool reliable = !liveProp || propertiesChanged || settling;
+        const bool reliable = !candidate.liveMover || candidate.propertiesChanged || candidate.settling;
         if(!(reliable ? mSession.SendEntity(state) : mSession.SendEntityMotion(state))) continue;
-        mEntityBytes[state.id] = std::move(bytes); mEntityStates[state.id] = state; ++sent;
-        if(changed) mEntityMotionAt[state.id] = now;
-        mEntityMotionSettled[state.id] = settling || (reliable && propertiesChanged);
-
+        mEntitySentAt[state.id] = now;
+        mEntityBytes[state.id] = std::move(candidate.bytes); mEntityStates[state.id] = state; ++sent;
+        if(candidate.changed) mEntityMotionAt[state.id] = now;
+        mEntityMotionSettled[state.id] = candidate.settling || (reliable && candidate.propertiesChanged);
     }
     for(auto it = mEntityStates.begin(); it != mEntityStates.end();) {
         if(present.find(it->first) != present.end() || sent >= 64) { ++it; continue; }
         online::EntityState removed = it->second; removed.flags |= 4; removed.bodies.clear(); removed.animations.clear();
         removed.sequence = ++mEntitySequence; if(!removed.sequence) removed.sequence = ++mEntitySequence;
         if(!mSession.SendEntity(removed)) { ++it; continue; }
-        mEntityMotionAt.erase(removed.id); mEntityMotionSettled.erase(removed.id);
+        mEntityMotionAt.erase(removed.id); mEntityMotionSettled.erase(removed.id); mEntitySentAt.erase(removed.id);
         ++sent; mEntityBytes.erase(it->first); it = mEntityStates.erase(it);
     }
     if(!mBaselineSent) {
@@ -2223,6 +2247,48 @@ void cLuxNetwork::UpdateGateTest(cLuxMap* map) {
     } else if(mGateTestStage == 3 && elapsed(1500)) {
         NetLog(lurker->IsActive() ? "[NET/TEST] PASS gate closes once both players passed" : "[NET/TEST] FAILED gate did not close after both players passed");
         mGateTestStage = 4;
+    }
+}
+// 80 props move every tick, more than the 64 entity messages a tick may carry,
+// and one late-created target moves once. Before fair scheduling the target sat
+// behind the movers forever (the "door still closed on the client" report).
+void cLuxNetwork::UpdateFairnessTest(cLuxMap* map) {
+    if(!map || !mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || mFairnessTestStage >= 3) return;
+    const auto now = std::chrono::steady_clock::now();
+    if(!mFairnessTestAt.time_since_epoch().count()) { mFairnessTestAt = now; return; }
+    const cVector3f origin(100, 30, 100);
+    if(IsClientReplica()) {
+        iLuxEntity* target = map->GetEntityByName("online_qa_fair_target");
+        if(!target || target->GetEntityType() != eLuxEntityType_Prop || !static_cast<iLuxProp*>(target)->GetBodyNum()) return;
+        const float x = static_cast<iLuxProp*>(target)->GetBody(0)->GetLocalPosition().x;
+        if(mFairnessTestStage == 0) { mFairnessTestStage = 1; return; }
+        if(x > origin.x + 1.5f) { NetLog("[NET/TEST] PASS late entity update reached client despite 80 moving props"); mFairnessTestStage = 3; }
+        return;
+    }
+    const float elapsed = std::chrono::duration<float>(now - mFairnessTestAt).count();
+    if(mFairnessTestStage == 0 && elapsed > 2) {
+        map->GetPhysicsWorld()->SetWorldSize(cVector3f(-200,-100,-200), cVector3f(200,100,200));
+        for(int i = 0; i < 80; ++i)
+            map->CreateEntity("online_qa_fair_mover_" + std::to_string(i), "entities/item/tinderbox/tinderbox.ent",
+                cMath::MatrixTranslate(origin + cVector3f(float(i % 10) * 0.5f, 2, float(i / 10) * 0.5f)), cVector3f(1));
+        map->CreateEntity("online_qa_fair_target", "entities/item/tinderbox/tinderbox.ent", cMath::MatrixTranslate(origin), cVector3f(1));
+        mFairnessTestStage = 1;
+        NetLog("[NET/TEST] Host spawned 80 movers and a late target");
+    }
+    if(mFairnessTestStage >= 1) {
+        for(int i = 0; i < 80; ++i) {
+            auto* mover = static_cast<iLuxProp*>(map->GetEntityByName("online_qa_fair_mover_" + std::to_string(i), eLuxEntityType_Prop));
+            if(mover && mover->GetBodyNum())
+                mover->GetBody(0)->SetPosition(origin + cVector3f(float(i % 10) * 0.5f, 2 + 0.3f * std::sin(elapsed * 6 + i), float(i / 10) * 0.5f));
+        }
+    }
+    if(mFairnessTestStage == 1 && elapsed > 6) {
+        auto* target = static_cast<iLuxProp*>(map->GetEntityByName("online_qa_fair_target", eLuxEntityType_Prop));
+        if(target && target->GetBodyNum()) {
+            target->GetBody(0)->SetMass(0); target->GetBody(0)->SetPosition(origin + cVector3f(2, 0, 0));
+            NetLog("[NET/TEST] Host moved the late target once");
+        }
+        mFairnessTestStage = 2;
     }
 }
 // Field diagnostics for client reports that the local tests do not reproduce

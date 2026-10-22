@@ -11,7 +11,8 @@
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 11;
+// 12: enemies stream unreliable motion like props; older peers would drop it.
+constexpr uint16_t ProtocolVersion = 12;
 constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
 // ENet timeout outside map loads. ENet drops a peer once an unacknowledged

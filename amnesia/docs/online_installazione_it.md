@@ -1,6 +1,6 @@
 # Installare e giocare ad Amnesia Online Co-op
 
-Build sperimentale Windows x64, protocollo 11, due giocatori. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono nei documenti QA dentro `source.zip`.
+Build sperimentale Windows x64, protocollo 12, due giocatori. Il protocollo 12 trasmette i movimenti dei nemici come quelli degli oggetti; host e client devono usare la stessa build. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono nei documenti QA dentro `source.zip`.
 
 L'aggiornamento del 6 ottobre corregge la previsione del client sui gradini:
 controlla lo spazio per il corpo entro l'altezza massima originale e accompagna

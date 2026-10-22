@@ -96,6 +96,12 @@ private:
     uint32_t mEntitySequence = 0;
     std::map<uint32_t, std::chrono::steady_clock::time_point> mEntityMotionAt;
     std::map<uint32_t, bool> mEntityMotionSettled;
+    // Last time each entity was sent; ReplicateWorld serves the stalest first.
+    std::map<uint32_t, std::chrono::steady_clock::time_point> mEntitySentAt;
+    struct PendingEntity {
+        online::EntityState state; std::vector<uint8_t> bytes;
+        bool changed, settling, propertiesChanged, liveMover;
+    };
     std::map<uint32_t, int> mReplicaIDs;
     struct PropMotion {
         online::EntityState target;
@@ -219,6 +225,10 @@ private:
     bool mHasLastLocalFeet = false;
     std::chrono::steady_clock::time_point mLastSnapLogAt, mLanternDarkSince, mLanternDiagAt;
     bool mTestNoticeLogged[2] = {false, false};
+    // AMNESIA_NET_TEST_FAIRNESS: a rarely changing entity among 80 constant movers.
+    void UpdateFairnessTest(cLuxMap* map);
+    unsigned mFairnessTestStage = 0;
+    std::chrono::steady_clock::time_point mFairnessTestAt;
     // AMNESIA_NET_TEST_SPAWN: P2 recreated while the host is boxed in a crawl space.
     bool mSpawnTestStarted = false;
     std::chrono::steady_clock::time_point mSpawnTestAt;
