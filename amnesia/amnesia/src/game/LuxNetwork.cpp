@@ -39,6 +39,7 @@
 #include "sound/SoundChannel.h"
 #include "scene/Node3D.h"
 #include <cstdio>
+#include <ctime>
 #include "impl/ImGuiConsole.h"
 #include <cstdlib>
 #include <cmath>
@@ -69,9 +70,25 @@ bool Port(const std::string& text, uint16_t& value) {
     if (!number || number > 65535) return false;
     value = uint16_t(number); return true;
 }
+// Local wall-clock time, HH:MM:SS.mmm. The [t=...] counters are per-PC
+// monotonic clocks; this is what lines up with the partner's hpl.log and with
+// tools/NetworkProbe.ps1 (PC clocks still differ by their own offset).
+static std::string LocalClock() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+    const int millis = int(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
+    std::tm local = {};
+    localtime_s(&local, &seconds);
+    char text[16];
+    std::snprintf(text, sizeof(text), "%02d:%02d:%02d.%03d", local.tm_hour, local.tm_min, local.tm_sec, millis);
+    return text;
+}
 void NetLog(const std::string& line) {
-    Log("%s\n", line.c_str());
-    cImGuiConsole::AddLog("%s", line.c_str());
+    std::string text = line;
+    if(line.compare(0, 10, "[NET/DIAG]") == 0 || line.compare(0, 16, "[NET/CONNECTION]") == 0 || line.compare(0, 14, "[NET/RECOVERY]") == 0)
+        text += " @" + LocalClock();
+    Log("%s\n", text.c_str());
+    cImGuiConsole::AddLog("%s", text.c_str());
 }
 online::Transform PackTransform(const cMatrixf& matrix) {
     online::Transform result;
