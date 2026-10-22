@@ -219,6 +219,9 @@ private:
     bool mHasLastLocalFeet = false;
     std::chrono::steady_clock::time_point mLastSnapLogAt, mLanternDarkSince, mLanternDiagAt;
     bool mTestNoticeLogged[2] = {false, false};
+    // AMNESIA_NET_TEST_SPAWN: P2 recreated while the host is boxed in a crawl space.
+    bool mSpawnTestStarted = false;
+    std::chrono::steady_clock::time_point mSpawnTestAt;
     // AMNESIA_NET_TEST_LEVEL_DOOR: a level door with an authoring path
     // ("C:/SVN/...") must still produce a valid map announcement.
     bool mLevelDoorTestStarted = false;

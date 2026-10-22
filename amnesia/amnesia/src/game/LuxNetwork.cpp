@@ -292,6 +292,36 @@ void cLuxNetwork::Update(float timeStep) {
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_STAIRS")) UpdateStairsTest(gpBase->mpMapHandler->GetCurrentMap(),timeStep);
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_GATE")) UpdateGateTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_FLASHBACK")) UpdateFlashbackTest(gpBase->mpMapHandler->GetCurrentMap());
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_SPAWN") && !IsClientReplica() && !mSpawnTestStarted &&
+        mSession.Connected() && mSession.IsWorldApplied(mEpoch) && gpBase->mpPlayer2 && gpBase->mpMapHandler->GetCurrentMap()) {
+        // A crouch-height crawl space with no room around the host (as under the
+        // 15_prison_south hole): recreating P2 must not close the session.
+        const auto now = std::chrono::steady_clock::now();
+        if(!mSpawnTestAt.time_since_epoch().count()) mSpawnTestAt = now;
+        else if(now - mSpawnTestAt >= std::chrono::seconds(2)) {
+            mSpawnTestStarted = true;
+            cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
+            auto* world = map->GetPhysicsWorld();
+            const cVector3f origin(100, 30, 100);
+            world->SetWorldSize(cVector3f(-200,-100,-200), cVector3f(200,100,200));
+            auto box = [&](const char* name, cVector3f size, cVector3f position) {
+                auto* body = world->CreateBody(name, world->CreateBoxShape(size, NULL));
+                body->SetMass(0); body->SetPosition(origin + position); body->SetCollideCharacter(true);
+            };
+            box("online_qa_crawl_floor", cVector3f(4, .3f, 4), cVector3f(0, -.15f, 0));
+            box("online_qa_crawl_ceiling", cVector3f(4, .3f, 4), cVector3f(0, 1.45f, 0));
+            box("online_qa_crawl_wall_n", cVector3f(1.5f, 1.3f, .2f), cVector3f(0, .65f, -.65f));
+            box("online_qa_crawl_wall_s", cVector3f(1.5f, 1.3f, .2f), cVector3f(0, .65f, .65f));
+            box("online_qa_crawl_wall_e", cVector3f(.2f, 1.3f, 1.5f), cVector3f(.65f, .65f, 0));
+            box("online_qa_crawl_wall_w", cVector3f(.2f, 1.3f, 1.5f), cVector3f(-.65f, .65f, 0));
+            auto* host = gpBase->mpPlayer;
+            static_cast<cLuxMoveState_Normal*>(host->GetMoveStateData(eLuxMoveState_Normal))->SetCrouch(true);
+            host->GetCharacterBody()->SetFeetPosition(origin + cVector3f(0, .01f, 0));
+            NetLog("[NET/TEST] Host crouched in a closed crawl space; recreating Player 2");
+            gpBase->mpMapHandler->DestroyPlayer2(map);
+            mRemotePlayer2 = NULL;
+        }
+    }
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_LEVEL_DOOR") && !IsClientReplica() && !mLevelDoorTestStarted &&
         mSession.Connected() && mSession.IsWorldApplied(mEpoch) && gpBase->mpMapHandler->GetCurrentMap()) {
         // 12_storage's door back to 09_back_hall, verbatim from the original map.
@@ -590,20 +620,38 @@ bool cLuxNetwork::PlaceRemotePlayer2() {
     iPhysicsWorld* world = gpBase->mpMapHandler->GetCurrentMap()->GetPhysicsWorld();
     // Local co-op's unconditional one-metre offset can put P2 inside a wall.
     // Test the actual character shape against the host's world before spawning.
-    const float radii[] = { 1.0f, 0.8f, 1.3f };
-    for (float radius : radii) {
-        for (int direction = 0; direction < 8; ++direction) {
-            float angle = hostBody->GetYaw() + direction * 0.785398163f;
-            cVector3f feet = hostBody->GetFeetPosition() + cVector3f(std::cos(angle) * radius, 0.03f, -std::sin(angle) * radius);
-            cVector3f centre = feet + cVector3f(0, body->GetCurrentShape()->GetSize().y / 2, 0);
-            if (!world->CheckShapeWorldCollision(NULL, body->GetCurrentShape(), cMath::MatrixTranslate(centre), NULL, false, true, NULL, false)) {
-                body->SetFeetPosition(feet);
-                body->Update(0.001f);
-                return true;
+    auto fits = [&](const cVector3f& feet) {
+        const cVector3f centre = feet + cVector3f(0, body->GetCurrentShape()->GetSize().y / 2, 0);
+        return !world->CheckShapeWorldCollision(NULL, body->GetCurrentShape(), cMath::MatrixTranslate(centre), NULL, false, true, NULL, false);
+    };
+    auto place = [&](const cVector3f& feet) { body->SetFeetPosition(feet); body->Update(0.001f); };
+    // Small lifts clear uneven floors and steps; gravity settles the body.
+    const float lifts[] = { 0.03f, 0.2f, 0.4f };
+    const float radii[] = { 1.0f, 0.8f, 1.3f, 0.6f, 1.6f, 2.0f };
+    for (float lift : lifts) {
+        for (float radius : radii) {
+            for (int direction = 0; direction < 8; ++direction) {
+                float angle = hostBody->GetYaw() + direction * 0.785398163f;
+                cVector3f feet = hostBody->GetFeetPosition() + cVector3f(std::cos(angle) * radius, lift, -std::sin(angle) * radius);
+                if (fits(feet)) { place(feet); return true; }
             }
         }
     }
-    return false;
+    // Nothing free around the host -- a crawl tunnel or a shaft, such as the
+    // landing under the 15_prison_south hole (2026-10-22: every load of that
+    // save closed the session). Online players never collide with each other,
+    // and the host's own shape already fits where it stands, so share that
+    // spot, crouching P2 when the host is crouched under a low ceiling. Never
+    // refuse: a slightly imperfect spawn is pushed out by the character body,
+    // while closing the session made the save unplayable.
+    const cVector3f hostFeet = hostBody->GetFeetPosition() + cVector3f(0, 0.01f, 0);
+    if (hostBody->GetActiveSize() == 1 && mRemotePlayer2->GetCurrentMoveState() == eLuxMoveState_Normal) {
+        static_cast<cLuxMoveState_Normal*>(mRemotePlayer2->GetMoveStateData(eLuxMoveState_Normal))->SetCrouch(true);
+    }
+    NetLog(std::string("[NET/PLAYER] Remote spawn fallback: sharing the host position") +
+        (body->GetActiveSize() == 1 ? " crouched" : "") + (fits(hostFeet) ? "" : " (shape still touching; body will resolve)"));
+    place(hostFeet);
+    return true;
 }
 void cLuxNetwork::Reset() {
     mRemotePlayer2 = NULL; mPreviousButtons = 0;
