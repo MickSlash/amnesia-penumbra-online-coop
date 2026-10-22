@@ -14,6 +14,10 @@ namespace online {
 constexpr uint16_t ProtocolVersion = 11;
 constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
+// ENet timeout outside map loads. ENet drops a peer once an unacknowledged
+// reliable packet is this old; 3 s let a short host stall (an unannounced load,
+// a slow frame) end the session. A dead peer is still detected within 12 s.
+constexpr uint32_t OrdinaryTimeoutMinMs = 6000, OrdinaryTimeoutMaxMs = 12000;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
 constexpr uint32_t TransportDatagramBytes = 1200;
 constexpr uint32_t ConservativeDatagramBytes = 576;
@@ -176,6 +180,10 @@ public:
     bool Connected() const { return ready_; }
     Role GetRole() const { return role_; }
     uint32_t Ping() const;
+    // A map load is in progress on either side (host notice until world applied).
+    bool Loading() const { return ready_ && loading_; }
+    // Milliseconds since the last application packet from the peer; 0 offline.
+    uint32_t ApplicationAgeMs() const;
     void SetLobbyReady(bool ready);
     bool LobbyReady() const { return Connected() && localReady_ && remoteReady_; }
     bool LocalReady() const { return localReady_; }

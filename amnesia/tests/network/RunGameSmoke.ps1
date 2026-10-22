@@ -112,6 +112,10 @@ try {
         if($LevelDoor) {
             $marker = if($role -eq 'host') { 'Announced epoch=2 file=maps/main/09_back_hall.map' } else { 'Replica loaded epoch=2 file=maps/main/09_back_hall.map' }
             if(!$log.Contains($marker) -or $log.Contains('Cannot announce map')) {throw "Missing $role level door proof: $marker"}
+            if($role -eq 'client') {
+                foreach($notice in @('Client showed waiting for host notice','Client showed host loading notice')) { if(!$log.Contains($notice)) {throw "Missing client notice: $notice"} }
+                if($log.Contains('Connection lost; campaign paused for recovery')) {throw 'Client dropped the session during the host stall or load'}
+            }
             Write-Output "PASS: $role level door with authoring path reached 09_back_hall"
         }
         if($Flashback) {

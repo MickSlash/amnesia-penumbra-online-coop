@@ -299,6 +299,10 @@ void cLuxNetwork::Update(float timeStep) {
         if(!mLevelDoorTestAt.time_since_epoch().count()) mLevelDoorTestAt = now;
         else if(now - mLevelDoorTestAt >= std::chrono::seconds(2)) {
             mLevelDoorTestStarted = true;
+            // First a 4 s game-thread stall with no load notice (as when the notice
+            // was lost on 2026-10-22): the client must wait, not drop the session.
+            NetLog("[NET/TEST] Host game thread stalled 4 s without load notice");
+            std::this_thread::sleep_for(std::chrono::seconds(4));
             NetLog("[NET/TEST] Host using level door map file C:/SVN/amnesia/redist/maps/main/ch01/09_back_hall.map");
             gpBase->mpMapHandler->ChangeMap("C:/SVN/amnesia/redist/maps/main/ch01/09_back_hall.map", "", "", "");
         }
@@ -605,6 +609,7 @@ void cLuxNetwork::Reset() {
     mRemotePlayer2 = NULL; mPreviousButtons = 0;
     mInputAccumulator = 0;
     mPendingLookYaw = mPendingLookPitch = 0; mHasLookSequence = false;
+    mHasLastLocalFeet = false;
     mClientObjectLook = mClientScriptLook = mRemoteRotate = mClientSharedIntro = false;
     mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0; mLastSnapshotAt = {};
     mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0;
@@ -864,7 +869,7 @@ std::string cLuxNetwork::ConnectionStatus() const {
     return "Entrambi pronti. L'host puo avviare la campagna. Ping: " + std::to_string(mSession.Ping()) + " ms";
 }
 void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
-    mPropMotion.clear();
+    mPropMotion.clear(); mHasLastLocalFeet = false;
     if(MapFingerprint(state.file) != state.fingerprint) {
         NetLog("[NET/MAP] Map/script content mismatch; both PCs need identical game files");
         mSession.Stop(); return;
@@ -1191,6 +1196,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             NetLog("[NET/TEST] Injected stale local lantern permissions on client");
         }
         ApplyReplica(gpBase->mpPlayer, local, true);
+        DiagnoseLocalReplica(local, now);
         if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT") && !mTestSnapshotBackupLogged &&
             mSession.SnapshotBackupsReceived() >= 15) {
             mTestSnapshotBackupLogged = true;
@@ -2169,6 +2175,60 @@ void cLuxNetwork::UpdateGateTest(cLuxMap* map) {
     } else if(mGateTestStage == 3 && elapsed(1500)) {
         NetLog(lurker->IsActive() ? "[NET/TEST] PASS gate closes once both players passed" : "[NET/TEST] FAILED gate did not close after both players passed");
         mGateTestStage = 4;
+    }
+}
+// Field diagnostics for client reports that the local tests do not reproduce
+// (2026-10-22: rubber banding at 40-50 ms, own lantern on but not lighting).
+// Both are rate-limited and describe the state, so the next hpl.log shows why.
+void cLuxNetwork::DiagnoseLocalReplica(const online::PlayerState& local, std::chrono::steady_clock::time_point now) {
+    const cVector3f feet(local.x / 1000.0f, local.y / 1000.0f, local.z / 1000.0f);
+    const bool movable = (local.flags & 4) && !(local.flags & (8 | 16 | 32));
+    if(mHasLastLocalFeet && movable) {
+        const float dx = feet.x - mLastLocalFeet.x, dz = feet.z - mLastLocalFeet.z;
+        const float jump = std::sqrt(dx * dx + dz * dz);
+        // Running covers ~0.08 m per frame; over 0.35 m in a frame is a visible
+        // snap. Teleports beyond 5 m are intended and snap by design.
+        if(jump > 0.35f && jump < 5.0f && now - mLastSnapLogAt >= std::chrono::seconds(2)) {
+            mLastSnapLogAt = now;
+            const auto poseAge = mSnapshots.empty() ? 0 : std::chrono::duration_cast<std::chrono::milliseconds>(now - mSnapshots.back().received).count();
+            NetLog("[NET/DIAG] Local position snapped " + std::to_string(int(jump * 1000)) + " mm; pending_inputs=" +
+                std::to_string(mPrediction.Pending()) + " rtt_ms=" + std::to_string(mSession.Ping()) +
+                " pose_age_ms=" + std::to_string(poseAge) + " vertical_pending=" + std::to_string(mVerticalPrediction.Pending() ? 1 : 0));
+        }
+    }
+    mLastLocalFeet = feet; mHasLastLocalFeet = true;
+
+    auto* lantern = gpBase->mpPlayer->GetHelperLantern();
+    if(!lantern->IsActive()) { mLanternDarkSince = {}; return; }
+    auto* light = lantern->GetLight();
+    auto* hands = gpBase->mpPlayer->GetHands();
+    auto* held = hands ? hands->GetCurrentHandObject() : NULL;
+    const bool lit = light && light->GetDiffuseColor().r > 0.01f;
+    const bool inHand = held && held->GetName() == "lantern";
+    if(lit && inHand) { mLanternDarkSince = {}; return; }
+    if(!mLanternDarkSince.time_since_epoch().count()) { mLanternDarkSince = now; return; }
+    if(now - mLanternDarkSince < std::chrono::milliseconds(1500) || now - mLanternDiagAt < std::chrono::seconds(10)) return;
+    mLanternDiagAt = now;
+    NetLog("[NET/DIAG] Own lantern active but lit=" + std::to_string(lit) + " in_hand=" + std::to_string(inHand) +
+        " held=" + (held ? held->GetName() : std::string("none")) + " light_r=" + std::to_string(light ? light->GetDiffuseColor().r : -1) +
+        " oil=" + std::to_string(gpBase->mpPlayer->GetLampOil()) + " state=" + std::to_string(int(gpBase->mpPlayer->GetCurrentState())) +
+        " player_active=" + std::to_string(gpBase->mpPlayer->IsActive()));
+}
+// The host's map load freezes the client's world; say so instead of leaving a
+// still picture that looks like a crash. Also covers a host that stopped
+// sending without a load notice. The client's own load has its load screen.
+void cLuxNetwork::OnDraw(float afFrameTime) {
+    if(!IsClientReplica() || !mSession.Connected() || !gpBase->mpGameHudSet || !gpBase->mpDefaultFont ||
+        !gpBase->mpMapHandler->GetCurrentMap()) return;
+    const wchar_t* text = NULL;
+    if(mSession.Loading()) text = _W("L'host sta caricando la mappa...");
+    else if(mSession.ApplicationAgeMs() > 1500) text = _W("In attesa dell'host...");
+    if(!text) return;
+    gpBase->mpGameHudSet->DrawFont(gpBase->mpDefaultFont, cVector3f(400, 540, 30), cVector2f(18, 18), cColor(0.9f, 0.9f),
+        eFontAlign_Center, eGuiMaterial_FontNormal, text);
+    if(mSmokeSeconds && !mTestNoticeLogged[mSession.Loading() ? 0 : 1]) {
+        mTestNoticeLogged[mSession.Loading() ? 0 : 1] = true;
+        NetLog(mSession.Loading() ? "[NET/TEST] Client showed host loading notice" : "[NET/TEST] Client showed waiting for host notice");
     }
 }
 // Regressions for the 2026-10-21 report. The host starts a real flashback (the

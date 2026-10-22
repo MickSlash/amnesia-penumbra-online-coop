@@ -392,7 +392,7 @@ void Session::Stop() {
 void Session::SetLoading(bool loading) {
     if(loading && !loading_) loadingStarted_ = enet_time_get();
     loading_ = loading;
-    if(peer_) enet_peer_timeout(peer_, loading ? 32 : 8, loading ? 30000 : 3000, loading ? 45000 : 10000);
+    if(peer_) enet_peer_timeout(peer_, loading ? 32 : 8, loading ? 30000 : OrdinaryTimeoutMinMs, loading ? 45000 : OrdinaryTimeoutMaxMs);
 }
 void Session::BeginMapLoad() {
     if(!ready_) return;
@@ -400,6 +400,16 @@ void Session::BeginMapLoad() {
     SetLoading(true);
     if(notify) {
         Send(Header(Message::Loading),0,true);
+        // The reliable copy is ordered behind every earlier reliable packet on
+        // channel 0; if one of those was lost, the host blocks in the load and
+        // cannot retransmit, so the client never learns it should wait (2026-10-22:
+        // client timed out 2.5 s into a 15_prison_north load). Unsequenced copies
+        // bypass that ordering; duplicates are harmless (SetLoading is idempotent).
+        for(int copy = 0; copy < 3; ++copy) {
+            const auto bytes = Header(Message::Loading);
+            if(ENetPacket* packet = enet_packet_create(bytes.data(), bytes.size(), ENET_PACKET_FLAG_UNSEQUENCED))
+                if(enet_peer_send(peer_, 0, packet) != 0) enet_packet_destroy(packet);
+        }
         // Flush the loading notice before entering code that can block for seconds.
         enet_host_flush(host_);
         log_("[NET/MAP] Loading barrier entered; transport grace enabled");
@@ -666,7 +676,7 @@ void Session::Poll() {
             entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
             rttWindowMin_ = rttPreviousMin_ = rttWindowAt_ = 0;
-            enet_peer_timeout(peer_, 8, 3000, 10000);
+            enet_peer_timeout(peer_, 8, OrdinaryTimeoutMinMs, OrdinaryTimeoutMaxMs);
             // BulkReady regulates the large reliable stream. RTT spikes during
             // loading/ACK bursts must not make ENet discard every player pose.
             enet_peer_throttle_configure(peer_, ENET_PEER_PACKET_THROTTLE_INTERVAL, ENET_PEER_PACKET_THROTTLE_SCALE, 0);
@@ -750,6 +760,7 @@ bool Session::ReadInput(PlayerInput& input) const {
     input = input_; return true;
 }
 uint32_t Session::Ping() const { return peer_ && ready_ ? peer_->roundTripTime : 0; }
+uint32_t Session::ApplicationAgeMs() const { return peer_ && ready_ ? uint32_t(enet_time_get() - lastPacket_) : 0; }
 uint32_t Session::RttBaseline() const {
     if(!rttPreviousMin_) return rttWindowMin_;
     return rttWindowMin_ ? std::min<uint32_t>(rttWindowMin_,rttPreviousMin_) : rttPreviousMin_;

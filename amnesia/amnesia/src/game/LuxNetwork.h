@@ -16,6 +16,7 @@ public:
     ~cLuxNetwork();
     void OnStart();
     void Update(float afTimeStep);
+    void OnDraw(float afFrameTime);
     void OnExit();
     online::Session& GetSession() { return mSession; }
     // Called once in the P2 simulation tick, never from the renderer.
@@ -213,6 +214,11 @@ private:
     std::chrono::steady_clock::time_point mFlashbackTestAt;
     cGuiGfxElement* mTestDeadGfx = NULL; // deliberately dangling after DestroyGfx
     int mTestDeadGfxFrames = 0;
+    void DiagnoseLocalReplica(const online::PlayerState& local, std::chrono::steady_clock::time_point now);
+    cVector3f mLastLocalFeet;
+    bool mHasLastLocalFeet = false;
+    std::chrono::steady_clock::time_point mLastSnapLogAt, mLanternDarkSince, mLanternDiagAt;
+    bool mTestNoticeLogged[2] = {false, false};
     // AMNESIA_NET_TEST_LEVEL_DOOR: a level door with an authoring path
     // ("C:/SVN/...") must still produce a valid map announcement.
     bool mLevelDoorTestStarted = false;
