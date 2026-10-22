@@ -224,9 +224,28 @@ void cLuxNetwork::Update(float timeStep) {
     }
     const auto connectionNow = std::chrono::steady_clock::now();
     online::PlayerInput freshInput;
-    if(mSession.GetRole() == online::Role::Host && mSession.ReadInput(freshInput)) { mInputLeaseSeen = true; mInputLeaseAt = connectionNow; }
-    mInputLeasePaused = mSession.GetRole() == online::Role::Host && mSession.IsWorldApplied(mEpoch) &&
-        mInputLeaseSeen && connectionNow - mInputLeaseAt > std::chrono::seconds(1);
+    const bool hostRole = mSession.GetRole() == online::Role::Host;
+    if(hostRole && mSession.ReadInput(freshInput)) {
+        // Field diagnostic: input that stopped arriving for a while, i.e. a
+        // latency spike on the path or a stalled client. ReadInput already
+        // treats input older than 250 ms as missing.
+        if(mInputLeaseSeen && connectionNow - mInputLeaseAt > std::chrono::milliseconds(500))
+            NetLog("[NET/DIAG] Client input resumed after a " +
+                std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(connectionNow - mInputLeaseAt).count() + 250) +
+                " ms gap; rtt_ms=" + std::to_string(mSession.Ping()));
+        mInputLeaseSeen = true; mInputLeaseAt = connectionNow;
+    }
+    // Pause the campaign only after 3 s without client input. With 1 s, every
+    // latency spike past a second froze the whole world for both players; on
+    // resume the client saw doors, enemies and its partner seconds late and was
+    // pulled back to where the host last had it (2026-10-22 report). Between
+    // 250 ms and 3 s the host keeps simulating and P2 simply stands still.
+    const bool leasePaused = hostRole && mSession.IsWorldApplied(mEpoch) &&
+        mInputLeaseSeen && connectionNow - mInputLeaseAt > std::chrono::seconds(3);
+    if(leasePaused != mInputLeasePaused)
+        NetLog(leasePaused ? "[NET/DIAG] No client input for 3 s; campaign paused until it returns" :
+            "[NET/DIAG] Client input returned; campaign resumed");
+    mInputLeasePaused = leasePaused;
     if(mSession.Connected()) {
         if(mConnectionGeneration != mSession.Generation()) {
             mConnectionGeneration = mSession.Generation();
@@ -679,6 +698,15 @@ void cLuxNetwork::Reset() {
 void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
     if(!mSession.Connected()) { mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0; return; }
     if (IsClientReplica() && (!mEpoch || !mReceivedSnapshot || !mBaselineApplied)) return;
+    // AMNESIA_NET_TEST_INPUT_GAP: a 2 s gap must not pause the host; a 4 s gap must.
+    if(IsClientReplica() && mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_INPUT_GAP")) {
+        const float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - mSmokeStart).count();
+        if((elapsed >= 14 && elapsed < 16) || (elapsed >= 22 && elapsed < 26)) {
+            if(!mTestInputGapLogged) { mTestInputGapLogged = true; NetLog("[NET/TEST] Client withholding input"); }
+            return;
+        }
+        mTestInputGapLogged = false;
+    }
     if(IsClientReplica() && (mClientDead || mClientSharedIntro)) { input.forward = input.strafe = 0; input.buttons = 0; input.lookYaw = input.lookPitch = 0; }
     if(IsClientReplica() && !mTestMovement) { input.sequence = mInputSequence + 1; mPrediction.Push(input,timeStep); }
     const bool jumpEdge=((input.buttons^mLocalInputButtons)&1)!=0;

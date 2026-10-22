@@ -17,6 +17,7 @@ param(
     [switch]$LevelDoor,
     [switch]$Spawn,
     [switch]$Fairness,
+    [switch]$InputGap,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
@@ -27,7 +28,7 @@ if ($Media) { $Campaign = $true }
 if ($Campaign) { $Replication = $true }
 if ($Enemy) { $MapOnly = $true }
 if ($OnlineMenu) { $MapOnly = $true }
-if ($VisibilityProps -or $Effects -or $Stairs -or $Gate -or $Flashback -or $LevelDoor -or $Spawn -or $Fairness) { $MapOnly = $true }
+if ($VisibilityProps -or $Effects -or $Stairs -or $Gate -or $Flashback -or $LevelDoor -or $Spawn -or $Fairness -or $InputGap) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $repoPath = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
@@ -45,7 +46,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS','AMNESIA_NET_TEST_STAIRS','AMNESIA_NET_TEST_GATE','AMNESIA_NET_TEST_FLASHBACK','AMNESIA_NET_TEST_LEVEL_DOOR','AMNESIA_NET_TEST_SPAWN','AMNESIA_NET_TEST_FAIRNESS')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS','AMNESIA_NET_TEST_STAIRS','AMNESIA_NET_TEST_GATE','AMNESIA_NET_TEST_FLASHBACK','AMNESIA_NET_TEST_LEVEL_DOOR','AMNESIA_NET_TEST_SPAWN','AMNESIA_NET_TEST_FAIRNESS','AMNESIA_NET_TEST_INPUT_GAP')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -73,6 +74,7 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_LEVEL_DOOR', $(if ($LevelDoor -and $role -eq 'host') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_SPAWN', $(if ($Spawn -and $role -eq 'host') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_FAIRNESS', $(if ($Fairness) { '1' } else { $null }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_INPUT_GAP', $(if ($InputGap -and $role -eq 'client') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DRIVE_FILE', $null)
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$(if ($role -eq 'client' -and $ClientPort -gt 0) { $ClientPort } else { $Port }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ADDRESS', '127.0.0.1')
@@ -112,6 +114,13 @@ try {
             if(!$log.Contains($marker) -or $log.Contains('FAILED stairs')) {throw "Missing $role stairs regression proof"}
             if($role -eq 'host' -and !$log.Contains('PASS missing footstep data safely initialized')) {throw 'Missing sound failure safety proof'}
             Write-Output "PASS: $role native staircase ascent, descent and clean exit"
+        }
+        if($InputGap -and $role -eq 'host') {
+            $gaps = [regex]::Matches($log, 'Client input resumed after a (\d+) ms gap') | ForEach-Object { [int]$_.Groups[1].Value }
+            $pauses = ([regex]::Matches($log, 'No client input for 3 s; campaign paused')).Count
+            if(@($gaps | Where-Object { $_ -ge 1500 -and $_ -lt 3000 }).Count -lt 1) {throw 'Short input gap was not logged'}
+            if($pauses -ne 1 -or !$log.Contains('Client input returned; campaign resumed')) {throw "Expected exactly one pause (long gap only), got $pauses"}
+            Write-Output 'PASS: host kept running through a 2 s input gap and paused only for the 4 s one'
         }
         if($Fairness) {
             $marker = if($role -eq 'host') { 'Host moved the late target once' } else { 'PASS late entity update reached client despite 80 moving props' }

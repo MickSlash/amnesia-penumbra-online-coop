@@ -252,7 +252,7 @@ Hello/Welcome e Peer scambiano identità di ripresa, porta e stato Pronto. La
 configurazione conserva l'identità locale; la sessione ammette il precedente
 partner dopo una disconnessione e dopo inversione dei ruoli. L'identità evita
 riassegnazioni accidentali dello slot: non costituisce autenticazione crittografica.
-La perdita di input per oltre un secondo sospende la simulazione; la nuova map
+La perdita di input per oltre tre secondi sospende la simulazione (prima era un secondo: ogni picco di latenza congelava il mondo per entrambi); fra 250 ms e 3 s il P2 dell'host resta fermo. Pause, ripresa e buchi di input oltre 500 ms sono registrati come `[NET/DIAG]`; la nuova map
 epoch riavvia questa verifica dopo il primo input, evitando un'attesa circolare
 tra baseline e input. Il mondo e P2 sono conservati durante il recupero.
 
