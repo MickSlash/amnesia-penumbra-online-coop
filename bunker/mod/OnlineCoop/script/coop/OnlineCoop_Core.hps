@@ -1,0 +1,335 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Online co-op core for Amnesia: The Bunker.
+//
+// The game's script API has no sockets, so networking lives in a separate
+// process (the OnlineCoop bridge). The two talk through two small XML files
+// in "<Documents>/My Games/Amnesia The Bunker/OnlineCoop/":
+//
+//   game_out.xml  written by the game, read by the bridge
+//   game_in.xml   written by the bridge (temp file + rename), read by the game
+//
+// Every message carries a sequence number, so a file read twice, or read
+// half-written, is simply ignored. Without the bridge (no folder) the core
+// stays idle and the game plays exactly as normal.
+//
+// A bridge may serve one game profile only, in "OnlineCoop/<profile>/": two
+// game instances on one PC (tests) then never share files. The plain
+// "OnlineCoop/" folder is used when no profile folder exists.
+//
+// Every attribute written in game_out.xml reaches the other game as
+// "Peer<Name>" in game_in.xml (the bridge forwards them generically).
+
+#include "coop/OnlineCoop_Avatar.hps"
+
+//----------------------------------------------------------------------------------------
+
+const int kCoopIpcProtocol = 1;
+// Heartbeat period. The bridge echoes each one, so this also bounds how
+// stale the measured round trip can get.
+const uint kCoopWriteIntervalMs = 50;
+// How often the summary line is logged.
+const uint kCoopStatsIntervalMs = 10000;
+// How often the core looks for the bridge folder while it is missing.
+const uint kCoopProbeIntervalMs = 2000;
+
+//----------------------------------------------------------------------------------------
+
+class cCoopCore
+{
+	//------------------------------------------------------------
+
+	// Runs at module start and again after every save is loaded: the engine
+	// stores a module's script properties in save files and restores them,
+	// so a loaded save brings back the state of an old session (with null
+	// XML handles, which cannot be saved). Everything is rebuilt here.
+	void Init()
+	{
+		mlLastInitTry = cSystem_GetApplicationTime();
+		mbBridgeFolder = false; mbWarnedProto = false; mbReadThisFrame = false;
+		mlLastProbe = 0; mlLastWrite = 0; mlOutSeq = 0; mlInSeq = 0;
+		msNet = "Idle"; msPeerName = ""; msPeerMap = ""; mbPeerPresent = false; mlNetRtt = -1;
+		mvPeerPos = cVector3f_Zero; mvPeerFeet = cVector3f_Zero; mfPeerYaw = 0; mbPeerCrouch = false;
+		msMapName = "";
+		mAvatar.Reset();
+
+		// The engine's tString exposes only length()/resize(): string work
+		// goes through the cString_* helpers.
+		msSharedDir = cSystem_GetSystemSpecialPath(eSystemPath_Personal);
+		tString sLast = cString_To8Char(cString_GetLastCharW(msSharedDir));
+		if (sLast != "/" && sLast != "\\")
+			msSharedDir = msSharedDir + cString_To16Char("/");
+		msSharedDir = msSharedDir + cString_To16Char("My Games/Amnesia The Bunker/OnlineCoop/");
+		msProfile = ProfileName();
+		msProfileDir = msSharedDir + cString_To16Char(msProfile + "/");
+		SelectIpcDir(msSharedDir);
+
+		// Two distinct seed documents: the resource manager may cache by
+		// name, and the two channels must never share one document.
+		@mpOutDoc = cResources_LoadXmlDocument("coop_ipc_out.cfg");
+		@mpInDoc = cResources_LoadXmlDocument("coop_ipc_in.cfg");
+
+		Log("[COOP] Online Co-op core 0.3.0 loaded; profile '" + msProfile + "'; ipc folder '" + cString_To8Char(msProfileDir)
+			+ "' or '" + cString_To8Char(msSharedDir) + "'"
+			+ (mpOutDoc is null || mpInDoc is null ? " (seed documents missing, core disabled)" : "") + "\n");
+		ResetStats(cSystem_GetApplicationTime());
+	}
+
+	//------------------------------------------------------------
+
+	// The game profile (the -user name), from "<profile>_user_settings.cfg".
+	tString ProfileName()
+	{
+		cConfigFile@ pCfg = cLux_GetUserConfig();
+		if (pCfg is null) return "";
+		tString sFile = cString_To8Char(cString_GetFileNameW(pCfg.GetFileLocation()));
+		const tString sSuffix = "_user_settings.cfg";
+		int lLen = int(sFile.length()) - int(sSuffix.length());
+		if (lLen <= 0 || cString_Sub(sFile, lLen) != sSuffix) return "";
+		return cString_Sub(sFile, 0, lLen);
+	}
+
+	void SelectIpcDir(const tWString &in asDir)
+	{
+		msIpcDir = asDir;
+		msOutFile = msIpcDir + cString_To16Char("game_out.xml");
+		msInFile = msIpcDir + cString_To16Char("game_in.xml");
+	}
+
+	//------------------------------------------------------------
+
+	// OnMapEnter is not called for the map a save loads into, so Update also
+	// follows the current map itself (TrackMap); both paths are idempotent.
+	void OnMapEnter(cLuxMap @apMap)
+	{
+		TrackMap(apMap is null ? "" : apMap.GetName());
+	}
+
+	void OnMapLeave(cLuxMap @apMap)
+	{
+		TrackMap("");
+	}
+
+	void TrackMap(const tString &in asMap)
+	{
+		if (asMap == msMapName) return;
+		Log("[COOP] Map '" + msMapName + "' -> '" + asMap + "'\n");
+		msMapName = asMap;
+		mAvatar.OnMapEnter();
+	}
+
+	//------------------------------------------------------------
+
+	void Update(float afTimeStep)
+	{
+		uint lNow = cSystem_GetApplicationTime();
+		if (mpOutDoc is null || mpInDoc is null)
+		{
+			// Fresh module after a save load (see Init). Retried at most every
+			// few seconds should the seed documents really be missing.
+			if (lNow - mlLastInitTry < kCoopProbeIntervalMs) return;
+			Init();
+			if (mpOutDoc is null || mpInDoc is null) return;
+		}
+		cLuxMap@ pMap = cLux_GetCurrentMap();
+		TrackMap(pMap is null ? "" : pMap.GetName());
+
+		if (!mbBridgeFolder)
+		{
+			if (lNow - mlLastProbe < kCoopProbeIntervalMs && mlLastProbe != 0)
+				return;
+			mlLastProbe = lNow;
+			if (msProfile != "" && cSystem_FolderExists(msProfileDir)) SelectIpcDir(msProfileDir);
+			else SelectIpcDir(msSharedDir);
+			mbBridgeFolder = cSystem_FolderExists(msIpcDir);
+			if (!mbBridgeFolder)
+				return;
+			Log("[COOP] Bridge folder found ('" + cString_To8Char(msIpcDir) + "'); channel active\n");
+			mAvatar.SetTuneFile(msIpcDir + cString_To16Char("avatar_tune.xml"));
+			ResetStats(lNow);
+		}
+
+		// The bridge answers each 50 ms heartbeat once: reading every other
+		// 60 Hz frame (~33 ms) sees every answer at half the file reads.
+		mbReadThisFrame = !mbReadThisFrame;
+		if (mbReadThisFrame) ReadInbound(lNow);
+		if (lNow - mlLastWrite >= kCoopWriteIntervalMs)
+		{
+			mlLastWrite = lNow;
+			WriteOutbound(lNow);
+		}
+		if (lNow - mlStatsStart >= kCoopStatsIntervalMs)
+		{
+			LogStats(lNow);
+			ResetStats(lNow);
+		}
+
+		// The main menu is a map too (its background scene): no avatar there.
+		bool bShow = mbPeerPresent && msMapName != "" && msMapName != "main_menu" && msPeerMap == msMapName;
+		mAvatar.Update(afTimeStep, bShow, mvPeerFeet, mfPeerYaw, mbPeerCrouch);
+	}
+
+	//------------------------------------------------------------
+
+	void WriteOutbound(uint alNow)
+	{
+		// The document node is the <CoopIpc> root element itself
+		// (verified in game): attributes go straight on it.
+		iXmlDocument@ pRoot = mpOutDoc;
+		++mlOutSeq;
+		pRoot.SetAttributeInt("Proto", kCoopIpcProtocol);
+		pRoot.SetAttributeInt("Seq", mlOutSeq);
+		pRoot.SetAttributeInt("AppTime", int(alNow));
+		pRoot.SetAttributeInt("LastInSeq", mlInSeq);
+		pRoot.SetAttributeString("Map", msMapName);
+		bool bInMap = msMapName != "";
+		pRoot.SetAttributeVector3f("PlayerPos", bInMap ? cLux_GetPlayer().GetCharacterBody().GetPosition() : cVector3f_Zero);
+		pRoot.SetAttributeVector3f("PlayerFeet", bInMap ? cLux_GetPlayer().GetCharacterBody().GetFeetPosition() : cVector3f_Zero);
+		pRoot.SetAttributeFloat("PlayerYaw", bInMap ? cLux_GetPlayer().GetCamera().GetYaw() : 0.0f);
+		// Character size index: 0 standing, 1 crouching (2 is crawling).
+		pRoot.SetAttributeInt("PlayerCrouch", bInMap ? cLux_GetPlayer().GetCharacterBody().GetActiveSize() : 0);
+		// Diagnostics: lets the bridges (and tests) see this game's view of
+		// the other player while the game log is locked.
+		pRoot.SetAttributeString("Avatar", mAvatar.Describe());
+
+		uint lStart = cSystem_GetApplicationTime();
+		bool bOk = mpOutDoc.SaveToFile(msOutFile);
+		mlIoMs += cSystem_GetApplicationTime() - lStart;
+		if (bOk) ++mlWrites; else ++mlWriteFails;
+	}
+
+	//------------------------------------------------------------
+
+	void ReadInbound(uint alNow)
+	{
+		if (!cSystem_FileExists(msInFile))
+			return;
+
+		uint lStart = cSystem_GetApplicationTime();
+		bool bOk = mpInDoc.CreateFromFile(msInFile);
+		mlIoMs += cSystem_GetApplicationTime() - lStart;
+		// A failed parse is normally a file caught mid-replace: next frame.
+		if (!bOk) { ++mlReadFails; return; }
+		++mlReads;
+
+		iXmlDocument@ pRoot = mpInDoc;
+		if (pRoot.GetAttributeInt("Proto", 0) != kCoopIpcProtocol)
+		{
+			if (!mbWarnedProto)
+			{
+				mbWarnedProto = true;
+				Warning("[COOP] Bridge speaks protocol " + pRoot.GetAttributeInt("Proto", 0) + ", expected " + kCoopIpcProtocol + "\n");
+			}
+			return;
+		}
+
+		int lSeq = pRoot.GetAttributeInt("Seq", 0);
+		if (lSeq <= mlInSeq)
+		{
+			// Same file read again, or a bridge restart (sequence reset).
+			if (lSeq < mlInSeq - 1000) mlInSeq = 0;
+			return;
+		}
+		mlInSeq = lSeq;
+		++mlInMessages;
+
+		int lEcho = pRoot.GetAttributeInt("EchoAppTime", -1);
+		if (lEcho >= 0 && uint(lEcho) <= alNow)
+		{
+			uint lRtt = alNow - uint(lEcho);
+			mlRttSum += lRtt;
+			++mlRttCount;
+			if (lRtt > mlRttMax) mlRttMax = lRtt;
+			if (lRtt < mlRttMin) mlRttMin = lRtt;
+		}
+
+		ReadNetwork(pRoot);
+	}
+
+	//------------------------------------------------------------
+
+	// Link state and the other player's state, as relayed by the bridge.
+	// Peer values are trusted only while the link is up: whether a reload
+	// clears attributes the bridge stopped writing is not guaranteed.
+	void ReadNetwork(iXmlDocument@ apRoot)
+	{
+		tString sNet = apRoot.GetAttributeString("Net", "Idle");
+		tString sPeer = apRoot.GetAttributeString("PeerName", "");
+		mlNetRtt = apRoot.GetAttributeInt("NetRtt", -1);
+		// PeerGame drops to 0 when the other game stops sending heartbeats,
+		// which also happens in its pause menu: the avatar then stays where it
+		// was (the bridge keeps relaying the last known state) and only leaves
+		// with a map change or the end of the session.
+		mbPeerPresent = sNet == "Connected" && apRoot.GetAttributeString("PeerMap", "") != "";
+		msPeerMap = mbPeerPresent ? apRoot.GetAttributeString("PeerMap", "") : "";
+		mvPeerPos = mbPeerPresent ? apRoot.GetAttributeVector3f("PeerPlayerPos", cVector3f_Zero) : cVector3f_Zero;
+		mvPeerFeet = mbPeerPresent ? apRoot.GetAttributeVector3f("PeerPlayerFeet", cVector3f_Zero) : cVector3f_Zero;
+		mfPeerYaw = mbPeerPresent ? apRoot.GetAttributeFloat("PeerPlayerYaw", 0.0f) : 0.0f;
+		mbPeerCrouch = mbPeerPresent && apRoot.GetAttributeInt("PeerPlayerCrouch", 0) > 0;
+
+		if (sNet != msNet || (sNet == "Connected" && sPeer != msPeerName))
+		{
+			Log("[COOP/NET] link " + msNet + " -> " + sNet + " (role " + apRoot.GetAttributeString("Role", "?")
+				+ (sNet == "Connected" ? ", peer '" + sPeer + "'" : "")
+				+ (sNet == "Rejected" ? ", reason: " + apRoot.GetAttributeString("NetError", "") : "") + ")\n");
+			msNet = sNet;
+			msPeerName = sPeer;
+		}
+	}
+
+	//------------------------------------------------------------
+
+	void LogStats(uint alNow)
+	{
+		Log("[COOP/IPC] " + (alNow - mlStatsStart) + " ms: writes=" + mlWrites + " write_fails=" + mlWriteFails
+			+ " reads=" + mlReads + " read_fails=" + mlReadFails + " bridge_msgs=" + mlInMessages
+			+ " rtt_ms min/avg/max=" + (mlRttCount > 0 ? ("" + mlRttMin + "/" + (mlRttSum / mlRttCount) + "/" + mlRttMax) : "-")
+			+ " io_ms=" + mlIoMs + " out_seq=" + mlOutSeq + " in_seq=" + mlInSeq + "\n");
+		Log("[COOP/NET] link=" + msNet + " net_rtt_ms=" + mlNetRtt + " peer='" + msPeerName + "' in_game=" + (mbPeerPresent ? "yes" : "no")
+			+ " peer_map='" + msPeerMap + "' peer_feet=" + mAvatar.FormatVec(mvPeerFeet) + " peer_yaw=" + cString_ToString(mfPeerYaw, 2) + "\n");
+		Log("[COOP/AVATAR] " + mAvatar.Describe() + "\n");
+	}
+
+	void ResetStats(uint alNow)
+	{
+		mlStatsStart = alNow;
+		mlWrites = 0; mlWriteFails = 0; mlReads = 0; mlReadFails = 0; mlInMessages = 0;
+		mlRttSum = 0; mlRttCount = 0; mlRttMax = 0; mlRttMin = 0xFFFFFFFF; mlIoMs = 0;
+	}
+
+	//------------------------------------------------------------
+
+	iXmlDocument@ mpOutDoc;
+	iXmlDocument@ mpInDoc;
+	tWString msSharedDir;
+	tWString msProfileDir;
+	tString msProfile = "";
+	tWString msIpcDir;
+	tWString msOutFile;
+	tWString msInFile;
+	tString msMapName = "";
+
+	uint mlLastInitTry = 0;
+	bool mbBridgeFolder = false;
+	bool mbWarnedProto = false;
+	bool mbReadThisFrame = false;
+
+	tString msNet = "Idle";
+	tString msPeerName = "";
+	tString msPeerMap = "";
+	cVector3f mvPeerPos = cVector3f_Zero;
+	cVector3f mvPeerFeet = cVector3f_Zero;
+	float mfPeerYaw = 0;
+	bool mbPeerCrouch = false;
+	cCoopAvatar mAvatar;
+	bool mbPeerPresent = false;
+	int mlNetRtt = -1;
+	uint mlLastProbe = 0;
+	uint mlLastWrite = 0;
+	int mlOutSeq = 0;
+	int mlInSeq = 0;
+
+	uint mlStatsStart = 0;
+	uint mlWrites, mlWriteFails, mlReads, mlReadFails, mlInMessages;
+	uint mlRttSum, mlRttCount, mlRttMax, mlRttMin, mlIoMs;
+}

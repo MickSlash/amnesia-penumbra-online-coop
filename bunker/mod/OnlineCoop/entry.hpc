@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<Content
+	Author="MickSlash"
+	Dependencies=""
+	Description_english="Online co-op for Amnesia: The Bunker (experimental). Needs the OnlineCoop bridge running next to the game; without it the game plays exactly as normal."
+	LauncherPic="LauncherPic.png"
+	Title="Online Co-op (experimental)"
+	Type="AddOn"
+	UID=""
+	Version="0.3.0"
+
+	LanguageFolder = "config/lang/"
+/>

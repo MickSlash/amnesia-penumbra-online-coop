@@ -1,0 +1,23 @@
+# game file|mod file, copied by InstallMod.ps1 and the launcher
+entities/character/player/animations/idle_stand.anm|entities/coop/anims/coop_partner_idle_stand.anm
+entities/character/player/animations/idle_stand.fbx|entities/coop/anims/coop_partner_idle_stand.fbx
+entities/character/player/animations/walk_fwd.anm|entities/coop/anims/coop_partner_walk_fwd.anm
+entities/character/player/animations/walk_fwd.fbx|entities/coop/anims/coop_partner_walk_fwd.fbx
+entities/character/player/animations/walk_bkwd.anm|entities/coop/anims/coop_partner_walk_bkwd.anm
+entities/character/player/animations/walk_bkwd.fbx|entities/coop/anims/coop_partner_walk_bkwd.fbx
+entities/character/player/animations/walk_strafe_left.anm|entities/coop/anims/coop_partner_walk_strafe_left.anm
+entities/character/player/animations/walk_strafe_left.fbx|entities/coop/anims/coop_partner_walk_strafe_left.fbx
+entities/character/player/animations/walk_strafe_right.anm|entities/coop/anims/coop_partner_walk_strafe_right.anm
+entities/character/player/animations/walk_strafe_right.fbx|entities/coop/anims/coop_partner_walk_strafe_right.fbx
+entities/character/player/animations/run_fwd.anm|entities/coop/anims/coop_partner_run_fwd.anm
+entities/character/player/animations/run_fwd.fbx|entities/coop/anims/coop_partner_run_fwd.fbx
+entities/character/player/animations/crouch_idle.anm|entities/coop/anims/coop_partner_crouch_idle.anm
+entities/character/player/animations/crouch_idle.fbx|entities/coop/anims/coop_partner_crouch_idle.fbx
+entities/character/player/animations/crouch_fwd.anm|entities/coop/anims/coop_partner_crouch_fwd.anm
+entities/character/player/animations/crouch_fwd.fbx|entities/coop/anims/coop_partner_crouch_fwd.fbx
+entities/character/player/animations/crouch_bkwd.anm|entities/coop/anims/coop_partner_crouch_bkwd.anm
+entities/character/player/animations/crouch_bkwd.fbx|entities/coop/anims/coop_partner_crouch_bkwd.fbx
+entities/character/player/animations/crouch_strafe_left.anm|entities/coop/anims/coop_partner_crouch_strafe_left.anm
+entities/character/player/animations/crouch_strafe_left.fbx|entities/coop/anims/coop_partner_crouch_strafe_left.fbx
+entities/character/player/animations/crouch_strafe_right.anm|entities/coop/anims/coop_partner_crouch_strafe_right.anm
+entities/character/player/animations/crouch_strafe_right.fbx|entities/coop/anims/coop_partner_crouch_strafe_right.fbx

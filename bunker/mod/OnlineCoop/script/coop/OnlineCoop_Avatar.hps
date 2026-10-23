@@ -1,0 +1,375 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// The other player's body in this game: the living French soldier's mesh
+// driven by the player's own full-body animations (entities/coop/
+// coop_partner.ent, built by tools/MakePartnerEntity.py), standing where the
+// other player's feet are and facing where they look.
+//
+// The entity is purely visual: static physics and no collision, so it can
+// never push the local player or props, and the network alone moves it.
+// Network samples arrive at 20 Hz; each frame the avatar eases towards the
+// latest one, and teleports when the gap is too large to be motion (map
+// load, respawn, a long network stall).
+
+//----------------------------------------------------------------------------------------
+
+const tString kCoopAvatarName = "OnlineCoop_PeerAvatar";
+const tString kCoopAvatarFile = "coop_partner.ent";
+// Fraction of the remaining gap closed per second (exponential easing):
+// at 20 Hz input this trails the sender by roughly 80 ms.
+const float kCoopAvatarFollowRate = 12.0f;
+const float kCoopAvatarSnapDistance = 3.0f;
+const float kCoopAvatarWalkSpeed = 0.4f;
+const float kCoopAvatarRunSpeed = 3.2f;
+// Mesh rotation relative to the camera yaw. The soldier_alive mesh faces +Z
+// while the camera looks down -Z at yaw 0: half a turn (verified in game;
+// Lambert's mesh, used before, faced the other way and needed none).
+const float kCoopAvatarYawOffset = 3.14159265f;
+const float kCoopDegToRad = 0.0174532925f;
+
+//----------------------------------------------------------------------------------------
+
+// A pose correction on one bone, applied after the animation: a fixed
+// rotation plus a swing that follows the walking rhythm (arms only play the
+// player's Body layer, which leaves them stiff; see MakePartnerEntity.py).
+// Each animation holds the arms differently, so a correction can be limited
+// to the animations whose name starts with msAnim; it fades in and out with
+// the animation crossfade.
+class cCoopBonePose
+{
+	tString msBone;
+	tString msAnim = "";     // animation name prefix, "" for all
+	cVector3f mvRotDeg;      // fixed rotation, degrees (XYZ order)
+	cVector3f mvSwingAxis;   // swing rotation axis (unit)
+	float mfSwingDeg = 0;    // swing amplitude at walking speed, signed
+	float mfWeight = 0;      // current blend, 0..1
+}
+
+cCoopBonePose@ CoopBonePose(const tString &in asBone, const tString &in asAnim, const cVector3f &in avRotDeg,
+	const cVector3f &in avSwingAxis = cVector3f(1, 0, 0), float afSwingDeg = 0)
+{
+	cCoopBonePose@ pPose = cCoopBonePose();
+	pPose.msBone = asBone; pPose.msAnim = asAnim; pPose.mvRotDeg = avRotDeg;
+	pPose.mvSwingAxis = avSwingAxis; pPose.mfSwingDeg = afSwingDeg;
+	return pPose;
+}
+
+//----------------------------------------------------------------------------------------
+
+class cCoopAvatar
+{
+	//------------------------------------------------------------
+
+	// Any avatar found on entering a map is a leftover: saves made while
+	// connected store it with the map (FullGameSave=false does not prevent
+	// that), and a loaded save brings it back frozen in its bind pose, under
+	// its name or a renumbered one. Remove them all; Update spawns a fresh one.
+	void OnMapEnter()
+	{
+		RemoveLeftovers();
+		mbSpawned = false;
+	}
+
+	void OnMapLeave()
+	{
+		mbSpawned = false;
+	}
+
+	// New session (module start or a loaded save, whose restored fields
+	// describe an avatar of another session): forget it and clean the map.
+	void Reset()
+	{
+		RemoveLeftovers();
+		mbSpawned = false; mbVisible = false; mbWarnedSpawn = false;
+		mvPos = cVector3f_Zero; mfYaw = 0; mfSpeed = 0; mvVel = cVector3f_Zero; msAnim = ""; mlSnaps = 0;
+	}
+
+	//------------------------------------------------------------
+
+	// abShow: the other player is connected, in game and on this map.
+	void Update(float afTimeStep, bool abShow, const cVector3f &in avFeet, float afYaw, bool abCrouch)
+	{
+		if (!abShow)
+		{
+			if (mbSpawned && mbVisible)
+			{
+				Entity_SetActive(msEntity, false);
+				mbVisible = false;
+				Log("[COOP/AVATAR] Hidden (other player left this map or the session)\n");
+			}
+			return;
+		}
+		if (!mbSpawned && !Spawn(avFeet, afYaw)) return;
+		if (!mbVisible)
+		{
+			Entity_SetActive(msEntity, true);
+			mbVisible = true;
+			mvPos = avFeet; mfYaw = afYaw;
+			Log("[COOP/AVATAR] Shown at " + FormatVec(avFeet) + "\n");
+		}
+
+		mfTargetYaw = afYaw;
+		cVector3f vGap = avFeet - mvPos;
+		float fGap = vGap.Length();
+		cVector3f vOld = mvPos;
+		if (fGap > kCoopAvatarSnapDistance)
+		{
+			mvPos = avFeet;
+			mfYaw = afYaw;
+			++mlSnaps;
+		}
+		else
+		{
+			float fT = cMath_Min(1.0f, afTimeStep * kCoopAvatarFollowRate);
+			mvPos = mvPos + vGap * fT;
+			mfYaw = mfYaw + AngleDelta(mfYaw, afYaw) * fT;
+		}
+
+		// Followed by ID: a save restoring an old avatar late, under any name,
+		// can never be mistaken for this one; such copies are swept below.
+		iLuxEntity@ pEntity = cLux_GetCurrentMap().GetEntityByID(mEntityID);
+		if (pEntity is null) { mbSpawned = false; return; }
+		uint lNow = cSystem_GetApplicationTime();
+		if (lNow - mlSweptAt >= 2000) { mlSweptAt = lNow; RemoveLeftovers(); }
+		cMatrixf mtx = cMath_MatrixRotateY(mfYaw + kCoopAvatarYawOffset);
+		mtx.SetTranslation(mvPos);
+		pEntity.SetMatrix(mtx);
+		ReadTune();
+		ApplyBonePoses(pEntity, afTimeStep);
+
+		// Locomotion from the eased horizontal velocity, smoothed again so
+		// that the 20 Hz input does not flicker between animations.
+		cVector3f vVel = afTimeStep > 0 ? (mvPos - vOld) * (1.0f / afTimeStep) : cVector3f_Zero;
+		vVel.y = 0;
+		mvVel = mvVel + (vVel - mvVel) * cMath_Min(1.0f, afTimeStep * 6.0f);
+		mfSpeed = mvVel.Length();
+		SetAnimation(PickAnimation(abCrouch));
+	}
+
+	// Player animations by direction of travel relative to where the other
+	// player looks (the network yaw, not the eased one, so a half turn does
+	// not briefly read as strafing): camera forward is (-sin, 0, -cos) of the
+	// yaw and right (cos, 0, -sin).
+	tString PickAnimation(bool abCrouch)
+	{
+		tString sPrefix = abCrouch ? "crouch" : "walk";
+		if (mfSpeed < kCoopAvatarWalkSpeed) return abCrouch ? "crouch_idle" : "idle_stand";
+		float fYaw = mfTargetYaw;
+		float fFwd = -mvVel.x * cMath_Sin(fYaw) - mvVel.z * cMath_Cos(fYaw);
+		float fSide = mvVel.x * cMath_Cos(fYaw) - mvVel.z * cMath_Sin(fYaw);
+		if (!abCrouch && mfSpeed > kCoopAvatarRunSpeed && fFwd > 0) return msRunAnim;
+		if (cMath_Abs(fFwd) >= cMath_Abs(fSide)) return sPrefix + (fFwd > 0 ? "_fwd" : "_back");
+		return sPrefix + (fSide > 0 ? "_right" : "_left");
+	}
+
+	//------------------------------------------------------------
+
+	tString Describe()
+	{
+		if (!mbSpawned) return "none";
+		return (mbVisible ? "shown" : "hidden") + " " + msEntity + " at " + FormatVec(mvPos) + " anim=" + msAnim + " speed=" + cString_ToString(mfSpeed, 2) + " snaps=" + mlSnaps;
+	}
+
+	//------------------------------------------------------------
+
+	// Destroys every entity named like an avatar except the live one.
+	void RemoveLeftovers()
+	{
+		cLuxMap@ pMap = cLux_GetCurrentMap();
+		if (pMap is null) return;
+		array<iLuxEntity@> vProps;
+		pMap.GetEntityArray("*", eLuxEntityType_Prop, "", vProps);
+		uint lPrefix = kCoopAvatarName.length();
+		array<tString> vNames;
+		for (uint i = 0; i < vProps.length(); ++i)
+		{
+			if (vProps[i] is null) continue;
+			tString sName = vProps[i].GetName();
+			if (mbSpawned && sName == msEntity) continue;
+			if (sName.length() >= lPrefix && cString_Sub(sName, 0, int(lPrefix)) == kCoopAvatarName)
+				vNames.push_back(sName);
+		}
+		for (uint i = 0; i < vNames.length(); ++i)
+			Entity_Destroy(vNames[i]);
+		if (vNames.length() > 0)
+			Log("[COOP/AVATAR] Removed " + vNames.length() + " avatar(s) left in map '" + pMap.GetName() + "' by a save\n");
+	}
+
+	bool Spawn(const cVector3f &in avFeet, float afYaw)
+	{
+		cLuxMap@ pMap = cLux_GetCurrentMap();
+		if (pMap is null) return false;
+		// A same-named entity would make CreateEntity add a renumbered twin.
+		RemoveLeftovers();
+		if (!mbTuned) DefaultPoses();
+		cMatrixf mtx = cMath_MatrixRotateY(afYaw + kCoopAvatarYawOffset);
+		mtx.SetTranslation(avFeet);
+		// A name unique to this spawn: no save can hold an entity called so.
+		msEntity = kCoopAvatarName + "_" + cSystem_GetApplicationTime();
+		pMap.CreateEntity(msEntity, kCoopAvatarFile, mtx, cVector3f(1, 1, 1));
+		mEntityID = pMap.GetEntityIDByName(msEntity);
+		if (!Entity_Exists(msEntity))
+		{
+			if (!mbWarnedSpawn)
+			{
+				mbWarnedSpawn = true;
+				Error("[COOP/AVATAR] Could not create the avatar from '" + kCoopAvatarFile + "'\n");
+			}
+			return false;
+		}
+		Prop_SetStaticPhysics(msEntity, true);
+		Entity_SetCollide(msEntity, false);
+		Entity_SetCollideCharacter(msEntity, false);
+		mbSpawned = true;
+		mbVisible = true;
+		mvPos = avFeet; mfYaw = afYaw; mfSpeed = 0; mvVel = cVector3f_Zero; msAnim = "";
+		SetAnimation("idle_stand");
+		Log("[COOP/AVATAR] Spawned '" + kCoopAvatarFile + "' as '" + msEntity + "' at " + FormatVec(avFeet) + "\n");
+		return true;
+	}
+
+	// The player animations are layered like the player's own body: the Body
+	// layer animation plus its LeftArm/RightArm companions (every locomotion
+	// animation in coop_partner.ent has both), started together.
+	void SetAnimation(const tString &in asAnim)
+	{
+		if (asAnim == msAnim) return;
+		// Keep abPlayTransition at its default (true): with false the entity
+		// stays in its bind pose (T-pose), verified in game.
+		Entity_PlayAnimation(msEntity, asAnim, 0.3f, true);
+		msAnim = asAnim;
+	}
+
+	//------------------------------------------------------------
+	// Bone pose corrections, tunable live: when "avatar_tune.xml" exists in
+	// the bridge folder it is re-read every second, e.g.
+	//   <CoopTune RunAnim="run_fwd">
+	//     <Bone Name="j_L_Arm_1" Anim="walk" Rot="0 0 60" SwingAxis="1 0 0" Swing="20" />
+	//   </CoopTune>
+	// Without the file the built-in defaults (DefaultPoses) apply.
+
+	// Tuned in game on the soldier_alive mesh with the player animations.
+	void DefaultPoses()
+	{
+		// Upper arms down along the body: the player's Body-layer animations
+		// hold them out (idle) or half raised (walk, run). Walking adds an
+		// opposite swing per arm; -15 on X keeps them from hanging behind the
+		// torso (tuned by eye, may be refined).
+		mvPoses.resize(0);
+		mvPoses.push_back(CoopBonePose("j_L_Arm_1", "idle", cVector3f(-15, 0, 55)));
+		mvPoses.push_back(CoopBonePose("j_R_Arm_1", "idle", cVector3f(-15, 0, 55)));
+		mvPoses.push_back(CoopBonePose("j_L_Arm_1", "walk", cVector3f(-15, 0, 30), cVector3f(1, 0, 0), 20));
+		mvPoses.push_back(CoopBonePose("j_R_Arm_1", "walk", cVector3f(-15, 0, 30), cVector3f(1, 0, 0), -20));
+		mvPoses.push_back(CoopBonePose("j_L_Arm_1", "run", cVector3f(-15, 0, 30)));
+		mvPoses.push_back(CoopBonePose("j_R_Arm_1", "run", cVector3f(-15, 0, 30)));
+	}
+
+	void SetTuneFile(const tWString &in asFile)
+	{
+		msTuneFile = asFile;
+		if (mpTuneDoc is null) @mpTuneDoc = cResources_LoadXmlDocument("coop_ipc_tune.cfg");
+	}
+
+	void ReadTune()
+	{
+		uint lNow = cSystem_GetApplicationTime();
+		if (mpTuneDoc is null || lNow - mlTuneReadAt < 1000) return;
+		mlTuneReadAt = lNow;
+		if (!cSystem_FileExists(msTuneFile) || !mpTuneDoc.CreateFromFile(msTuneFile))
+		{
+			if (mbTuned) { mbTuned = false; DefaultPoses(); }
+			return;
+		}
+		mbTuned = true;
+		array<cCoopBonePose@> vPoses;
+		cXmlNodeListIterator@ pIt = mpTuneDoc.GetChildIterator();
+		while (pIt.HasNext())
+		{
+			cXmlElement@ pEl = pIt.Next().ToElement();
+			if (pEl is null || pEl.GetValue() != "Bone") continue;
+			cCoopBonePose@ pose = cCoopBonePose();
+			pose.msBone = pEl.GetAttributeString("Name", "");
+			pose.msAnim = pEl.GetAttributeString("Anim", "");
+			pose.mvRotDeg = pEl.GetAttributeVector3f("Rot", cVector3f_Zero);
+			pose.mvSwingAxis = pEl.GetAttributeVector3f("SwingAxis", cVector3f(1, 0, 0));
+			pose.mfSwingDeg = pEl.GetAttributeFloat("Swing", 0);
+			vPoses.push_back(pose);
+		}
+		mvPoses = vPoses;
+		msRunAnim = mpTuneDoc.GetAttributeString("RunAnim", "run_fwd");
+		if (!mbTuneLogged) { mbTuneLogged = true; Log("[COOP/AVATAR] Live tuning active: " + mvPoses.length() + " bone poses\n"); }
+	}
+
+	void ApplyBonePoses(iLuxEntity@ apEntity, float afTimeStep)
+	{
+		cMeshEntity@ pMesh = apEntity.GetMeshEntity();
+		if (pMesh is null) return;
+		// Walking rhythm from the distance covered (about one arm cycle per
+		// 1.4 m stride pair), faded out when standing still.
+		mfStride += mfSpeed * afTimeStep;
+		float fSwing = cMath_Sin(mfStride * 4.5f) * cMath_Min(1.0f, mfSpeed / 1.4f);
+		// One combined correction per bone: the weighted rotations of all the
+		// poses on it (the animation's own 0.3 s crossfade sets the rate).
+		array<tString> vBones;
+		array<cMatrixf> vMats;
+		for (uint i = 0; i < mvPoses.length(); ++i)
+		{
+			cCoopBonePose@ pPose = mvPoses[i];
+			uint lPrefix = pPose.msAnim.length();
+			bool bActive = lPrefix == 0 || (msAnim.length() >= lPrefix && cString_Sub(msAnim, 0, int(lPrefix)) == pPose.msAnim);
+			pPose.mfWeight = cMath_Clamp(pPose.mfWeight + (bActive ? afTimeStep : -afTimeStep) / 0.3f, 0.0f, 1.0f);
+			int lIdx = vBones.find(pPose.msBone);
+			if (lIdx < 0) { vBones.push_back(pPose.msBone); vMats.push_back(cMatrixf_Identity); lIdx = int(vBones.length()) - 1; }
+			if (pPose.mfWeight <= 0) continue;
+			cMatrixf mtx = cMath_MatrixRotateXYZ(pPose.mvRotDeg * kCoopDegToRad);
+			if (pPose.mfSwingDeg != 0)
+				mtx = cMath_MatrixMul(mtx, cMath_MatrixRotateXYZ(pPose.mvSwingAxis * (pPose.mfSwingDeg * fSwing * kCoopDegToRad)));
+			vMats[lIdx] = cMath_MatrixMul(vMats[lIdx], cMath_MatrixSlerp(pPose.mfWeight, cMatrixf_Identity, mtx, true));
+		}
+		for (uint i = 0; i < vBones.length(); ++i)
+		{
+			cBoneState@ pBone = pMesh.GetBoneStateFromName(vBones[i]);
+			if (pBone is null) continue;
+			pBone.SetUsePostTransform(true);
+			pBone.SetPostTransform(vMats[i]);
+		}
+	}
+
+	// Shortest signed turn from afFrom to afTo, in (-pi, pi].
+	float AngleDelta(float afFrom, float afTo)
+	{
+		float fD = afTo - afFrom;
+		while (fD > 3.14159265f) fD -= 6.2831853f;
+		while (fD <= -3.14159265f) fD += 6.2831853f;
+		return fD;
+	}
+
+	tString FormatVec(const cVector3f &in avV)
+	{
+		return cString_ToString(avV.x, 2) + " " + cString_ToString(avV.y, 2) + " " + cString_ToString(avV.z, 2);
+	}
+
+	//------------------------------------------------------------
+
+	bool mbSpawned = false;
+	tString msEntity = "";
+	tID mEntityID;
+	uint mlSweptAt = 0;
+	bool mbVisible = false;
+	bool mbWarnedSpawn = false;
+	cVector3f mvPos = cVector3f_Zero;
+	float mfYaw = 0;
+	float mfTargetYaw = 0;
+	float mfSpeed = 0;
+	cVector3f mvVel = cVector3f_Zero;
+	tString msAnim = "";
+	array<cCoopBonePose@> mvPoses;
+	tString msRunAnim = "run_fwd";
+	float mfStride = 0;
+	tWString msTuneFile;
+	iXmlDocument@ mpTuneDoc;
+	uint mlTuneReadAt = 0;
+	bool mbTuneLogged = false;
+	bool mbTuned = false;
+	int mlSnaps = 0;
+}
