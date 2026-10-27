@@ -724,6 +724,19 @@ void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
         }
         mTestInputGapLogged = false;
     }
+    // AMNESIA_NET_TEST_LEAN: hold lean right; the host leans P2 and the roll
+    // must come back to this camera through the snapshot.
+    if(IsClientReplica() && mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_LEAN") && !mTestLeanLogged) {
+        const float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - mSmokeStart).count();
+        if(elapsed >= 12 && elapsed < 15) {
+            input.buttons |= 32;
+            mTestLeanMaxRoll = std::max(mTestLeanMaxRoll, std::fabs(gpBase->mpPlayer->GetCamera()->GetRoll()));
+        } else if(elapsed >= 15) {
+            mTestLeanLogged = true;
+            NetLog(std::string("[NET/TEST] ") + (mTestLeanMaxRoll > 0.05f ? "PASS" : "FAILED") +
+                " client lean reached the camera max_roll=" + std::to_string(mTestLeanMaxRoll));
+        }
+    }
     if(IsClientReplica() && (mClientDead || mClientSharedIntro)) { input.forward = input.strafe = 0; input.buttons = 0; input.lookYaw = input.lookPitch = 0; }
     if(IsClientReplica() && !mTestMovement) { input.sequence = mInputSequence + 1; mPrediction.Push(input,timeStep); }
     const bool jumpEdge=((input.buttons^mLocalInputButtons)&1)!=0;
@@ -807,6 +820,10 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
         player->ApplyNetworkLookAngles(input.yaw / 1000.0f, input.pitch / 1000.0f,
             freshLook ? input.lookYaw / 10000.0f : 0, freshLook ? input.lookPitch / 10000.0f : 0);
         mAppliedLookSequence = input.sequence; mHasLookSequence = true;
+        // Held keys, renewed every frame as in the local path. The lean's roll
+        // and head offset reach the client's camera through the snapshot.
+        if(buttons & 32) player->SetLean(1);
+        if(buttons & 16) player->SetLean(-1);
     }
     if ((buttons ^ mPreviousButtons) & 1) player->Jump((buttons & 1) != 0);
     if ((buttons ^ mPreviousButtons) & 2) player->Crouch((buttons & 2) != 0);

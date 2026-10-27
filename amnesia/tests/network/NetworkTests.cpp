@@ -685,12 +685,12 @@ int main(int argc, char** argv) {
     ScriptPreloadTest();
     MediaCodecTest();
     PlayerInput input; input.sequence = 0x12345678; input.tick = 42;
-    input.forward = -1000; input.strafe = 500; input.yaw = -3141; input.pitch = 1570; input.buttons = 15;
+    input.forward = -1000; input.strafe = 500; input.yaw = -3141; input.pitch = 1570; input.buttons = 63;
     input.lookYaw = -1234; input.lookPitch = 31420;
     auto bytes = EncodeInput(input); PlayerInput decoded;
     Check(bytes.size() == 30 && bytes[5] == 0x12 && bytes[8] == 0x78, "wire endian/size");
     Check(DecodeInput(bytes.data(), bytes.size(), decoded) && decoded.forward == -1000 && decoded.yaw == -3141 && decoded.sequence == input.sequence &&
-        decoded.lookYaw == -1234 && decoded.lookPitch == 31420 && decoded.buttons == 15, "roundtrip");
+        decoded.lookYaw == -1234 && decoded.lookPitch == 31420 && decoded.buttons == 63, "roundtrip");
     for (size_t n = 0; n < bytes.size(); ++n) Check(!DecodeInput(bytes.data(), n, decoded), "truncated input");
     bytes.push_back(0); Check(!DecodeInput(bytes.data(), bytes.size(), decoded), "trailing byte"); bytes.pop_back();
     bytes[3] = 99; Check(!DecodeInput(bytes.data(), bytes.size(), decoded), "version mismatch"); bytes[3] = ProtocolVersion;
@@ -739,6 +739,11 @@ int main(int argc, char** argv) {
     entityBytes.push_back(0); Check(!DecodeEntity(entityBytes.data(), entityBytes.size(), entityRead), "entity trailing byte");
     entity.file = "../secret.ent"; Check(EncodeEntity(entity).empty(), "entity asset traversal rejected");
     entity.file = "entities/box.ent"; entity.bodies.resize(33); Check(EncodeEntity(entity).empty(), "entity body count bounded");
+    entity.bodies.resize(1); entity.scale = {{-1000, -1000, -1000}};
+    entityBytes = EncodeEntity(entity);
+    Check(DecodeEntity(entityBytes.data(), entityBytes.size(), entityRead) && entityRead.scale[1] == -1000,
+        "mirrored map scale accepted (18_cistern Slime_20)");
+    entity.scale = {{1000, 0, 1000}}; Check(EncodeEntity(entity).empty(), "zero entity scale rejected");
     InventoryState inventory; inventory.epoch = 1; inventory.revision = 22;
     InventoryItem item; item.name = "potion"; item.type = 5; item.count = 2; item.amount = 25000;
     item.image = "graphics/item/potion_health.tga"; inventory.items.push_back(item);

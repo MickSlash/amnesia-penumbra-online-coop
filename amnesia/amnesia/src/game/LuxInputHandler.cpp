@@ -1469,7 +1469,8 @@ void cLuxInputHandler::UpdateGamePlayerInput()
 			input.forward = (P1IsTriggerd(eLuxAction_Forward) ? 1000 : 0) - (P1IsTriggerd(eLuxAction_Backward) ? 1000 : 0);
 			input.strafe = (P1IsTriggerd(eLuxAction_Right) ? 1000 : 0) - (P1IsTriggerd(eLuxAction_Left) ? 1000 : 0);
             input.buttons = (P1IsTriggerd(eLuxAction_Jump) ? 1 : 0) | (P1IsTriggerd(eLuxAction_Crouch) ? 2 : 0) |
-                (P1IsTriggerd(eLuxAction_Run) ? 4 : 0) | (P1IsTriggerd(eLuxAction_Rotate) ? 8 : 0);
+                (P1IsTriggerd(eLuxAction_Run) ? 4 : 0) | (P1IsTriggerd(eLuxAction_Rotate) ? 8 : 0) |
+                (P1IsTriggerd(eLuxAction_LeanLeft) ? 16 : 0) | (P1IsTriggerd(eLuxAction_LeanRight) ? 32 : 0);
 		}
 		float yaw = mpPlayer->GetCamera()->GetYaw();
 		input.yaw = (int16_t)(atan2f(sinf(yaw), cosf(yaw)) * 1000.0f);

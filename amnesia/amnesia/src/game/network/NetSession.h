@@ -12,7 +12,8 @@ struct _ENetHost;
 struct _ENetPeer;
 namespace online {
 // 12: enemies stream unreliable motion like props; older peers would drop it.
-constexpr uint16_t ProtocolVersion = 12;
+// 13: lean buttons in client input; mirrored entity scales (18_cistern Slime_20).
+constexpr uint16_t ProtocolVersion = 13;
 constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
 // ENet timeout outside map loads. ENet drops a peer once an unacknowledged
@@ -52,7 +53,7 @@ struct PlayerInput {
     int16_t forward = 0, strafe = 0; // normalized signed axes, -1000..1000
     int16_t yaw = 0, pitch = 0; // radians * 1000
     int16_t lookYaw = 0, lookPitch = 0; // raw look deltas, radians *10000, consumed once
-    uint8_t buttons = 0; // jump, crouch, run, rotate grabbed object
+    uint8_t buttons = 0; // jump, crouch, run, rotate grabbed object, lean left, lean right
 };
 struct PlayerState {
     int32_t x = 0, y = 0, z = 0; // feet position, millimetres

@@ -15,7 +15,7 @@ std::vector<uint8_t> Header(Message type) { return { 'A', 'O', uint8_t(ProtocolV
 bool ValidHeader(const uint8_t* p, size_t n) { return p && n >= 5 && p[0] == 'A' && p[1] == 'O' && R16(p + 2) == ProtocolVersion; }
 bool ValidInput(const PlayerInput& i) {
     return i.forward >= -1000 && i.forward <= 1000 && i.strafe >= -1000 && i.strafe <= 1000 &&
-           i.yaw >= -3142 && i.yaw <= 3142 && i.pitch >= -1571 && i.pitch <= 1571 && !(i.buttons & ~15) &&
+           i.yaw >= -3142 && i.yaw <= 3142 && i.pitch >= -1571 && i.pitch <= 1571 && !(i.buttons & ~63) &&
            i.lookYaw >= -31420 && i.lookYaw <= 31420 && i.lookPitch >= -31420 && i.lookPitch <= 31420;
 }
 bool ValidPlayer(const PlayerState& p) {
@@ -54,7 +54,8 @@ bool ValidEntity(const EntityState& e) {
     if(!e.epoch || e.name.empty() || e.name.size() > 128 || !ValidAsset(e.file) || e.type > 2 ||
         e.bodies.size() > 32 || e.animations.size() > 32 || (e.flags & 128) || !ValidTransform(e.transform)) return false;
     for(unsigned char c : e.name) if(c < 32 || c > 126) return false;
-    for(int32_t s : e.scale) if(s <= 0 || s > 100000) return false;
+    // Mirrored scales are valid map data: 18_cistern places Slime_20 at -1 -1 -1.
+    for(int32_t s : e.scale) if(s == 0 || s < -100000 || s > 100000) return false;
     for(const auto& t : e.bodies) if(!ValidTransform(t)) return false;
     for(const auto& a : e.animations) if(a.index > 1023 || a.weight > 10000 || a.time > 86400000) return false;
     return true;

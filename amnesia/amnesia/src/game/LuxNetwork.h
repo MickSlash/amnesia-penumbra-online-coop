@@ -226,6 +226,7 @@ private:
     std::chrono::steady_clock::time_point mLastSnapLogAt, mLanternDarkSince, mLanternDiagAt;
     bool mTestNoticeLogged[2] = {false, false};
     bool mTestInputGapLogged = false; // AMNESIA_NET_TEST_INPUT_GAP
+    bool mTestLeanLogged = false; float mTestLeanMaxRoll = 0; // AMNESIA_NET_TEST_LEAN
     // AMNESIA_NET_TEST_FAIRNESS: a rarely changing entity among 80 constant movers.
     void UpdateFairnessTest(cLuxMap* map);
     unsigned mFairnessTestStage = 0;
