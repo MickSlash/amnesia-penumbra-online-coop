@@ -19,6 +19,7 @@ param(
     [switch]$Fairness,
     [switch]$InputGap,
     [switch]$Lean,
+    [switch]$Door,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
@@ -29,7 +30,7 @@ if ($Media) { $Campaign = $true }
 if ($Campaign) { $Replication = $true }
 if ($Enemy) { $MapOnly = $true }
 if ($OnlineMenu) { $MapOnly = $true }
-if ($VisibilityProps -or $Effects -or $Stairs -or $Gate -or $Flashback -or $LevelDoor -or $Spawn -or $Fairness -or $InputGap -or $Lean) { $MapOnly = $true }
+if ($VisibilityProps -or $Effects -or $Stairs -or $Gate -or $Flashback -or $LevelDoor -or $Spawn -or $Fairness -or $InputGap -or $Lean -or $Door) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $repoPath = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
@@ -47,7 +48,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS','AMNESIA_NET_TEST_STAIRS','AMNESIA_NET_TEST_GATE','AMNESIA_NET_TEST_FLASHBACK','AMNESIA_NET_TEST_LEVEL_DOOR','AMNESIA_NET_TEST_SPAWN','AMNESIA_NET_TEST_FAIRNESS','AMNESIA_NET_TEST_INPUT_GAP','AMNESIA_NET_TEST_LEAN')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS','AMNESIA_NET_TEST_STAIRS','AMNESIA_NET_TEST_GATE','AMNESIA_NET_TEST_FLASHBACK','AMNESIA_NET_TEST_LEVEL_DOOR','AMNESIA_NET_TEST_SPAWN','AMNESIA_NET_TEST_FAIRNESS','AMNESIA_NET_TEST_INPUT_GAP','AMNESIA_NET_TEST_LEAN','AMNESIA_NET_TEST_DOOR')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -77,6 +78,7 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_FAIRNESS', $(if ($Fairness) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_INPUT_GAP', $(if ($InputGap -and $role -eq 'client') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_LEAN', $(if ($Lean -and $role -eq 'client') { '1' } else { $null }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DOOR', $(if ($Door) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DRIVE_FILE', $null)
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$(if ($role -eq 'client' -and $ClientPort -gt 0) { $ClientPort } else { $Port }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ADDRESS', '127.0.0.1')
@@ -120,6 +122,23 @@ try {
         if($Lean -and $role -eq 'client') {
             if(!$log.Contains('PASS client lean reached the camera')) {throw 'Client lean did not reach the camera'}
             Write-Output 'PASS: client lean (E) applied by the host and shown on the client camera'
+        }
+        if($Door -and $role -eq 'client') {
+            # The client must show the door where the host's physics left it.
+            $hostLog = [IO.File]::ReadAllText((Join-Path $runPath 'host.log'))
+            $h = [regex]::Match($hostLog, 'Door pose role=host yaw=(-?[\d.]+) closed=(\d) opened_deg=([\d.]+)')
+            $c = [regex]::Match($log, 'Door pose role=client yaw=(-?[\d.]+) closed=(\d)')
+            if(!$h.Success -or !$c.Success) {throw 'Missing door pose from host or client'}
+            if([double]$h.Groups[3].Value -lt 15) {throw "Host door did not open (opened_deg=$($h.Groups[3].Value))"}
+            $delta = [math]::Abs([double]$h.Groups[1].Value - [double]$c.Groups[1].Value) % 360
+            $delta = [math]::Min($delta, 360 - $delta)
+            Write-Output "INFO: door host yaw=$($h.Groups[1].Value) closed=$($h.Groups[2].Value); client yaw=$($c.Groups[1].Value) closed=$($c.Groups[2].Value)"
+            if($delta -gt 3 -or $h.Groups[2].Value -ne $c.Groups[2].Value) {throw "Client door differs from host by $delta deg"}
+            Write-Output "PASS: client door rests where the host's physics left it (opened $($h.Groups[3].Value) deg)"
+            # Then the host breaks it: the client must hide the leaf and show the debris.
+            if(!$hostLog.Contains('Door broken role=host broken=1 leaf_active=0 debris=1')) {throw 'Host door fixture did not break'}
+            if(!$log.Contains('Door broken role=client broken=1 leaf_active=0 debris=1')) {throw 'Client still shows the door the host broke'}
+            Write-Output 'PASS: door broken on the host is broken on the client (leaf hidden, debris replicated)'
         }
         if($InputGap -and $role -eq 'host') {
             $gaps = [regex]::Matches($log, 'Client input resumed after a (\d+) ms gap') | ForEach-Object { [int]$_.Groups[1].Value }

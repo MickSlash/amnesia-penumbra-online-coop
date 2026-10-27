@@ -685,6 +685,41 @@ void cLuxProp_SwingDoor::SetCurrentDamageLevel(int alX)
 
 //-----------------------------------------------------------------------
 
+void cLuxProp_SwingDoor::SetNetworkBroken(bool abBroken)
+{
+	if(mbBroken == abBroken) return;
+
+	mbBroken = abBroken;
+
+	SetCurrentDamageLevel(0);
+
+	//Same bodies and sub meshes as the break in OnHealthChange and the restore in OnResetProperties
+	for(size_t i=0; i<mvBodies.size(); ++i)
+	{
+		iPhysicsBody *pBody = mvBodies[i];
+		if(pBody->GetMass()==0) continue;
+
+		pBody->SetActive(!abBroken);
+
+		cEntity3DIterator entIt = pBody->GetChildIterator();
+		while(entIt.HasNext())
+		{
+			iEntity3D *pEntity = entIt.Next();
+			for(int j=0; j<mpMeshEntity->GetSubMeshEntityNum(); ++j)
+			{
+				cSubMeshEntity *pMeshEnt = mpMeshEntity->GetSubMeshEntity(j);
+				if((iEntity3D*)pMeshEnt == pEntity)
+				{
+					pMeshEnt->SetActive(!abBroken);
+					pMeshEnt->SetVisible(!abBroken);
+				}
+			}
+		}
+	}
+}
+
+//-----------------------------------------------------------------------
+
 cMeshEntity* cLuxProp_SwingDoor::GetEffectMeshEntity()
 {
 	if(mlCurrentMeshEntity <0) return NULL;

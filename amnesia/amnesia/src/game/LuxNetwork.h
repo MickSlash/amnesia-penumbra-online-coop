@@ -227,6 +227,12 @@ private:
     bool mTestNoticeLogged[2] = {false, false};
     bool mTestInputGapLogged = false; // AMNESIA_NET_TEST_INPUT_GAP
     bool mTestLeanLogged = false; float mTestLeanMaxRoll = 0; // AMNESIA_NET_TEST_LEAN
+    // AMNESIA_NET_TEST_DOOR: a physical door the host swings open; both log its resting pose.
+    void UpdateDoorTest(cLuxMap* map);
+    unsigned mDoorTestStage = 0;
+    cVector3f mDoorTestOrigin;
+    float mDoorTestYaw = 0, mDoorTestPushAt = 0, mDoorTestDirection = 1;
+    bool mDoorTestDebrisSeen = false;
     // AMNESIA_NET_TEST_FAIRNESS: a rarely changing entity among 80 constant movers.
     void UpdateFairnessTest(cLuxMap* map);
     unsigned mFairnessTestStage = 0;

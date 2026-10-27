@@ -329,6 +329,7 @@ void cLuxNetwork::Update(float timeStep) {
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_GATE")) UpdateGateTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_FLASHBACK")) UpdateFlashbackTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_FAIRNESS")) UpdateFairnessTest(gpBase->mpMapHandler->GetCurrentMap());
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_DOOR")) UpdateDoorTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_SPAWN") && !IsClientReplica() && !mSpawnTestStarted &&
         mSession.Connected() && mSession.IsWorldApplied(mEpoch) && gpBase->mpPlayer2 && gpBase->mpMapHandler->GetCurrentMap()) {
         // A crouch-height crawl space with no room around the host (as under the
@@ -1638,6 +1639,8 @@ void cLuxNetwork::ReplicateWorld(cLuxMap* map) {
             if(prop->GetPropType() == eLuxPropType_SwingDoor) {
                 auto* door = static_cast<cLuxProp_SwingDoor*>(prop);
                 if(door->GetLocked()) state.flags |= 16; if(door->GetClosed()) state.flags |= 32;
+                // Broken by an enemy, a script or a thrown object: the leaf is gone on the host.
+                if(door->IsBroken()) state.flags |= 128;
             }
             for(int i = 0; i < prop->GetBodyNum() && i < 32; ++i) state.bodies.push_back(PackTransform(prop->GetBody(i)->GetLocalMatrix()));
         } else if(state.type == eLuxEntityType_Enemy) {
@@ -1755,6 +1758,7 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
         if(prop->GetPropType() == eLuxPropType_SwingDoor) {
             auto* door = static_cast<cLuxProp_SwingDoor*>(prop);
             door->SetLocked((state.flags & 16) != 0, false); door->SetClosed((state.flags & 32) != 0, false);
+            door->SetNetworkBroken((state.flags & 128) != 0);
         }
         PropMotion motion; motion.target = state; motion.fromMesh = prop->GetMeshEntity() ? prop->GetMeshEntity()->GetWorldMatrix() : cMatrixf::Identity;
         bool interpolate = knownProp && (state.flags & 1);
@@ -2351,6 +2355,71 @@ void cLuxNetwork::UpdateFairnessTest(cLuxMap* map) {
             NetLog("[NET/TEST] Host moved the late target once");
         }
         mFairnessTestStage = 2;
+    }
+}
+// A real door swung by physics, as scripts open doors with an impulse. It sits
+// outside the map so only its hinge touches it; both roles extend the physics
+// world to it because the client simulates replicated props too.
+void cLuxNetwork::UpdateDoorTest(cLuxMap* map) {
+    if(!map || !mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || mDoorTestStage == 5) return;
+    iPhysicsWorld* physics = map->GetPhysicsWorld();
+    if(mDoorTestStage == 0) {
+        const cVector3f min = physics->GetWorldSizeMin(), max = physics->GetWorldSizeMax();
+        mDoorTestOrigin = cVector3f(max.x + 20, (min.y + max.y) / 2, max.z + 20);
+        physics->SetWorldSize(min, max + cVector3f(40, 0, 40));
+        mDoorTestStage = 1;
+    }
+    const float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - mSmokeStart).count();
+    auto* door = static_cast<cLuxProp_SwingDoor*>(map->GetEntityByName("online_qa_physics_door", eLuxEntityType_Prop));
+    if(door && door->GetPropType() != eLuxPropType_SwingDoor) door = NULL;
+    // Body 0 is the static frame; the leaf is the body with mass.
+    iPhysicsBody* leaf = NULL;
+    for(int i = 0; door && i < door->GetBodyNum(); ++i) if(door->GetBody(i)->GetMass() > 0) leaf = door->GetBody(i);
+    if(!leaf) door = NULL;
+    auto yaw = [&]() { const cVector3f r = leaf->GetLocalMatrix().GetRight(); return cMath::ToDeg(std::atan2(r.z, r.x)); };
+    auto push = [&](float direction) { leaf->AddImpulse(leaf->GetLocalMatrix().GetForward() * leaf->GetMass() * 0.3f * direction); };
+    if(IsClientReplica()) {
+        // The resting pose is read before the host breaks the door at 30 s.
+        if(door && elapsed >= 26 && elapsed < 27) mDoorTestYaw = yaw();
+        // The debris has LifeLength 4: the host removes it again after four seconds.
+        if(map->GetEntityByName("online_qa_physics_door_broken")) mDoorTestDebrisSeen = true;
+        if(elapsed < 45) return;
+        if(door) NetLog("[NET/TEST] Door pose role=client yaw=" + std::to_string(mDoorTestYaw) + " closed=" + std::to_string(door->GetClosed() ? 1 : 0));
+        else NetLog("[NET/TEST] FAILED door: replica missing");
+        if(door) NetLog("[NET/TEST] Door broken role=client broken=" + std::to_string(door->IsBroken() ? 1 : 0) + " leaf_active=" + std::to_string(leaf->IsActive() ? 1 : 0) +
+            " debris=" + std::to_string(mDoorTestDebrisSeen ? 1 : 0));
+        mDoorTestStage = 5;
+        return;
+    }
+    if(mDoorTestStage == 1 && elapsed >= 15) {
+        map->CreateEntity("online_qa_physics_door", "entities/door/mansion/mansion.ent", cMath::MatrixTranslate(mDoorTestOrigin), cVector3f(1));
+        mDoorTestStage = 2;
+    } else if(mDoorTestStage == 2 && elapsed >= 17 && door) {
+        // As the maps' scripts do: unlatch and disable auto-close, then push
+        // for a moment (the sticky hinge stops a single impulse at the frame).
+        mDoorTestYaw = yaw(); mDoorTestPushAt = elapsed;
+        door->SetDisableAutoClose(true); door->SetClosed(false, false);
+        NetLog("[NET/TEST] Host pushing physics door closed_yaw=" + std::to_string(mDoorTestYaw));
+        mDoorTestStage = 3;
+    } else if(mDoorTestStage == 3 && door) {
+        if(elapsed - mDoorTestPushAt < 0.6f) push(mDoorTestDirection);
+        else if(elapsed - mDoorTestPushAt >= 4) {
+            // The hinge opens one way only; if the push hit the stop, push back.
+            if(std::fabs(yaw() - mDoorTestYaw) < 15 && mDoorTestDirection > 0) {
+                mDoorTestDirection = -1; mDoorTestPushAt = elapsed;
+                NetLog("[NET/TEST] Host pushing physics door the other way");
+            } else mDoorTestStage = 4;
+        }
+    } else if(mDoorTestStage == 4 && elapsed >= 26 && door) {
+        NetLog("[NET/TEST] Door pose role=host yaw=" + std::to_string(yaw()) + " closed=" + std::to_string(door->GetClosed() ? 1 : 0) +
+            " opened_deg=" + std::to_string(std::fabs(yaw() - mDoorTestYaw)));
+        mDoorTestStage = 6;
+    } else if(mDoorTestStage == 6 && elapsed >= 30 && door) {
+        // As a grunt bashing it or SetPropHealth(door, 0) in a map script.
+        door->SetHealth(0);
+        NetLog("[NET/TEST] Door broken role=host broken=" + std::to_string(door->IsBroken() ? 1 : 0) + " leaf_active=" + std::to_string(leaf->IsActive() ? 1 : 0) +
+            " debris=" + std::to_string(map->GetEntityByName("online_qa_physics_door_broken") ? 1 : 0));
+        mDoorTestStage = 5;
     }
 }
 // Field diagnostics for client reports that the local tests do not reproduce

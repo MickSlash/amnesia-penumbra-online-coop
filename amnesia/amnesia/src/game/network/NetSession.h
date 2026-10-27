@@ -13,7 +13,8 @@ struct _ENetPeer;
 namespace online {
 // 12: enemies stream unreliable motion like props; older peers would drop it.
 // 13: lean buttons in client input; mirrored entity scales (18_cistern Slime_20).
-constexpr uint16_t ProtocolVersion = 13;
+// 14: entity flag 128 = broken swing door.
+constexpr uint16_t ProtocolVersion = 14;
 constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
 // ENet timeout outside map loads. ENet drops a peer once an unacknowledged
@@ -104,7 +105,7 @@ struct EntityState {
     uint32_t sequence = 0; // shared serial across reliable lifecycle and live poses
     bool liveMotion = false; // local receive metadata, excluded from the wire
     std::string name, file;
-    uint8_t type = 0, flags = 0; // active, interaction disabled, destroyed, lit, locked, closed, effects
+    uint8_t type = 0, flags = 0; // active, interaction disabled, destroyed, lit, locked, closed, effects, broken
     uint16_t subtype = 0;
     Transform transform = {}; // mesh/spawn transform
     std::array<int32_t, 3> scale = {{1000,1000,1000}};

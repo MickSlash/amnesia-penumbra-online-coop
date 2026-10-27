@@ -52,7 +52,7 @@ bool ValidTransform(const Transform& t) {
 }
 bool ValidEntity(const EntityState& e) {
     if(!e.epoch || e.name.empty() || e.name.size() > 128 || !ValidAsset(e.file) || e.type > 2 ||
-        e.bodies.size() > 32 || e.animations.size() > 32 || (e.flags & 128) || !ValidTransform(e.transform)) return false;
+        e.bodies.size() > 32 || e.animations.size() > 32 || !ValidTransform(e.transform)) return false;
     for(unsigned char c : e.name) if(c < 32 || c > 126) return false;
     // Mirrored scales are valid map data: 18_cistern places Slime_20 at -1 -1 -1.
     for(int32_t s : e.scale) if(s == 0 || s < -100000 || s > 100000) return false;

@@ -744,6 +744,8 @@ int main(int argc, char** argv) {
     Check(DecodeEntity(entityBytes.data(), entityBytes.size(), entityRead) && entityRead.scale[1] == -1000,
         "mirrored map scale accepted (18_cistern Slime_20)");
     entity.scale = {{1000, 0, 1000}}; Check(EncodeEntity(entity).empty(), "zero entity scale rejected");
+    entity.scale = {{1000, 1000, 1000}}; entity.flags = 1 | 32 | 128; entityBytes = EncodeEntity(entity);
+    Check(DecodeEntity(entityBytes.data(), entityBytes.size(), entityRead) && entityRead.flags == (1 | 32 | 128), "broken door flag roundtrip");
     InventoryState inventory; inventory.epoch = 1; inventory.revision = 22;
     InventoryItem item; item.name = "potion"; item.type = 5; item.count = 2; item.amount = 25000;
     item.image = "graphics/item/potion_health.tga"; inventory.items.push_back(item);

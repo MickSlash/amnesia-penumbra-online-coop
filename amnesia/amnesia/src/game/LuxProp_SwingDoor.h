@@ -121,6 +121,9 @@ public:
 	cMeshEntity* GetEffectMeshEntity();
 
 	bool IsBroken(){ return mbBroken;}
+	//Online replicas mirror the host's broken door: only the leaf is hidden, as the
+	//debris is a replicated entity of its own and the sound and particles are media.
+	void SetNetworkBroken(bool abBroken);
 
 	//////////////////////
 	//Connection callbacks

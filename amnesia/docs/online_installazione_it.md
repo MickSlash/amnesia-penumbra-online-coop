@@ -1,6 +1,6 @@
 # Installare e giocare ad Amnesia Online Co-op
 
-Build sperimentale Windows x64, protocollo 13, due giocatori. Il protocollo 13 aggiunge l'inclinazione laterale (Q/E) del client e accetta le entità con scala speculare (18_cistern); host e client devono usare la stessa build. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono nei documenti QA dentro `source.zip`.
+Build sperimentale Windows x64, protocollo 14, due giocatori. Il protocollo 14 mostra anche al client le porte rotte dall'host (sfondate da un mostro, da uno script o da un oggetto lanciato); il 13 aveva aggiunto l'inclinazione laterale (Q/E) del client e le entità con scala speculare (18_cistern). Host e client devono usare la stessa build. Entrambi devono possedere Amnesia: The Dark Descent, usare gli stessi dati e la stessa build. La campagna intera non è ancora certificata; le prove sono nei documenti QA dentro `source.zip`.
 
 L'aggiornamento del 6 ottobre corregge la previsione del client sui gradini:
 controlla lo spazio per il corpo entro l'altezza massima originale e accompagna
