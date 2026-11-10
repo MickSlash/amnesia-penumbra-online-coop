@@ -330,6 +330,7 @@ void cLuxNetwork::Update(float timeStep) {
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_FLASHBACK")) UpdateFlashbackTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_FAIRNESS")) UpdateFairnessTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_DOOR")) UpdateDoorTest(gpBase->mpMapHandler->GetCurrentMap());
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_ITEM_PATH")) UpdateItemPathTest();
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_SPAWN") && !IsClientReplica() && !mSpawnTestStarted &&
         mSession.Connected() && mSession.IsWorldApplied(mEpoch) && gpBase->mpPlayer2 && gpBase->mpMapHandler->GetCurrentMap()) {
         // A crouch-height crawl space with no room around the host (as under the
@@ -1606,14 +1607,32 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
     online::InventoryState inventory = gpBase->mpInventory->CaptureNetworkInventory(mEpoch);
     auto journal = gpBase->mpJournal->CaptureNetworkJournal(mEpoch);
     auto journalBytes = online::EncodeJournal(journal);
+    const bool journalUnsendable = journalBytes.empty();
     if(!journalBytes.empty() && journalBytes != mJournalBytes) {
         journal.revision = ++mJournalRevision;
         if(mSession.SendJournal(journal)) mJournalBytes = std::move(journalBytes);
     }
     auto inventoryBytes = online::EncodeInventory(inventory);
+    const bool inventoryUnsendable = inventoryBytes.empty();
     if(!inventoryBytes.empty() && inventoryBytes != mInventoryBytes) {
         inventory.revision = ++mInventoryRevision;
         if(mSession.SendInventory(inventory)) mInventoryBytes = std::move(inventoryBytes);
+    }
+    // The client waits for both before confirming the world, so an unsendable one
+    // froze the host in the loading barrier without a word (2026-11-10).
+    if(journalUnsendable && mUnsendableLoggedEpoch[0] != mEpoch) {
+        mUnsendableLoggedEpoch[0] = mEpoch;
+        NetLog("[NET/JOURNAL] Cannot encode journal entries=" + std::to_string(journal.entries.size()) + "; the client cannot finish loading");
+    }
+    if(inventoryUnsendable && mUnsendableLoggedEpoch[1] != mEpoch) {
+        mUnsendableLoggedEpoch[1] = mEpoch;
+        std::string invalid;
+        for(const auto& item : inventory.items) {
+            online::InventoryState single; single.epoch = mEpoch; single.items.push_back(item);
+            if(online::EncodeInventory(single).empty()) { invalid = item.name; break; }
+        }
+        NetLog("[NET/INVENTORY] Cannot encode inventory items=" + std::to_string(inventory.items.size()) +
+            " first_invalid=" + invalid + "; the client cannot finish loading");
     }
 }
 void cLuxNetwork::ReplicateWorld(cLuxMap* map) {
@@ -2356,6 +2375,27 @@ void cLuxNetwork::UpdateFairnessTest(cLuxMap* map) {
         }
         mFairnessTestStage = 2;
     }
+}
+// A late-campaign save had item images like graphics/item/graphics/item/.../lantern.tga,
+// one prefix per save/load; past 1024 bytes the inventory could not be sent and
+// the client never finished loading 22_torture_chancel (2026-11-10).
+void cLuxNetwork::UpdateItemPathTest() {
+    if(!mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || mItemPathTestDone) return;
+    const tString expected = "graphics/item/lantern.tga";
+    if(IsClientReplica()) {
+        cLuxInventory_Item* item = gpBase->mpInventory->GetItem("online_qa_inflated_item");
+        if(!item) return;
+        mItemPathTestDone = true;
+        NetLog(std::string("[NET/TEST] ") + (item->GetImageName() == expected ? "PASS" : "FAILED") +
+            " client received item restored from an inflated save path; image=" + item->GetImageName());
+        return;
+    }
+    tString inflated;
+    for(int i = 0; i < 80; ++i) inflated += "graphics/item/";
+    cLuxInventory_Item* item = gpBase->mpInventory->AddItem("online_qa_inflated_item", eLuxItemType_Puzzle, "online_qa_inflated_item",
+        inflated + "lantern.tga", 0, "", "");
+    mItemPathTestDone = true;
+    NetLog(std::string("[NET/TEST] Host restored item from an inflated save path; image=") + (item ? item->GetImageName() : tString("none")));
 }
 // A real door swung by physics, as scripts open doors with an impulse. It sits
 // outside the map so only its hinge touches it; both roles extend the physics

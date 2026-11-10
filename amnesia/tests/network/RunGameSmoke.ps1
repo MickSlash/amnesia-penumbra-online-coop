@@ -20,6 +20,7 @@ param(
     [switch]$InputGap,
     [switch]$Lean,
     [switch]$Door,
+    [switch]$ItemPath,
     [ValidatePattern('^[a-zA-Z0-9_-]+\.map$')][string]$StartMap = '02_entrance_hall.map',
     [switch]$Visual,
     [switch]$MapOnly,
@@ -30,7 +31,7 @@ if ($Media) { $Campaign = $true }
 if ($Campaign) { $Replication = $true }
 if ($Enemy) { $MapOnly = $true }
 if ($OnlineMenu) { $MapOnly = $true }
-if ($VisibilityProps -or $Effects -or $Stairs -or $Gate -or $Flashback -or $LevelDoor -or $Spawn -or $Fairness -or $InputGap -or $Lean -or $Door) { $MapOnly = $true }
+if ($VisibilityProps -or $Effects -or $Stairs -or $Gate -or $Flashback -or $LevelDoor -or $Spawn -or $Fairness -or $InputGap -or $Lean -or $Door -or $ItemPath) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $repoPath = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
@@ -48,7 +49,7 @@ $settingsPath = Join-Path $runPath 'settings.cfg'
 $baseConfig = [IO.File]::ReadAllText((Join-Path $gamePath 'config/main_init.cfg'))
 $profiles = @{}
 $processes = @()
-$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS','AMNESIA_NET_TEST_STAIRS','AMNESIA_NET_TEST_GATE','AMNESIA_NET_TEST_FLASHBACK','AMNESIA_NET_TEST_LEVEL_DOOR','AMNESIA_NET_TEST_SPAWN','AMNESIA_NET_TEST_FAIRNESS','AMNESIA_NET_TEST_INPUT_GAP','AMNESIA_NET_TEST_LEAN','AMNESIA_NET_TEST_DOOR')
+$environmentNames = @('AMNESIA_NET_ROLE','AMNESIA_NET_PORT','AMNESIA_NET_ADDRESS','AMNESIA_NET_SMOKE_SECONDS','AMNESIA_NET_TEST_MOVEMENT','AMNESIA_NET_TEST_PICKUP','AMNESIA_NET_TEST_CAMPAIGN','AMNESIA_NET_TEST_ENEMY','AMNESIA_NET_TEST_MEDIA','AMNESIA_NET_TEST_DRIVE_FILE','AMNESIA_NET_TEST_RECOVERY','AMNESIA_NET_TEST_PREDICTION','AMNESIA_NET_TEST_SNAPSHOT_BLACKOUT','AMNESIA_NET_TEST_MENU','AMNESIA_NET_TEST_VISIBILITY_PROPS','AMNESIA_NET_TEST_EFFECTS','AMNESIA_NET_TEST_STAIRS','AMNESIA_NET_TEST_GATE','AMNESIA_NET_TEST_FLASHBACK','AMNESIA_NET_TEST_LEVEL_DOOR','AMNESIA_NET_TEST_SPAWN','AMNESIA_NET_TEST_FAIRNESS','AMNESIA_NET_TEST_INPUT_GAP','AMNESIA_NET_TEST_LEAN','AMNESIA_NET_TEST_DOOR','AMNESIA_NET_TEST_ITEM_PATH')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -79,6 +80,7 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_INPUT_GAP', $(if ($InputGap -and $role -eq 'client') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_LEAN', $(if ($Lean -and $role -eq 'client') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DOOR', $(if ($Door) { '1' } else { $null }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_ITEM_PATH', $(if ($ItemPath) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_DRIVE_FILE', $null)
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_PORT', [string]$(if ($role -eq 'client' -and $ClientPort -gt 0) { $ClientPort } else { $Port }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_ADDRESS', '127.0.0.1')
@@ -122,6 +124,12 @@ try {
         if($Lean -and $role -eq 'client') {
             if(!$log.Contains('PASS client lean reached the camera')) {throw 'Client lean did not reach the camera'}
             Write-Output 'PASS: client lean (E) applied by the host and shown on the client camera'
+        }
+        if($ItemPath) {
+            # A save-inflated item image must load with one folder prefix and still reach the client.
+            $marker = if($role -eq 'host') { 'Host restored item from an inflated save path; image=graphics/item/lantern.tga' } else { 'PASS client received item restored from an inflated save path; image=graphics/item/lantern.tga' }
+            if(!$log.Contains($marker) -or $log.Contains('Cannot encode inventory')) {throw "Missing $role item path proof: $marker"}
+            Write-Output "PASS: $role item from an inflated save path shared without stalling the client"
         }
         if($Door -and $role -eq 'client') {
             # The client must show the door where the host's physics left it.

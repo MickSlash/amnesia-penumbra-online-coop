@@ -227,6 +227,8 @@ private:
     bool mTestNoticeLogged[2] = {false, false};
     bool mTestInputGapLogged = false; // AMNESIA_NET_TEST_INPUT_GAP
     bool mTestLeanLogged = false; float mTestLeanMaxRoll = 0; // AMNESIA_NET_TEST_LEAN
+    uint32_t mUnsendableLoggedEpoch[2] = {0, 0}; // journal, inventory
+    void UpdateItemPathTest(); bool mItemPathTestDone = false; // AMNESIA_NET_TEST_ITEM_PATH
     // AMNESIA_NET_TEST_DOOR: a physical door the host swings open; both log its resting pose.
     void UpdateDoorTest(cLuxMap* map);
     unsigned mDoorTestStage = 0;

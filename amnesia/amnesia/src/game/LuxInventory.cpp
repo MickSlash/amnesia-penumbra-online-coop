@@ -1276,7 +1276,13 @@ cLuxInventory_Item * cLuxInventory::AddItem(const tString& asName, eLuxItemType 
 	pItem->SetGameDescEntry("ItemDesc_"+asSubTypeName);
 	pItem->SetAmount(afAmount);
 
-	tString sFullImageName = "graphics/item/"+asImageName;
+	//Saves and item hand-overs pass back GetImageName(), which already has the
+	//folder: strip it, or the path grows by one "graphics/item/" per save/load
+	//(a late-campaign save passed the 1024-byte network limit, 2026-11-10).
+	const tString sItemFolder = "graphics/item/";
+	tString sImageName = asImageName;
+	while(sImageName.compare(0, sItemFolder.size(), sItemFolder) == 0) sImageName = sImageName.substr(sItemFolder.size());
+	tString sFullImageName = sItemFolder+sImageName;
 	pItem->SetImageName(sFullImageName);
 	pItem->SetStringVal(asVal);
 	pItem->SetExtraStringVal(asExtraVal);
