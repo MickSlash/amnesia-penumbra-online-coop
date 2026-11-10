@@ -129,6 +129,7 @@ try {
             # A save-inflated item image must load with one folder prefix and still reach the client.
             $marker = if($role -eq 'host') { 'Host restored item from an inflated save path; image=graphics/item/lantern.tga' } else { 'PASS client received item restored from an inflated save path; image=graphics/item/lantern.tga' }
             if(!$log.Contains($marker) -or $log.Contains('Cannot encode inventory')) {throw "Missing $role item path proof: $marker"}
+            if($role -eq 'client' -and !$log.Contains('PASS client received the original bucket_of_tar.ent item; image=graphics/item/bucket_of_tar.tga')) {throw 'Client did not receive the original bucket_of_tar item'}
             Write-Output "PASS: $role item from an inflated save path shared without stalling the client"
         }
         if($Door -and $role -eq 'client') {

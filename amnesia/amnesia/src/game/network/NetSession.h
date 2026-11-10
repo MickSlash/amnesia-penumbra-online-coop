@@ -16,7 +16,9 @@ namespace online {
 // 14: entity flag 128 = broken swing door.
 // 15: no wire change; refuses hosts that still inflate item image paths per
 //     save/load (their late-campaign inventory never reaches the client).
-constexpr uint16_t ProtocolVersion = 15;
+// 16: no wire change; refuses hosts that send authoring drive paths from the
+//     original .ent files (bucket_of_tar item image, castle door debris).
+constexpr uint16_t ProtocolVersion = 16;
 constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
 // ENet timeout outside map loads. ENet drops a peer once an unacknowledged

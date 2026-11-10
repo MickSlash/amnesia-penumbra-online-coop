@@ -19,6 +19,7 @@
 #include "LuxProp_SwingDoor.h"
 #include "LuxEnemy.h"
 #include "LuxInventory.h"
+#include "LuxProp_Item.h"
 #include "LuxSaveHandler.h"
 #include "LuxEffectHandler.h"
 #include "LuxJournal.h"
@@ -1672,6 +1673,10 @@ void cLuxNetwork::ReplicateWorld(cLuxMap* map) {
         // from "/organic/...". The engine resolves both forms by name; the wire
         // format keeps rejecting rooted paths.
         state.file.erase(0, state.file.find_first_not_of('/'));
+        // 15 original .ent files name their debris by authoring path, e.g. castle.ent's
+        // "F:/Amnesia/redist/entities/door/castle/castle_broken.ent": breaking one closed
+        // the session. Resources resolve by name, so send the bare file name.
+        if(state.file.find(':') != std::string::npos) state.file = cString::GetFileName(state.file);
         state.scale = {{int32_t(scale.x * 1000), int32_t(scale.y * 1000), int32_t(scale.z * 1000)}};
         if(mesh) for(int i = 0; i < mesh->GetAnimationStateNum() && state.animations.size() < 32; ++i) {
             cAnimationState* animation = mesh->GetAnimationState(i);
@@ -2377,23 +2382,39 @@ void cLuxNetwork::UpdateFairnessTest(cLuxMap* map) {
     }
 }
 // A late-campaign save had item images like graphics/item/graphics/item/.../lantern.tga,
-// one prefix per save/load; past 1024 bytes the inventory could not be sent and
-// the client never finished loading 22_torture_chancel (2026-11-10).
+// one prefix per save/load, and bucket_of_tar_1 kept an authoring drive path; either
+// made the inventory unsendable and the client never finished loading 22_torture_chancel.
 void cLuxNetwork::UpdateItemPathTest() {
     if(!mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || mItemPathTestDone) return;
     const tString expected = "graphics/item/lantern.tga";
     if(IsClientReplica()) {
         cLuxInventory_Item* item = gpBase->mpInventory->GetItem("online_qa_inflated_item");
-        if(!item) return;
+        cLuxInventory_Item* tar = gpBase->mpInventory->GetItem("online_qa_bucket_of_tar");
+        if(!item || !tar) return;
         mItemPathTestDone = true;
         NetLog(std::string("[NET/TEST] ") + (item->GetImageName() == expected ? "PASS" : "FAILED") +
             " client received item restored from an inflated save path; image=" + item->GetImageName());
+        NetLog(std::string("[NET/TEST] ") + (tar->GetImageName() == "graphics/item/bucket_of_tar.tga" ? "PASS" : "FAILED") +
+            " client received the original bucket_of_tar.ent item; image=" + tar->GetImageName());
         return;
     }
+    // The original entity, given as 22_torture_chancel's GiveItemFromFile does.
+    cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
+    if(!map) return;
+    map->ResetLatestEntity();
+    map->CreateEntity("online_qa_bucket_of_tar", "bucket_of_tar.ent", cMatrixf::Identity, 1);
+    iLuxEntity* tar = map->GetLatestEntity();
+    if(tar && tar->GetEntityType() == eLuxEntityType_Prop && static_cast<iLuxProp*>(tar)->GetPropType() == eLuxPropType_Item) {
+        auto* prop = static_cast<cLuxProp_Item*>(tar);
+        gpBase->mpInventory->AddItem("online_qa_bucket_of_tar", prop->GetItemType(), prop->GetSubItemTypeName(), prop->GetImageFile(), prop->GetAmount(), "", "");
+        NetLog("[NET/TEST] Host gave bucket_of_tar.ent with ImageFile=" + prop->GetImageFile());
+    }
+    if(tar) map->DestroyEntity(tar);
     tString inflated;
     for(int i = 0; i < 80; ++i) inflated += "graphics/item/";
+    // As saved for bucket_of_tar_1, whose .ent carries Frictional's authoring path.
     cLuxInventory_Item* item = gpBase->mpInventory->AddItem("online_qa_inflated_item", eLuxItemType_Puzzle, "online_qa_inflated_item",
-        inflated + "lantern.tga", 0, "", "");
+        inflated + "F:/Amnesia/redist/graphics/item/lantern.tga", 0, "", "");
     mItemPathTestDone = true;
     NetLog(std::string("[NET/TEST] Host restored item from an inflated save path; image=") + (item ? item->GetImageName() : tString("none")));
 }
@@ -2432,7 +2453,7 @@ void cLuxNetwork::UpdateDoorTest(cLuxMap* map) {
         return;
     }
     if(mDoorTestStage == 1 && elapsed >= 15) {
-        map->CreateEntity("online_qa_physics_door", "entities/door/mansion/mansion.ent", cMath::MatrixTranslate(mDoorTestOrigin), cVector3f(1));
+        map->CreateEntity("online_qa_physics_door", "entities/door/castle/castle.ent", cMath::MatrixTranslate(mDoorTestOrigin), cVector3f(1));
         mDoorTestStage = 2;
     } else if(mDoorTestStage == 2 && elapsed >= 17 && door) {
         // As the maps' scripts do: unlatch and disable auto-close, then push
