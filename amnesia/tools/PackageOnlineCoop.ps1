@@ -17,6 +17,7 @@ if (Test-Path -LiteralPath $symbols) {
     Copy-Item -LiteralPath $symbols -Destination "$destination/symbols/Lux.pdb"
 }
 Copy-Item -LiteralPath "$repo/build/AmnesiaCoop.exe" -Destination "$destination/AmnesiaCoop.exe"
+Copy-Item -LiteralPath "$repo/build/assets" -Destination "$destination/assets" -Recurse
 Copy-Item -LiteralPath $runtime -Destination "$destination/bin/OpenAL32.dll"
 # The Creative router needs its software backend; OpenAL Soft needs no backend
 # DLL. Prefer a sidecar, otherwise copy the installed x64 Windows backend.

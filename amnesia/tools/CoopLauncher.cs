@@ -4,26 +4,44 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-// Artwork is embedded by tools/BuildLauncher.ps1 (/resource and /win32icon), so
-// the launcher stays a single file. A missing resource must never block play.
+// Version information shown in the file's Properties and read by antivirus
+// heuristics; an empty version block makes the launcher look anonymous.
+[assembly: AssemblyTitle("Amnesia Online Co-op launcher")]
+[assembly: AssemblyDescription("Starts Amnesia: The Dark Descent with the online co-op mod")]
+[assembly: AssemblyProduct("Amnesia Online Co-op")]
+[assembly: AssemblyCompany("MickSlash")]
+[assembly: AssemblyCopyright("GPL-3.0-or-later, https://github.com/MickSlash/amnesia-penumbra-online-coop")]
+[assembly: AssemblyVersion("0.5.1.0")]
+[assembly: AssemblyFileVersion("0.5.1.0")]
+[assembly: AssemblyInformationalVersion("0.5.1")]
+
+// Artwork ships as plain files in assets/ beside the launcher (see
+// tools/BuildLauncher.ps1). Embedding the compressed PNGs made the executable
+// look packed to antivirus heuristics. A missing file must never block play.
 static class LauncherArt {
-    static Stream Open(string name) { return typeof(LauncherArt).Assembly.GetManifestResourceStream(name); }
+    static string AssetPath(string name) { return Path.Combine(Path.Combine(Application.StartupPath, "assets"), name); }
     public static Icon WindowIcon() {
-        var stream = Open("launcher.ico");
-        return stream == null ? null : new Icon(stream);
+        try {
+            var file = AssetPath("launcher.ico");
+            if(File.Exists(file)) return new Icon(file);
+            return Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        } catch(Exception) { return null; }
     }
     public static Image Splash() {
-        var stream = Open("launcher_splash.png");
-        // Image.FromStream keeps reading the stream lazily: copy into a bitmap
-        // that owns its pixels, then release the resource stream.
-        if(stream == null) return null;
-        using(stream) using(var image = Image.FromStream(stream)) return new Bitmap(image);
+        try {
+            var file = AssetPath("launcher_splash.png");
+            if(!File.Exists(file)) return null;
+            // Image.FromStream keeps reading lazily: copy into a bitmap that owns
+            // its pixels, so the file is not left locked.
+            using(var stream = File.OpenRead(file)) using(var image = Image.FromStream(stream)) return new Bitmap(image);
+        } catch(Exception) { return null; }
     }
 }
 

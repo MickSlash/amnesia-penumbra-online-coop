@@ -67,6 +67,7 @@ jobs:
           Copy-Item amnesia/src/game/x64/Release/Lux.exe "$out/bin/"
           Copy-Item amnesia/src/game/x64/Release/Lux.pdb "$out/symbols/"
           Copy-Item build/AmnesiaCoop.exe "$out/"
+          Copy-Item build/assets "$out/assets" -Recurse
           Copy-Item ../README.md "$out/README.md"
           Copy-Item docs/online_installazione_it.md "$out/LEGGIMI.md"
           Copy-Item LICENSE "$out/"
