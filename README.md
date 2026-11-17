@@ -51,10 +51,22 @@ their own movement predicted locally so it does not feel laggy.
 - *Amnesia: The Dark Descent* installed on both PCs.
 - The **same mod package** on both PCs. A build with a different network protocol is
   refused at connection, so always update both.
-- A network path between the two PCs: the same LAN, a VPN (Radmin VPN is the one used
-  for the full playthrough; Hamachi or ZeroTier should work the same way), or UDP port
-  **27020** forwarded on the host's router. There is no matchmaking, relay or NAT
-  punch-through.
+- A way for the two PCs to reach each other (see *Connecting* below). The mod has no
+  matchmaking or NAT punch-through of its own.
+
+### Connecting
+
+The host's game listens on **UDP port 27020**. Any of these works:
+
+- **[Radmin VPN](https://www.radmin-vpn.com/)** (used for the full playthrough): both join
+  the same Radmin network; the client connects to the host's Radmin IP (`26.x.x.x`).
+- **[Porthole](https://store.steampowered.com/app/4963920/Porthole_Local_Port_Sharing/)**
+  (free on Steam, also tested): the host shares UDP port 27020 in a Porthole lobby, the
+  client joins the lobby and accepts the port, then connects in game to `127.0.0.1`
+  port `27020`. No router setup needed.
+- Same LAN: use the host's local IP.
+- Other VPNs such as Hamachi or ZeroTier should work the same way as Radmin (untested).
+- Port forwarding: forward UDP 27020 on the host's router and use its public IP.
 
 ### Install and play
 
@@ -66,7 +78,7 @@ their own movement predicted locally so it does not feel laggy.
 4. Click **Launch Amnesia co-op**.
 5. In the main menu choose **Co-op online**:
    - the host clicks **Ospita**;
-   - the other player types the host's IP (the LAN or VPN address) and clicks **Connetti**;
+   - the other player types the host's IP (see *Connecting*) and clicks **Connetti**;
    - both click **Pronto**;
    - the host picks **Nuova campagna** or **Continua salvataggio**.
 
@@ -101,11 +113,18 @@ overwrites it on the next start, so copy both logs (host and client) **before
 restarting**, and open an issue saying which map and what happened. Lines starting with
 `[NET/` describe the connection and are usually enough to find the cause.
 
+### Known bugs
+
+- **Levers and hand wheels are hard to use for the client**: pulling a lever down or
+  turning a wheel often takes several tries. The host can operate them normally, so
+  when one gets stuck, let the host do it.
+- **Rubber banding**: the client's own movement is sometimes pulled back or corrected,
+  more often with higher latency or packet loss.
+
 ### Known limits
 
 - Two players only; Windows only.
 - The host's PC runs the whole game. A slow host or a slow connection is felt by both.
-- High latency can cause small visible corrections of your own movement.
 - Progress since the last checkpoint can be lost if the host crashes.
 - The in-game online menu is Italian only (see the table above).
 
