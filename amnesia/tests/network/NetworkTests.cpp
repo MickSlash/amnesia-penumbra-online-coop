@@ -838,7 +838,7 @@ int main(int argc, char** argv) {
                 ++input.sequence; Check(session.SendInput(input), "send input"); observed = true;
             }
             else if (session.ReadInput(decoded)) {
-                Check(decoded.forward == -1000 && decoded.buttons == 15 && decoded.lookPitch == 31420, "received input"); observed = true;
+                Check(decoded.forward == -1000 && decoded.buttons == 63 && decoded.lookPitch == 31420, "received input"); observed = true;
             }
         }
         if (!host && observed && std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) break;
