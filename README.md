@@ -123,6 +123,8 @@ restarting**, and open an issue saying which map and what happened. Lines starti
   when one gets stuck, let the host do it.
 - **Rubber banding**: the client's own movement is sometimes pulled back or corrected,
   more often with higher latency or packet loss.
+- **Flashbacks**: during flashbacks the colours look less saturated than in the original
+  game, and the client's player moves too fast.
 
 ### Known limits
 
@@ -201,6 +203,8 @@ Tests that run the real game need the original game data and stay local, for exa
 - **The Born**: the original local split-screen co-op mod for Amnesia that this online
   version grew from.
 - **MickSlash**: online co-op for Amnesia, Penumbra and The Bunker.
+- **Killen**: played the whole campaign with MickSlash to test it, and reported the bugs
+  found along the way.
 
 This is a fan project. It is not affiliated with or endorsed by Frictional Games.
 
