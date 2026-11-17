@@ -67,6 +67,7 @@ jobs:
           Copy-Item amnesia/src/game/x64/Release/Lux.exe "$out/bin/"
           Copy-Item amnesia/src/game/x64/Release/Lux.pdb "$out/symbols/"
           Copy-Item build/AmnesiaCoop.exe "$out/"
+          Copy-Item ../README.md "$out/README.md"
           Copy-Item docs/online_installazione_it.md "$out/LEGGIMI.md"
           Copy-Item LICENSE "$out/"
 
@@ -152,11 +153,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cat > notes.md <<'EOF'
-          Build automatica dalla CI. **Bozza**: verificare in gioco prima di pubblicarla.
+          Built by GitHub Actions from the tagged source. **Draft**: check it in game before publishing.
 
-          - Le prove native con i dati del gioco originale non girano in CI: vanno eseguite in locale (vedi `amnesia/tests/network` e `penumbra/TESTS.md`).
-          - Amnesia: il pacchetto non include il runtime OpenAL x64. Copiare `OpenAL32.dll` x64 in `bin/` (per esempio da un pacchetto locale creato con `tools/PackageOnlineCoop.ps1`).
-          - Nessun file del gioco originale e' incluso: serve una copia legittima su entrambi i PC.
+          - Native tests with the original game data do not run in CI; run them locally (see `amnesia/tests/network` and `penumbra/TESTS.md`).
+          - Amnesia: OpenAL is not bundled. If the game has no sound or reports a missing `OpenAL32.dll`, install the free OpenAL Windows installer from https://www.openal.org/downloads/.
+          - No original game files are included: both players need a legitimate copy of the game.
           EOF
           gh release create "$GITHUB_REF_NAME" artifacts/*.zip artifacts/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --draft --title "$GITHUB_REF_NAME" --notes-file notes.md

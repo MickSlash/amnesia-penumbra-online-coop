@@ -49,6 +49,9 @@ their own movement predicted locally so it does not feel laggy.
 
 - Windows 10 or 11, 64-bit, on both PCs.
 - *Amnesia: The Dark Descent* installed on both PCs.
+- OpenAL, which many games already install. If the game starts without sound or
+  complains about `OpenAL32.dll`, install the free
+  [OpenAL Windows installer](https://www.openal.org/downloads/) (`oalinst`).
 - The **same mod package** on both PCs. A build with a different network protocol is
   refused at connection, so always update both.
 - A way for the two PCs to reach each other (see *Connecting* below). The mod has no

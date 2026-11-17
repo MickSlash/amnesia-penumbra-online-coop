@@ -32,6 +32,7 @@ if (Test-Path -LiteralPath $backend) {
 Copy-Item -LiteralPath "$PSScriptRoot/StartOnlineCoop.ps1" -Destination "$destination/tools/StartOnlineCoop.ps1"
 # Latency diagnosis for players (VPN path vs internet line); see the script header.
 Copy-Item -LiteralPath "$PSScriptRoot/NetworkProbe.ps1" -Destination "$destination/tools/NetworkProbe.ps1"
+Copy-Item -LiteralPath "$repo/../README.md" -Destination "$destination/README.md"
 Copy-Item -LiteralPath "$repo/docs/online_installazione_it.md" -Destination "$destination/LEGGIMI.md"
 Copy-Item -LiteralPath "$repo/LICENSE" -Destination "$destination/LICENSE"
 $commit = (& git -c "safe.directory=$($repo.Replace('\','/'))" -C $repo rev-parse HEAD).Trim()
