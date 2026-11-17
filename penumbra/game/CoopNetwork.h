@@ -3,6 +3,7 @@
 #include "Init.h"
 #include "network/NetSession.h"
 #include "network/Prediction.h"
+#include "network/NetDiagnostics.h"
 #include "scene/SoundEntity.h"
 #include "CoopSteam.h"
 #include <map>
@@ -65,6 +66,8 @@ private:
     void UpdateLife(float dt);
     void PublishJournal();
     void RunCampaignQA(float dt);
+    void ReportDiagnostics();
+    void InjectQAHitch();
     cInit* init;
     online::Session session;
     cPlayer* hostPlayer = nullptr;
@@ -79,6 +82,10 @@ private:
     float toolSwing = 0;
     online::MapState map;
     online::MovementPrediction prediction;
+    online::ClientNetDiagnostics clientDiag;
+    online::HostNetDiagnostics hostDiag;
+    uint64_t diagReportAt = 0;
+    float hitchClock = 0;
     online::Snapshot latest;
     uint32_t generation = 0, sequence = 0, inputSequence = 0, actionSequence = 0, lastInput = 0, lastSnapshot = 0;
     uint8_t remoteButtons = 0;

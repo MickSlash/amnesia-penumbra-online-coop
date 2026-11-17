@@ -172,6 +172,7 @@ public:
     bool Connected() const { return ready_; }
     Role GetRole() const { return role_; }
     uint32_t Ping() const;
+    uint32_t PingVariance() const;
     void SetLobbyReady(bool ready);
     bool LobbyReady() const { return Connected() && localReady_ && remoteReady_; }
     bool LocalReady() const { return localReady_; }

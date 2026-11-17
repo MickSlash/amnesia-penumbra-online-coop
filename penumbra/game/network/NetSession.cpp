@@ -749,6 +749,7 @@ bool Session::ReadInput(PlayerInput& input) const {
     input = input_; return true;
 }
 uint32_t Session::Ping() const { return peer_ && ready_ ? peer_->roundTripTime : 0; }
+uint32_t Session::PingVariance() const { return peer_ && ready_ ? peer_->roundTripTimeVariance : 0; }
 void Session::SetLobbyReady(bool ready) {
     localReady_ = ready;
     if(!ready_) return;

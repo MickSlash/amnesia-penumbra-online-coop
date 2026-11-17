@@ -47,6 +47,14 @@ private:
 class MovementPrediction {
 public:
     void Clear() { commands_.clear(); hasPrevious_ = false; correction_ = {}; }
+    // Diagnostics: misprediction measured when a new host pose arrived (distance
+    // between the position predicted before and after it), consumed once.
+    bool TakePoseCorrection(float& distance, bool& reset) {
+        if(!poseCorrection_) return false;
+        distance = poseDistance_; reset = poseReset_; poseCorrection_ = false; return true;
+    }
+    // Diagnostics: the last replay stopped early (jump/crouch or the 500 ms cap).
+    bool LastReplayTruncated() const { return truncated_; }
     void Push(const PlayerInput& input, float dt) {
         if(!std::isfinite(dt) || dt <= 0) return;
         commands_.push_back({input,std::min(dt,1.0f/30)});
@@ -58,14 +66,15 @@ public:
     PredictedPosition Reconcile(const PlayerState& state, uint32_t acknowledged, Collision collide) {
         while(!commands_.empty() && uint32_t(acknowledged - commands_.front().input.sequence) < 0x80000000u) commands_.pop_front();
         PredictedPosition p = {state.x/1000.0f,state.z/1000.0f};
+        truncated_ = false;
         if(!(state.flags & 4) || (state.flags & (1|8|16|32))) { Clear(); return p; }
         float forward = state.forwardSpeed/1000.0f, side = state.sideSpeed/1000.0f, age = 0;
         auto speed = [](float current, float target, float change) { return current + std::max(-change,std::min(change,target-current)); };
         for(const auto& command : commands_) {
             const auto& input = command.input; const float dt = std::min(command.dt,0.5f-age);
-            if(dt <= 0) break;
+            if(dt <= 0) { truncated_ = true; break; }
             age += dt;
-            if(input.buttons & 3) break; // jumps/crouch remain authoritative
+            if(input.buttons & 3) { truncated_ = true; break; } // jumps/crouch remain authoritative
             const float diagonal = input.forward && input.strafe ? 0.70710678f : 1.0f;
             const float forwardMax = (input.forward < 0 ? state.backwardMax : state.forwardMax)/1000.0f * diagonal;
             const float sideMax = state.sideMax/1000.0f * diagonal;
@@ -90,8 +99,10 @@ public:
         PredictedPosition raw = Reconcile(state,acknowledged,collide);
         if(newPose) {
             const float dx = before.x - raw.x, dz = before.z - raw.z;
-            if(dx*dx + dz*dz > 0.0625f || std::abs(int64_t(state.y) - previousState_.y) > 250) correction_ = {};
+            const bool reset = dx*dx + dz*dz > 0.0625f || std::abs(int64_t(state.y) - previousState_.y) > 250;
+            if(reset) correction_ = {};
             else { correction_.x += dx; correction_.z += dz; }
+            poseCorrection_ = true; poseDistance_ = std::sqrt(dx*dx + dz*dz); poseReset_ = reset;
         }
         if(correction_.x*correction_.x + correction_.z*correction_.z > 0.0625f) correction_ = {};
         const float decay = std::exp(-std::min(dt,0.25f)/0.08f);
@@ -111,5 +122,7 @@ private:
     PlayerState previousState_;
     uint32_t previousAcknowledged_ = 0, previousSequence_ = 0;
     PredictedPosition correction_;
+    bool truncated_ = false, poseCorrection_ = false, poseReset_ = false;
+    float poseDistance_ = 0;
 };
 }

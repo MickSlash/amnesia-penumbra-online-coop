@@ -23,8 +23,10 @@
 #include <cmath>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <set>
+#include <thread>
 
 using namespace hpl;
 namespace hpl { extern bool gbGameScriptExecution; }
@@ -364,7 +366,10 @@ void cCoopNetwork::Update(float dt) {
         return;
     }
     const auto perfStart=std::chrono::steady_clock::now();
+    (IsHost()?hostDiag.clock:clientDiag.clock).Tick(Milliseconds());
+    InjectQAHitch();
     if(IsHost()) UpdateHost(dt); else UpdateClient(dt);
+    ReportDiagnostics();
     const auto elapsed=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-perfStart).count());
     perfSum+=elapsed; perfMax=std::max(perfMax,elapsed); ++perfSamples; perfTime+=dt;
     if(perfTime>=5) {
@@ -376,6 +381,18 @@ void cCoopNetwork::UpdateHost(float dt) {
     if(!map.epoch || !remotePlayer->GetCharacterBody()) return;
     const bool canPlay=Ready() && init->mpGame->GetUpdater()->GetCurrentContainerName()=="Default";
     online::PlayerInput input; const bool hasInput=canPlay && !remotePlayer->IsDead() && session.ReadInput(input) && input.epoch==map.epoch && !(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))!="hammer" && ((qaTime>4 && qaTime<6) || (qaTime>15 && qaTime<18) || (qaTime>24 && qaTime<26)));
+    if(canPlay && !remotePlayer->IsDead()) {
+        // Diagnostics: how client commands map onto host ticks. The host keeps
+        // only the newest input, so commands that arrive together are skipped.
+        if(!hasInput) ++hostDiag.idleTicks;
+        else if(input.sequence!=lastInput) {
+            const uint32_t advance=input.sequence-lastInput;
+            if(lastInput && advance<1000) { hostDiag.skippedInputs+=advance-1; hostDiag.commandDrift+=int64_t(advance)-1; }
+            const uint64_t now=Milliseconds();
+            if(hostDiag.lastArrival) hostDiag.inputInterval.Add(double(now-hostDiag.lastArrival));
+            hostDiag.lastArrival=now; ++hostDiag.newInputs;
+        } else { ++hostDiag.reusedTicks; --hostDiag.commandDrift; }
+    }
     {
         PlayerScope scope(init,remotePlayer,remoteHands);
         remotePlayer->SetActive((init->mpPlayer==remotePlayer ? (hostPlayer->IsActive() || hostPlayer->IsDead()) : true) && !remotePlayer->IsDead());
@@ -503,6 +520,9 @@ void cCoopNetwork::UpdateClient(float dt) {
             const uint64_t now=Milliseconds();
             if(lastSnapshotAt && std::string(getenv("PENUMBRA_COOP_QA")?getenv("PENUMBRA_COOP_QA"):"")=="hammer" && hammerTime>40 && hammerTime<48) { const float interval=(now-lastSnapshotAt)/1000.0f; intervalSum+=interval; intervalMax=std::max(intervalMax,interval); ++intervalCount; }
             lastSnapshotAt=now;
+            if(clientDiag.lastArrival) clientDiag.snapshotInterval.Add(double(now-clientDiag.lastArrival));
+            clientDiag.lastArrival=now; ++clientDiag.snapshots;
+            clientDiag.HostPose(snapshot.players[1].x/1000.0f,snapshot.players[1].z/1000.0f);
             snapshotAge=0;
             auto* player=init->mpPlayer; auto* body=player->GetCharacterBody(); const auto& s=snapshot.players[1];
             cVector3f target(s.x/1000.0f,s.y/1000.0f,s.z/1000.0f);
@@ -511,6 +531,7 @@ void cCoopNetwork::UpdateClient(float dt) {
                 positioned=true; Log("[COOP/STATE] First player baseline applied\n");
             } else if((target-body->GetFeetPosition()).SqrLength()>4.0f) {
                 if(hammerTime>40 && hammerTime<48) ++hardCorrections;
+                ++clientDiag.hard2m;
                 body->SetFeetPosition(target); prediction.Clear();
             }
             player->SetActive((s.flags&4)!=0); player->SetHealth(s.health/100.0f); player->SetPower(s.oil/100.0f);
@@ -534,14 +555,24 @@ void cCoopNetwork::UpdateClient(float dt) {
                         return online::PredictionContact{pushed.x-x,pushed.y-y,pushed.z-z};
                     });
                 });
+                ++clientDiag.replaySteps; if(blocked) ++clientDiag.replayBlocked;
                 return blocked?from:to;
             };
             auto pos=prediction.ReconcileSmoothed(snapshot.players[1],snapshot.acknowledgedInput,snapshot.sequence,dt,collide);
+            float error=0; bool reset=false;
+            if(prediction.TakePoseCorrection(error,reset)) {
+                clientDiag.correction.Add(error); if(error>.02f) ++clientDiag.over2cm; if(error>.1f) ++clientDiag.over10cm; if(reset) ++clientDiag.reset25cm;
+            }
+            if(prediction.LastReplayTruncated()) ++clientDiag.replayTruncated;
+            clientDiag.pending.Add(double(prediction.Pending()));
+            clientDiag.ackLag.Add(double(uint32_t(inputSequence-snapshot.acknowledgedInput)));
             if(hammerTime>40 && hammerTime<48) correctionMax=std::max(correctionMax,prediction.CorrectionDistance());
             body->SetNetworkHorizontalPosition(pos.x,pos.z);
         }
+        if(positioned && ((snapshot.players[1].flags&(1|8|16|32)) || !(snapshot.players[1].flags&4))) ++clientDiag.unpredictedTicks;
         UpdateAvatar(snapshot.players[0],dt);
     }
+    if(positioned) { const auto feet=init->mpPlayer->GetCharacterBody()->GetFeetPosition(); clientDiag.ShownPose(feet.x,feet.z); }
     snapshotAge+=dt;
     for(auto& pair:motion) {
         auto* e=init->mpMapHandler->GetGameEntity(pair.first,false); if(!e) continue;
@@ -629,7 +660,7 @@ void cCoopNetwork::UpdateClient(float dt) {
             input.forward=-1000; input.strafe=0; input.buttons=0; p->MoveForwards(-1,dt);
         }
         if(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))=="hammer" && hammerTime>40 && hammerTime<48) {
-            input.forward=(hammerTime<44)?500:-500; p->MoveForwards(input.forward/1000.0f,dt);
+            const int walk=getenv("PENUMBRA_COOP_QA_WALK")?std::clamp(atoi(getenv("PENUMBRA_COOP_QA_WALK")),100,1000):500; input.forward=int16_t((hammerTime<44)?walk:-walk); p->MoveForwards(input.forward/1000.0f,dt);
             if(hasClientPosition) { auto delta=p->GetCharacterBody()->GetFeetPosition()-lastClientPosition; delta.y=0; const float step=delta.Length(); stepMax=std::max(stepMax,step); movementDistance+=step; }
             lastClientPosition=p->GetCharacterBody()->GetFeetPosition(); hasClientPosition=true;
         }
@@ -637,6 +668,40 @@ void cCoopNetwork::UpdateClient(float dt) {
         input.lookYaw=int16_t(std::clamp(lookYaw*10000,-31420.0f,31420.0f)); input.lookPitch=int16_t(std::clamp(lookPitch*10000,-31420.0f,31420.0f)); lookYaw=lookPitch=0;
         session.SendInput(input); prediction.Push(input,dt);
     }
+}
+void cCoopNetwork::ReportDiagnostics() {
+    const uint64_t now=Milliseconds();
+    if(!diagReportAt) { diagReportAt=now; return; }
+    if(now-diagReportAt<5000) return;
+    const unsigned window=unsigned(now-diagReportAt); diagReportAt=now;
+    char text[512];
+    std::snprintf(text,sizeof text,"[COOP/NETDIAG] role=%s window_ms=%u rtt_ms=%u rtt_var_ms=%u",IsHost()?"host":"client",window,session.Ping(),session.PingVariance());
+    std::string line=text;
+    if(IsHost()) {
+        auto& d=hostDiag; d.totalCommandDrift+=d.commandDrift;
+        std::snprintf(text,sizeof text," ticks=%u burst_ticks=%u new_input_ticks=%u reused_input_ticks=%u expired_input_ticks=%u skipped_inputs=%llu command_drift=%lld command_drift_total=%lld",
+            d.clock.ticks,d.clock.burst,d.newInputs,d.reusedTicks,d.idleTicks,(unsigned long long)d.skippedInputs,(long long)d.commandDrift,(long long)d.totalCommandDrift);
+        line+=text+d.clock.interval.Format("tick_gap_ms")+d.inputInterval.Format("new_input_gap_ms");
+        d.ResetWindow();
+    } else {
+        auto& d=clientDiag;
+        std::snprintf(text,sizeof text," ticks=%u burst_ticks=%u snapshots=%u unpredicted_ticks=%u replay_truncated=%u poses_over_2cm=%u poses_over_10cm=%u resets_over_25cm=%u hard_over_2m=%u",
+            d.clock.ticks,d.clock.burst,d.snapshots,d.unpredictedTicks,d.replayTruncated,d.over2cm,d.over10cm,d.reset25cm,d.hard2m);
+        std::snprintf(text+strlen(text),sizeof text-strlen(text)," host_path_m=%.3f shown_path_m=%.3f replay_steps=%u replay_blocked=%u",d.hostPath,d.shownPath,d.replaySteps,d.replayBlocked);
+        line+=text+d.hostStep.Format("host_step_cm",100)+d.clock.interval.Format("tick_gap_ms")+d.snapshotInterval.Format("snapshot_gap_ms")+d.correction.Format("correction_cm",100)+d.pending.Format("pending")+d.ackLag.Format("ack_lag");
+        d.ResetWindow();
+    }
+    Log("%s\n",line.c_str());
+}
+// QA only: PENUMBRA_COOP_QA_HITCH=host|client stalls that role for 100 ms once per
+// second during the scripted hammer walk, like a slow frame on a real PC. HPL1
+// then runs the missed 60 Hz logic ticks back to back.
+void cCoopNetwork::InjectQAHitch() {
+    const char* role=getenv("PENUMBRA_COOP_QA_HITCH");
+    if(!role || !getenv("PENUMBRA_COOP_QA") || std::string(getenv("PENUMBRA_COOP_QA"))!="hammer" || std::string(role)!=(IsHost()?"host":"client")) return;
+    if(hammerTime<=40 || hammerTime>=48) { hitchClock=0; return; }
+    hitchClock+=1.0f/60;
+    if(hitchClock>=1) { hitchClock=0; std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
 }
 bool cCoopNetwork::PublishWorld(bool baseline) {
     bool complete=true;
