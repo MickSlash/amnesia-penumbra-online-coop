@@ -14,13 +14,15 @@ criteria. This preparation does not change the playable Windows mod.
 
 Two players with an authoritative host, shared inventory/campaign, world and
 player replication, host saves, shared death/checkpoints, synchronized audio,
-particles and script presentation. Current protocol: **11**. Includes complete
+particles and script presentation. Current protocol: **16**. Includes complete
 journal history, a ready lobby, automatic reconnect, checkpoint-based host
 migration and bounded horizontal client movement prediction.
 **The full campaign is not certified.**
 
-Protocol 11 relays the original objective sanity reward flash and sound to the
-client. Either online reader can advance emotion-stone text while controls are
+Protocol 16 replicates broken doors, client leaning (Q/E) and late-campaign
+inventories (original item files carry authoring paths such as
+`F:/Amnesia/redist/...`, now sent by file name). Protocol 11 relays the original
+objective sanity reward flash and sound to the client. Either online reader can advance emotion-stone text while controls are
 locked; the host relays completion and restores controls and FOV. Both peers
 must update. See the [objective effects QA report](docs/qa_objective_effects_2026-10-05.md).
 Client jumps retain horizontal prediction and use bounded vertical anticipation
@@ -29,16 +31,18 @@ through each other, including when crouched.
 
 ### Play without a terminal
 
-Extract the portable ZIP and double-click **AmnesiaCoop.exe**. Select your own
-legitimate game installation, then launch. In the game choose **Co-op online**:
+Extract the portable ZIP and double-click **AmnesiaCoop.exe** (English or
+Italian, menu at the top right). Select your own legitimate game installation,
+then launch. In the game choose **Co-op online**:
 one player selects **Ospita**, the other enters the host IPv4 and selects
 **Connetti**. Both select **Pronto**, then the host starts **Nuova campagna** or
 **Continua salvataggio**. Default port: 27020 UDP. No PowerShell is needed to play.
 See the [Italian installation and LAN/VPN guide](docs/online_installazione_it.md).
-LAN/Hamachi/Radmin require reachable IPv4/UDP; actual two-PC VPN play is untested.
+LAN/Hamachi/Radmin require reachable IPv4/UDP. Two players have played over Radmin
+VPN from the start up to 22_torture_chancel (chapter 2).
 Both peers need the same build and game data. No game assets are distributed.
 
-For the original Steam edition, keep Steam open and select **Mostra Amnesia su
+For the original Steam edition, keep Steam open and select **Show Amnesia on
 Steam** in the launcher. Lux loads the installed original x64 runtime, validates
 App ID 57300 and the active license, and registers the official game as running.
 No Steam DLL is distributed. Uncheck the option for non-Steam installations.

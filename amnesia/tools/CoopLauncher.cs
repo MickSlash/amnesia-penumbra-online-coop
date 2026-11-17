@@ -27,6 +27,25 @@ static class LauncherArt {
     }
 }
 
+// Launcher language: English by default, Italian on request. The choice is kept
+// in language.txt beside game-folder.txt. The in-game online menu stays Italian,
+// so the English help text names its buttons as they appear in the game.
+static class Lang {
+    public static bool Italian;
+    public static string T(string english, string italian) { return Italian ? italian : english; }
+    static string File(string state) { return Path.Combine(state,"language.txt"); }
+    public static void Load(string state) {
+        try { Italian = System.IO.File.Exists(File(state)) && System.IO.File.ReadAllText(File(state)).Trim() == "it"; }
+        catch(IOException) { Italian = false; }
+        catch(UnauthorizedAccessException) { Italian = false; }
+    }
+    public static void Save(string state) {
+        try { Directory.CreateDirectory(state); System.IO.File.WriteAllText(File(state), Italian ? "it" : "en", new UTF8Encoding(false)); }
+        catch(IOException) { }
+        catch(UnauthorizedAccessException) { }
+    }
+}
+
 // Borderless loading screen: shown while the launcher scans for the game and
 // again while Lux starts, until the game opens its own window.
 sealed class LauncherSplash : Form {
@@ -35,7 +54,7 @@ sealed class LauncherSplash : Form {
     public LauncherSplash(string text) {
         status = text;
         FormBorderStyle = FormBorderStyle.None; StartPosition = FormStartPosition.CenterScreen;
-        ShowInTaskbar = true; Text = "Amnesia - Campagna co-op"; Icon = LauncherArt.WindowIcon();
+        ShowInTaskbar = true; Text = Lang.T("Amnesia - Online Co-op","Amnesia - Campagna co-op"); Icon = LauncherArt.WindowIcon();
         BackColor = Color.Black; DoubleBuffered = true;
         // Logical size; WinForms scales it on high-DPI displays.
         ClientSize = new Size(420, 420);
@@ -73,6 +92,9 @@ public sealed class CoopLauncher : Form {
     readonly TextBox folder = new TextBox();
     readonly CheckBox fullscreen = new CheckBox();
     readonly CheckBox steamPresence = new CheckBox();
+    readonly Label intro = new Label(), help = new Label();
+    readonly Button browse = new Button(), launch = new Button();
+    readonly ComboBox language = new ComboBox();
     readonly string state = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AmnesiaOnlineCoop");
     readonly string saveFolder = "AmnesiaOnlineCoop_Host";
     public CoopLauncher(string testProfile = null) {
@@ -80,34 +102,50 @@ public sealed class CoopLauncher : Form {
             if(!Regex.IsMatch(testProfile,"^OnlineCoopMenuQA_[a-zA-Z0-9_]+$")) throw new ArgumentException("Invalid QA profile");
             state = Path.Combine(state,testProfile); saveFolder = testProfile;
         }
-        Text = "Amnesia - Campagna co-op"; ClientSize = new Size(660,225); Icon = LauncherArt.WindowIcon();
+        Lang.Load(state);
+        ClientSize = new Size(660,225); Icon = LauncherArt.WindowIcon();
         FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI",10);
-        Controls.Add(new Label { Text = "Seleziona la tua installazione di Amnesia: The Dark Descent.", AutoSize = true, Location = new Point(20,20) });
+        intro.AutoSize = true; intro.Location = new Point(20,20); Controls.Add(intro);
+        language.DropDownStyle = ComboBoxStyle.DropDownList; language.Location = new Point(510,16); language.Size = new Size(130,28);
+        language.Items.AddRange(new object[] { "English", "Italiano" }); language.SelectedIndex = Lang.Italian ? 1 : 0;
+        language.SelectedIndexChanged += delegate { Lang.Italian = language.SelectedIndex == 1; Lang.Save(state); ApplyLanguage(); };
+        Controls.Add(language);
         folder.Location = new Point(20,57); folder.Size = new Size(475,28); Controls.Add(folder);
-        var browse = new Button { Text = "Scegli cartella", Location = new Point(510,55), Size = new Size(130,32) };
-        browse.Click += delegate { using(var dialog = new FolderBrowserDialog()) { dialog.Description = "Cartella contenente config, maps ed entities"; if(dialog.ShowDialog(this) == DialogResult.OK) folder.Text = dialog.SelectedPath; } }; Controls.Add(browse);
-        fullscreen.Text = "Schermo intero"; fullscreen.AutoSize = true; fullscreen.Location = new Point(20,99); Controls.Add(fullscreen);
-        steamPresence.Text = "Mostra Amnesia su Steam"; steamPresence.AutoSize = true; steamPresence.Location = new Point(200,99); Controls.Add(steamPresence);
+        browse.Location = new Point(510,55); browse.Size = new Size(130,32);
+        browse.Click += delegate { using(var dialog = new FolderBrowserDialog()) { dialog.Description = Lang.T("Folder containing config, maps and entities","Cartella contenente config, maps ed entities"); if(dialog.ShowDialog(this) == DialogResult.OK) folder.Text = dialog.SelectedPath; } }; Controls.Add(browse);
+        fullscreen.AutoSize = true; fullscreen.Location = new Point(20,99); Controls.Add(fullscreen);
+        steamPresence.AutoSize = true; steamPresence.Location = new Point(200,99); Controls.Add(steamPresence);
         folder.TextChanged += delegate { steamPresence.Checked = SteamInstallation(folder.Text); };
-        Controls.Add(new Label { Text = "Nel gioco: Co-op online > Ospita / Connetti > entrambi Pronto.\r\nL'host sceglie Nuova campagna o Continua salvataggio.", Location = new Point(20,130), Size = new Size(620,50) });
-        var launch = new Button { Text = "Avvia Amnesia co-op", Location = new Point(390,185), Size = new Size(250,32) };
+        help.Location = new Point(20,130); help.Size = new Size(620,50); Controls.Add(help);
+        launch.Location = new Point(390,185); launch.Size = new Size(250,32);
         launch.Click += delegate {
             Process game;
             try { game = Launch(folder.Text, fullscreen.Checked, steamPresence.Checked); }
-            catch(Exception error) { MessageBox.Show(this, error.Message, "Avvio non riuscito", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
+            catch(Exception error) { MessageBox.Show(this, error.Message, Lang.T("Launch failed","Avvio non riuscito"), MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
             Hide();
             // Lux needs a few seconds before its window exists; keep the art on
             // screen meanwhile. Give up after 30 s: the game keeps loading anyway.
-            using(game) using(var splash = new LauncherSplash("Avvio di Amnesia...")) {
+            using(game) using(var splash = new LauncherSplash(Lang.T("Starting Amnesia...","Avvio di Amnesia..."))) {
                 splash.Show();
                 LauncherSplash.Wait(30000, delegate { game.Refresh(); return game.HasExited || game.MainWindowHandle != IntPtr.Zero; });
             }
             Close();
         }; Controls.Add(launch); AcceptButton = launch;
+        ApplyLanguage();
         var saved = Path.Combine(state,"game-folder.txt");
         if(File.Exists(saved)) folder.Text = File.ReadAllText(saved).Trim();
         if(!Valid(folder.Text)) folder.Text = Discover();
+    }
+    void ApplyLanguage() {
+        Text = Lang.T("Amnesia - Online Co-op","Amnesia - Campagna co-op");
+        intro.Text = Lang.T("Select your Amnesia: The Dark Descent installation.","Seleziona la tua installazione di Amnesia: The Dark Descent.");
+        browse.Text = Lang.T("Browse...","Scegli cartella");
+        fullscreen.Text = Lang.T("Fullscreen","Schermo intero");
+        steamPresence.Text = Lang.T("Show Amnesia on Steam","Mostra Amnesia su Steam");
+        help.Text = Lang.T("In game: Co-op online > Ospita (host) or Connetti (join) > both press Pronto (ready).\r\nThe host then picks Nuova campagna (new) or Continua salvataggio (continue).",
+            "Nel gioco: Co-op online > Ospita / Connetti > entrambi Pronto.\r\nL'host sceglie Nuova campagna o Continua salvataggio.");
+        launch.Text = Lang.T("Launch Amnesia co-op","Avvia Amnesia co-op");
     }
     public static bool Valid(string path) {
         return !String.IsNullOrEmpty(path) && File.Exists(Path.Combine(path,"config","main_init.cfg")) && File.Exists(Path.Combine(path,"resources.cfg")) && Directory.Exists(Path.Combine(path,"maps")) && Directory.Exists(Path.Combine(path,"entities"));
@@ -135,19 +173,19 @@ public sealed class CoopLauncher : Form {
         return "";
     }
     public Process Launch(string path, bool full, bool steam) {
-        if(!Valid(path)) throw new IOException("Questa cartella non contiene i dati di Amnesia. Scegli la cartella del gioco originale.");
+        if(!Valid(path)) throw new IOException(Lang.T("This folder does not contain the Amnesia game data. Select the folder of the original game.","Questa cartella non contiene i dati di Amnesia. Scegli la cartella del gioco originale."));
         path = Path.GetFullPath(path);
         if(steam) {
-            if(!SteamInstallation(path)) throw new IOException("Questa cartella non contiene il runtime Steam x64 originale di Amnesia. Verifica i file del gioco su Steam oppure disattiva Mostra Amnesia su Steam.");
+            if(!SteamInstallation(path)) throw new IOException(Lang.T("This folder does not contain the original x64 Steam runtime of Amnesia. Verify the game files in Steam or untick Show Amnesia on Steam.","Questa cartella non contiene il runtime Steam x64 originale di Amnesia. Verifica i file del gioco su Steam oppure disattiva Mostra Amnesia su Steam."));
             var clients = Process.GetProcessesByName("steam");
             bool running = clients.Length > 0;
             foreach(var client in clients) client.Dispose();
-            if(!running) throw new IOException("Apri Steam con l'account che possiede Amnesia, poi riprova. In alternativa disattiva Mostra Amnesia su Steam.");
+            if(!running) throw new IOException(Lang.T("Open Steam with the account that owns Amnesia, then try again. Or untick Show Amnesia on Steam.","Apri Steam con l'account che possiede Amnesia, poi riprova. In alternativa disattiva Mostra Amnesia su Steam."));
         }
         string root = AppDomain.CurrentDomain.BaseDirectory;
         string executable = Path.Combine(root,"bin","Lux.exe");
         if(!File.Exists(executable)) executable = Path.GetFullPath(Path.Combine(root,"..","amnesia","src","game","x64","Release","Lux.exe"));
-        if(!File.Exists(executable)) throw new FileNotFoundException("Lux.exe mancante: estrai tutto il pacchetto ZIP prima di avviare.");
+        if(!File.Exists(executable)) throw new FileNotFoundException(Lang.T("Lux.exe is missing: extract the whole ZIP package before launching.","Lux.exe mancante: estrai tutto il pacchetto ZIP prima di avviare."));
         Directory.CreateDirectory(state); File.WriteAllText(Path.Combine(state,"game-folder.txt"),path,Encoding.UTF8);
         string settings = Path.Combine(state,"settings.cfg"), init = Path.Combine(state,"init.cfg");
         File.WriteAllText(settings,"<Main ShowMenu=\"true\" ShowPreMenu=\"false\" SaveConfig=\"true\" DefaultProfileName=\"online\" UpdateLogActive=\"false\" />\n<Graphics TextureQuality=\"0\" Shadows=\"1\" SSAOActive=\"true\" />\n<Engine LimitFPS=\"true\" />\n<Screen Width=\"1280\" Height=\"720\" Display=\"0\" FullScreen=\"" + (full ? "true" : "false") + "\" Vsync=\"true\" />\n<Physics PhysicsAccuracy=\"2\" UpdatesPerSec=\"60\" />\n<Online AutoProfile=\"true\" />\n",new UTF8Encoding(false));
@@ -173,8 +211,9 @@ public sealed class CoopLauncher : Form {
     [STAThread] public static void Main(string[] args) {
         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
         string testProfile = args.Length == 2 && args[0] == "--test-profile" ? args[1] : null;
+        Lang.Load(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AmnesiaOnlineCoop"));
         CoopLauncher launcher;
-        using(var splash = new LauncherSplash("Caricamento...")) {
+        using(var splash = new LauncherSplash(Lang.T("Loading...","Caricamento..."))) {
             splash.Show(); splash.Update();
             // The constructor may scan Steam libraries and fixed drives.
             var watch = Stopwatch.StartNew();
