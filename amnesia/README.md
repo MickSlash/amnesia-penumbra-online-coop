@@ -17,7 +17,8 @@ player replication, host saves, shared death/checkpoints, synchronized audio,
 particles and script presentation. Current protocol: **16**. Includes complete
 journal history, a ready lobby, automatic reconnect, checkpoint-based host
 migration and bounded horizontal client movement prediction.
-**The full campaign is not certified.**
+The full campaign has been finished once by two players; Hard mode and custom
+stories are untested online.
 
 Protocol 16 replicates broken doors, client leaning (Q/E) and late-campaign
 inventories (original item files carry authoring paths such as
@@ -38,8 +39,8 @@ one player selects **Ospita**, the other enters the host IPv4 and selects
 **Connetti**. Both select **Pronto**, then the host starts **Nuova campagna** or
 **Continua salvataggio**. Default port: 27020 UDP. No PowerShell is needed to play.
 See the [Italian installation and LAN/VPN guide](docs/online_installazione_it.md).
-LAN/Hamachi/Radmin require reachable IPv4/UDP. Two players have played over Radmin
-VPN from the start up to 22_torture_chancel (chapter 2).
+LAN/Hamachi/Radmin require reachable IPv4/UDP. Two players have finished the whole
+campaign over Radmin VPN.
 Both peers need the same build and game data. No game assets are distributed.
 
 For the original Steam edition, keep Steam open and select **Show Amnesia on

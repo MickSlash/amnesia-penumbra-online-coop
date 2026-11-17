@@ -36,14 +36,14 @@ their own movement predicted locally so it does not feel laggy.
 
 ### How far it has been tested
 
-- Two players have played it over **Radmin VPN** from the start of the campaign up to
-  *The Chancel* (chapter 2). Several issues found along the way have been fixed, which
-  is where most of the recent commits come from.
+- Two players have **finished the whole campaign** together over **Radmin VPN**. The
+  issues they found along the way have been fixed, which is where most of the recent
+  commits come from.
 - Automated tests run two game instances on one PC: all 33 campaign maps load and
-  synchronize on both sides, plus focused regression tests (doors, saves and inventory, deaths, level changes,
-  network loss and delay).
-- **The full campaign has not been verified yet**, and the endings, Hard mode and custom
-  stories have not been tested online. Expect bugs; reports are welcome (see below).
+  synchronize on both sides, plus focused regression tests (doors, saves and inventory,
+  deaths, level changes, network loss and delay).
+- Hard mode and custom stories have not been tested online yet, and one playthrough
+  cannot catch everything. Expect bugs; reports are welcome (see below).
 
 ### Requirements
 
@@ -52,9 +52,9 @@ their own movement predicted locally so it does not feel laggy.
 - The **same mod package** on both PCs. A build with a different network protocol is
   refused at connection, so always update both.
 - A network path between the two PCs: the same LAN, a VPN (Radmin VPN is the one used
-  in testing; Hamachi or ZeroTier should work the same way), or UDP port **27020**
-  forwarded on the host's router. There is no
-  matchmaking, relay or NAT punch-through.
+  for the full playthrough; Hamachi or ZeroTier should work the same way), or UDP port
+  **27020** forwarded on the host's router. There is no matchmaking, relay or NAT
+  punch-through.
 
 ### Install and play
 
