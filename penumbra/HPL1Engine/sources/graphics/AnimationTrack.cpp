@@ -125,6 +125,15 @@ namespace hpl {
 
 		float fT = GetKeyFramesAtTime(afTime, &pKeyFrameA, &pKeyFrameB);
 
+		//Empty track (or lookup bail-out): return a neutral keyframe instead
+		//of dereferencing garbage.
+		if(pKeyFrameA == NULL)
+		{
+			ResultKeyFrame.rotation = cQuaternion::Identity;
+			ResultKeyFrame.scale = cVector3f(1,1,1);
+			ResultKeyFrame.trans = cVector3f(0,0,0);
+			return ResultKeyFrame;
+		}
 
 		if(fT == 0.0f)
 		{
@@ -151,6 +160,15 @@ namespace hpl {
 
 	float cAnimationTrack::GetKeyFramesAtTime(float afTime, cKeyFrame** apKeyFrameA,cKeyFrame** apKeyFrameB)
 	{
+		//No keyframes: the size()-1 / lIdxB indexing below would read outside
+		//the vector. Caller handles the NULL.
+		if(mvKeyFrames.empty())
+		{
+			*apKeyFrameA = NULL;
+			*apKeyFrameB = NULL;
+			return 0.0f;
+		}
+
 		float fTotalAnimLength = mpParent->GetLength();
 
 		// Wrap time
@@ -158,6 +176,16 @@ namespace hpl {
 		//But wrapping screws loop mode up.
 		//Wrap(..., totalLength + kEpislon), migh work though.
 		afTime = cMath::Clamp(afTime, 0, fTotalAnimLength);
+
+		//NaN never compares true, so it would fall through every branch below
+		//and index mvKeyFrames[-2]. (Zero-length looping animations used to
+		//produce NaN time via cMath::Wrap.)
+		if(afTime != afTime)
+		{
+			*apKeyFrameA = mvKeyFrames[0];
+			*apKeyFrameB = mvKeyFrames[0];
+			return 0.0f;
+		}
 
 		//If longer than max time return last frame and first
 		if(afTime >= mfMaxFrameTime)
@@ -194,6 +222,15 @@ namespace hpl {
 		{
 			*apKeyFrameA = mvKeyFrames[0];
 			*apKeyFrameB = mvKeyFrames[0];
+			return 0.0f;
+		}
+
+		//No frame at or after afTime (shouldn't happen with the clamp above,
+		//but indexing with lIdxB-1 == -2 must never occur): use the last frame.
+		if(lIdxB < 0)
+		{
+			*apKeyFrameA = mvKeyFrames[lSize-1];
+			*apKeyFrameB = mvKeyFrames[lSize-1];
 			return 0.0f;
 		}
 

@@ -17,3 +17,10 @@ L'adattatore usa personaggi e mani nativi separati, equipaggiamento condiviso ne
 Header e import library Win32 di SDL, SDL_image, SDL_ttf, OpenAL, Ogg, Vorbis, Theora, Cg e Newton sono input di compilazione ottenuti dalla cartella `dependencies` di https://github.com/veryjos/penumbra_vr alla revisione `7d7071c74455409c2b6a58dce935b1efc0d5d51d`. Non è stato portato il codice VR. Gli input rimangono in `build/dependencies` e non vengono inclusi nel pacchetto binario o nello ZIP dei sorgenti.
 
 Le DLL commerciali e gli asset vengono letti dall'installazione originale di Overture. Il runtime Steam è caricato facoltativamente da una DLL Valve firmata già presente sul PC; nessuna DLL Steam viene inclusa.
+
+Codice adattato da **QuasiInteractive, penumbra-overture-coop** (https://github.com/QuasiInteractive/penumbra-overture-coop, v0.12, commit `e034830`), GPLv3 come il codice Frictional:
+
+- `HPL1Engine/sources/math/Math.cpp` e `HPL1Engine/sources/graphics/AnimationTrack.cpp`: correzioni della slerp per rotazioni quasi identiche, della divisione per intervalli nulli e degli accessi fuori dai vettori delle tracce di animazione;
+- `game/CoopNetwork.cpp`, `DriveBody`/`PinBody` e `RotationError`: guida a velocità dei corpi replicati, adattata da `Overture/multiplayer/BodySync.cpp`.
+
+I modelli e le animazioni dei personaggi di quel progetto non sono inclusi: la loro licenza non è dichiarata (vedi `docs/QUASI_INTEGRATION.md`).

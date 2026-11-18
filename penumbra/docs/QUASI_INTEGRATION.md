@@ -115,3 +115,12 @@ In ordine di valore e di rischio. Ogni passo: compilazione, test di protocollo, 
 | Costo `UpdateClient` (hammer locale) | 1,3–1,6 ms | 1,1–1,5 ms |
 
 - **Decisione:** nessun miglioramento misurabile nei casi provati, quindi resta disattivata. Da rivalutare quando ci sarà una prova di spinta degli oggetti camminando, l'unico caso dove la fisica locale del client dovrebbe aiutare.
+
+### 2. Correzioni del motore (Math, AnimationTrack) — integrate
+
+- **Da `HPL1Engine/sources/math/Math.cpp`:**
+  - la slerp dei quaternioni interpola davvero anche le rotazioni quasi identiche (prima restituiva la chiave precedente: le mesh animate avanzavano a scatti sulle chiavi);
+  - gestisce il caso antipodale;
+  - nessuna divisione per intervalli nulli.
+- **Da `HPL1Engine/sources/graphics/AnimationTrack.cpp`:** niente accessi fuori dal vettore con tracce vuote, tempi NaN o tempi oltre l'ultima chiave.
+- **Verifica:** test di protocollo e tutte le prove native (hammer locale, con jitter e con frame lenti, full, intro, campagna, campagna con ritardo) PASS. Attribuzione in `THIRD_PARTY.md`.
