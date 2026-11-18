@@ -381,3 +381,43 @@ Nota: l'RTT "misurato" include l'elaborazione delle due istanze sullo stesso PC.
 
 - Nello scenario più duro, in una delle due esecuzioni il client ha messo a segno 4 colpi di martello su 7 sulla sua cassa entro la finestra dello script (nell'altra esecuzione 7 su 7). È in `COOP_KNOWN_ISSUES.md`.
 - **Prove funzionali sulla stessa build:** full, intro, campagna e campagna con ritardo tutte PASS.
+
+## 11. Aggiornamento 18 novembre — tutte le 25 mappe della campagna in co-op
+
+### Nuova prova `maps`
+
+Comando: `RunNativeTest.ps1 -Mode maps`.
+
+- L'host carica in sequenza le 25 mappe di Overture (da `level00_01_boat_cabin` a `level01_20_base_entrance`).
+- Su ognuna aspetta che il client abbia applicato il mondo, lascia replicare entità e media per 4 s e passa alla successiva.
+- Passa se entrambi i ruoli completano tutte le mappe senza disconnessioni involontarie.
+- Verifica caricamento, barriera e replica, **non** la soluzione degli enigmi.
+
+### Difetto trovato e corretto: baseline bloccata su `level01_12_water_cave_tunnels`
+
+- **Sintomo:**
+  - le prime 14 mappe passavano;
+  - sulla 15ª l'host restava in caricamento (`world_applied_epoch=0`);
+  - dopo 45 s la barriera faceva ripartire la connessione, all'infinito.
+- **Diagnostica aggiunta:**
+  - `[COOP/MAP] Waiting to apply world` sul client, con cosa manca;
+  - `[COOP/MAP] Baseline still pending` sull'host;
+  - `[NET/WORLD]`, `[NET/INVENTORY]` e `[NET/JOURNAL]` "Cannot encode" per i dati impossibili da codificare.
+- **Misura:**
+  - il client aveva inventario e diario dell'epoch, ma mai `WorldReady`;
+  - l'host aveva pubblicato 83 entità su 90.
+- **Causa (VERIFICATA NEL CODICE):**
+  - durante la baseline `PublishWorld(true)` viene richiamata a ogni tick finché tutto parte;
+  - i nemici con animazioni attive risultano sempre "mossi" e venivano rispediti ogni tick sul canale affidabile;
+  - questo saturava la finestra di 8 KiB (`Session::BulkReady`), e le ultime entità non partivano mai.
+- **Correzione:**
+  - durante la baseline un'entità già inviata non viene reinviata se non cambia stato; il movimento riprende come posa non affidabile dopo la conferma del mondo;
+  - inoltre i percorsi dei file delle entità vengono normalizzati (barre, percorsi assoluti → nome del file), come in Amnesia.
+- **Risultato:** 25/25 mappe pronte su host e client (le misure complete sono più sotto).
+
+Verifica finale sulla stessa build:
+
+- prova `maps` in locale: 25/25 su host e client, PASS;
+- prova `maps` con RTT 80 ms, jitter 20 ms e 2 % di perdita: 25/25 su host e client, PASS (su una mappa la baseline ha atteso qualche secondo, ma si è completata);
+- test di protocollo: PASS;
+- prove native: hammer locale e con jitter, full, intro, campagna e campagna con ritardo PASS. Hammer con frame lenti sul client: FAIL in questa esecuzione, per un singolo passo del client di 0,30 m oltre quello dell'host (nelle due esecuzioni precedenti 0,046 m). Intermittente, registrato in `COOP_KNOWN_ISSUES.md`.

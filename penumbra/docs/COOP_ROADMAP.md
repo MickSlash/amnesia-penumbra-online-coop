@@ -48,8 +48,15 @@ Niente push senza autorizzazione esplicita.
 
 ## Compito corrente
 
-1. Ramo `quasi-integration`: integrazione delle parti utili di QuasiInteractive secondo il piano in `QUASI_INTEGRATION.md`.
-2. Fase 4 (da 2 a 4 giocatori) secondo il progetto in `COOP_ARCHITECTURE.md`.
+Fase 4, da 2 a 4 giocatori, secondo il progetto in `COOP_ARCHITECTURE.md` ("Progetto: da 2 a 4 giocatori"). Primo passo: `NetSession` multi-peer e slot ID nel protocollo, verificati prima con 1 ospite.
+
+### Rimandato, con motivo
+
+- **Personaggi animati di QuasiInteractive:**
+  - i modelli non hanno una licenza dichiarata;
+  - le modifiche del caricatore COLLADA cambiano il calcolo delle rotazioni per tutte le animazioni. Se integrate, vanno limitate ai file senza blocco `<extra>` di HPL, così gli asset originali restano identici.
+
+  Dettagli in `QUASI_INTEGRATION.md`.
 
 ## Fatto di recente
 

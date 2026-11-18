@@ -4,6 +4,7 @@ Ogni voce indica se è misurata, verificata nel codice o solo ipotizzata. Le voc
 
 ## Overture
 
+- **Scatto intermittente del client con frame lenti** (prova hammer con `-Hitch client`): in 1 esecuzione su 3, un passo del client 0,30 m oltre il passo dell'host durante la camminata contro i frammenti. Probabile combinazione fra recupero dei tick dopo il blocco e salita sui frammenti. Da indagare con il registro `Large client step`.
 - **Spingere oggetti camminando:** ora i corpi entro la massa spingibile non bloccano il client (protocollo 6), ma restano statici sul client finché l'host non li sposta: si vedono muovere con un giro di ritardo. Non ancora misurato con una prova dedicata.
 - **Porte, cassetti e leve trascinati dal client** rispondono dopo un giro in rete: 166 ms in locale, 350 ms con RTT 120 ms (`COOP_TEST_RESULTS.md` §10). La fisica gira solo sull'host. Possibile soluzione: possesso temporaneo della fisica dell'oggetto da parte del client, oppure corpi del client guidati a velocità come in QuasiInteractive (`QUASI_INTEGRATION.md`).
 - **Colpi di martello del client con rete molto degradata** (RTT 120 ms + jitter 40 ms + 5 % perdita): in un'esecuzione su due, 4 colpi su 7 entro la finestra della prova. I gesti di attacco viaggiano sul canale affidabile e attendono le ritrasmissioni. Da misurare con più esecuzioni.

@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$GameDirectory,[int]$Port=27121,[ValidateSet('baseline','full','intro','hammer','campaign','resume')][string]$Mode='baseline',[string]$Root='', [string]$Executable='', [int]$OneWayDelayMs=0, [int]$JitterMs=0, [int]$DropEvery=20,[ValidateSet('','host','client')][string]$Hitch='',[ValidateRange(100,1000)][int]$Walk=500,[switch]$ClientSimpleSwing,[string]$PreviousRun="")
+param([Parameter(Mandatory=$true)][string]$GameDirectory,[int]$Port=27121,[ValidateSet('baseline','full','intro','hammer','campaign','resume','maps')][string]$Mode='baseline',[string]$Root='', [string]$Executable='', [int]$OneWayDelayMs=0, [int]$JitterMs=0, [int]$DropEvery=20,[ValidateSet('','host','client')][string]$Hitch='',[ValidateRange(100,1000)][int]$Walk=500,[switch]$ClientSimpleSwing,[string]$PreviousRun="")
 $ErrorActionPreference='Stop'
 $root=if($Root) { [IO.Path]::GetFullPath($Root) } else { (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path }
 $run=Join-Path $root ('build/qa/coop-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -22,7 +22,7 @@ $relay=$null
 if($OneWayDelayMs -gt 0) {
     $shell=(Get-Process -Id $PID).Path
     $relayScript=Join-Path $root 'tests/network/Relay.ps1'
-    $duration=if($Mode-eq'campaign'){150}elseif($Mode-eq'hammer'){75}else{55}
+    $duration=if($Mode-eq'maps'){880}elseif($Mode-eq'campaign'){150}elseif($Mode-eq'hammer'){75}else{55}
     $relay=Start-Process -FilePath $shell -ArgumentList @('-NoProfile','-File', ('"'+$relayScript+'"'),'-Port', "$Port",'-Delay',"$OneWayDelayMs",'-Jitter',"$JitterMs",'-DropEvery',"$DropEvery",'-Duration',"$duration",'-StopFile',('"'+(Join-Path $run 'relay-stop')+'"')) -WindowStyle Hidden -RedirectStandardOutput (Join-Path $run 'relay.log') -RedirectStandardError (Join-Path $run 'relay-error.log') -PassThru
     $null=$relay.Handle
     Start-Sleep -Milliseconds 1500
@@ -38,7 +38,7 @@ $env:PENUMBRA_COOP_SCREENSHOT=Join-Path $run 'client.bmp'
 $clientProcess=Start-Process -FilePath $exe -WorkingDirectory $GameDirectory -WindowStyle Hidden -PassThru
 $null=$clientProcess.Handle
 @($hostProcess.Id,$clientProcess.Id) | Set-Content (Join-Path $run 'pids.txt')
-$deadline=(Get-Date).AddSeconds($(if($Mode-eq'campaign'){180}elseif($Mode-eq'hammer'){95}else{65}))
+$deadline=(Get-Date).AddSeconds($(if($Mode-eq'maps'){900}elseif($Mode-eq'campaign'){180}elseif($Mode-eq'hammer'){95}else{65}))
 while((Get-Date)-lt $deadline -and (!$hostProcess.HasExited -or !$clientProcess.HasExited)) { Start-Sleep -Milliseconds 250 }
 $passed=$true
 foreach($process in @($hostProcess,$clientProcess)) {

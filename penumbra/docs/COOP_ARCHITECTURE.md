@@ -72,6 +72,16 @@ Il modello resta autoritativo: per ogni ospite l'host simula un `cPlayer` remoto
 | Vita e salvataggi | Partner salvato con `SavePartner` | Stato per slot nel checkpoint (salute, batteria, inventario personale quando ci sarà); respawn accanto a un giocatore vivo qualsiasi. |
 | Ingresso e uscita | Riconnessione dello stesso partner | Ingresso in corsa con baseline per il nuovo peer; uscita che libera lo slot e lascia gli oggetti unici nel mondo (con l'inventario per giocatore). |
 
+Scelta di implementazione per il trasporto (decisa il 18/11): invece di riscrivere `Session` in versione multi-peer, si separa il trasporto.
+
+- Un oggetto `Transport` lato host possiede l'`ENetHost` e smista gli eventi:
+  - CONNECT: assegna uno slot libero e associa il peer a una `Session` dedicata;
+  - RECEIVE: passa i dati alla `Session` di quel peer;
+  - DISCONNECT: libera lo slot.
+- Ogni ospite ha la sua `Session` con il codice per singola connessione già testato (coda di input, epoch, checkpoint, identità).
+- I messaggi verso tutti (mappa, entità, media, inventario, diario, checkpoint) diventano un ciclo sulle `Session` attive.
+- Il client resta invariato: un solo peer, cioè l'host.
+
 Ordine previsto, ogni passo verificato con 2 giocatori prima di proseguire:
 
 1. Slot ID nel protocollo, ancora con 1 ospite.

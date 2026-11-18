@@ -75,7 +75,7 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
 | Morte individuale, respawn vicino al compagno dopo 5 s | ✅ | |
 | Morte di tutti: ricarica del checkpoint co-op | ✅ | |
 | Spettatore | ❌ | |
-| Cambio mappa con barriera di caricamento | ✅ | |
+| Cambio mappa con barriera di caricamento | ✅ | prova `maps`: tutte le 25 mappe della campagna caricate e sincronizzate su host e client |
 
 ### Nemici
 

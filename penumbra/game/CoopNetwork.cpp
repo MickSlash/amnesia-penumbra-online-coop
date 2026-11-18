@@ -389,6 +389,8 @@ void cCoopNetwork::PublishJournal() {
     auto tasks=saved.mlstTasks.GetIterator();
     while(tasks.HasNext()) { const auto& t=tasks.Next(); online::JournalEntry e; e.kind=2; e.name=t.msName; e.textEntry=cString::To8Char(t.msText); next.entries.push_back(e); }
     const auto bytes=online::EncodeJournal(next);
+    if(bytes.empty() && unsendableLogged.insert(std::to_string(map.epoch)+"/journal").second)
+        Log("[NET/JOURNAL] Cannot encode journal entries=%u; the client cannot finish loading\n",unsigned(next.entries.size()));
     if(bytes!=journalBytes) { next.revision=journalRevision+1; if(session.SendJournal(next)) { journalBytes=bytes; journalRevision=next.revision; } }
 }
 void cCoopNetwork::WeaponHit(const std::string& entity,float health) {
@@ -584,6 +586,7 @@ void cCoopNetwork::UpdateHost(float dt) {
     }
     if(session.IsMapReady(map.epoch) && !baselineSent) {
         if(PublishWorld(true) && session.SendWorldReady(map.epoch)) baselineSent=true;
+        else if((waitingWorld+=dt)>5) { waitingWorld=0; Log("[COOP/MAP] Baseline still pending epoch=%u published=%u\n",map.epoch,unsigned(published.size())); }
     }
     if(session.IsMapReady(map.epoch)) {
         PublishMedia();
@@ -593,6 +596,10 @@ void cCoopNetwork::UpdateHost(float dt) {
             auto* item=pair.second; online::InventoryItem value; value.name=item->GetName(); value.image=item->GetEntityFile(); value.count=uint16_t(std::max(1,item->GetCount())); next.items.push_back(value);
         }
         auto bytes=online::EncodeInventory(next);
+        if(bytes.empty() && unsendableLogged.insert(std::to_string(map.epoch)+"/inventory").second) {
+            std::string names; for(const auto& v:next.items) names+=v.name+"("+v.image+") ";
+            Log("[NET/INVENTORY] Cannot encode inventory items=%u: %s; the client cannot finish loading\n",unsigned(next.items.size()),names.c_str());
+        }
         if(bytes!=inventoryBytes) {
             next.revision=inventory.revision+1;
             if(session.SendInventory(next)) { inventory=next; inventoryBytes=bytes; }
@@ -808,6 +815,14 @@ void cCoopNetwork::UpdateClient(float dt) {
         if(init->mpNotebook->IsActive()) init->mpNotebook->SetActive(false);
         init->mpNotebook->Reset(); init->mpNotebook->LoadFromGlobal(&saved); receivedJournal=book.revision;
     }
+    // Diagnostica: cosa manca ancora per confermare il mondo di questa mappa.
+    if(!session.IsWorldApplied(map.epoch)) {
+        waitingWorld+=dt;
+        if(waitingWorld>5) {
+            waitingWorld=0;
+            Log("[COOP/MAP] Waiting to apply world epoch=%u positioned=%d inventory_epoch=%u journal=%u world_ready=%d\n",map.epoch,positioned?1:0,inventory.epoch,receivedJournal,session.IsWorldReady(map.epoch)?1:0);
+        }
+    } else waitingWorld=0;
     if(positioned && inventory.epoch==map.epoch && receivedJournal && !session.IsWorldApplied(map.epoch) && session.IsWorldReady(map.epoch)) {
         auto it=init->mpMapHandler->GetGameEntityIterator();
         while(it.HasNext()) { auto* e=it.Next(); if(!baselineNames.count(e->GetName())) e->SetActive(false); }
@@ -988,6 +1003,11 @@ bool cCoopNetwork::PublishEntity(iGameEntity* entity,bool baseline) {
     const auto& name=entity->GetName();
     {
         online::EntityState e; e.epoch=map.epoch; e.id=EntityID(name); e.name=name; e.file=entity->GetFileName();
+        // Alcune mappe originali conservano percorsi del PC degli sviluppatori
+        // o barre rovesciate: HPL risolve le risorse per nome, quindi basta il
+        // nome del file (la validazione rifiuta i due punti e la barra rovesciata).
+        std::replace(e.file.begin(),e.file.end(),'\\','/');
+        if(e.file.find(':')!=std::string::npos) e.file=cString::GetFileName(e.file);
         e.flags=entity->IsActive()?1:0; e.subtype=uint16_t(entity->GetType());
         if(entity->GetType()==eGameEntityType_Enemy) {
             auto* enemy=static_cast<iGameEnemy*>(entity);
@@ -1008,9 +1028,19 @@ bool cCoopNetwork::PublishEntity(iGameEntity* entity,bool baseline) {
         const auto found=published.find(name);
         const bool lifecycle=found==published.end() || found->second.flags!=e.flags || (e.subtype==eGameEntityType_Enemy && ((found->second.health<=0)!=(e.health<=0) || found->second.enemyState!=e.enemyState));
         const bool moved=found==published.end() || found->second.bodies!=e.bodies || found->second.transform!=e.transform || found->second.character!=e.character || !e.animations.empty();
+        // Durante la baseline un'entità già inviata non va reinviata se non
+        // cambia stato: i nemici animati risultano sempre "mossi" e venivano
+        // rispediti a ogni tick sul canale affidabile, saturando la finestra
+        // di 8 KiB; le ultime entità non partivano mai e la baseline restava
+        // incompleta (level01_12_water_cave_tunnels). Il movimento riparte
+        // come posa non affidabile dopo la conferma del mondo.
+        if(baseline && found!=published.end() && !lifecycle) return true;
         if(lifecycle || moved) {
             e.sequence=++sequence; e.hostTick=hostTick;
             const bool sent=(baseline || lifecycle)?session.SendEntity(e):session.SendEntityMotion(e);
+            if(!sent && online::EncodeEntity(e).empty() && unsendableLogged.insert(std::to_string(map.epoch)+"/"+name).second)
+                Log("[NET/WORLD] Cannot encode entity name=%s file=%s type=%u bodies=%u animations=%u health=%d state=%u target=%u; the baseline cannot complete\n",
+                    name.c_str(),e.file.c_str(),unsigned(e.type),unsigned(e.bodies.size()),unsigned(e.animations.size()),e.health,unsigned(e.enemyState),unsigned(e.target));
             if(sent) published[name]=e; else return false;
         }
     }
@@ -1129,6 +1159,7 @@ void cCoopNetwork::UpdateAvatar(const online::PlayerState& s,float dt) {
 void cCoopNetwork::RunQA(float dt) {
     if(!getenv("PENUMBRA_COOP_QA") || (!Ready() && qaTime<=0)) return;
     qaTime+=dt;
+    if(std::string(getenv("PENUMBRA_COOP_QA"))=="maps") { RunMapsQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="hammer") { RunHammerQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="campaign") { if(hammerTime<10) RunHammerQA(dt); else RunCampaignQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="resume") { RunCampaignQA(dt); return; }
@@ -1281,6 +1312,41 @@ void cCoopNetwork::RunQA(float dt) {
     }
 }
 
+// QA "maps": l'host carica una dopo l'altra le 25 mappe della campagna di
+// Overture; su ognuna aspetta che il client abbia applicato il mondo
+// (Ready), lascia replicare entità e media per 4 s e passa alla successiva.
+// Passa se entrambi i ruoli completano tutte le mappe senza disconnessioni.
+// Non verifica gli enigmi: solo caricamento, barriera e replica.
+void cCoopNetwork::RunMapsQA(float dt) {
+    static const char* maps[]={"level00_01_boat_cabin.dae","level01_01_outside.dae","level01_02_mine_entrance.dae","level01_03_shafts.dae",
+        "level01_04_old_storage.dae","level01_05_office.dae","level01_06_workshop.dae","level01_07_lead_mine_shafts_A.dae",
+        "level01_07_lead_mine_shafts_B.dae","level01_07_lead_mine_shafts_C.dae","level01_08_water_cave.dae","level01_09_generator_room.dae",
+        "level01_10_small_shaft.dae","level01_11_new_storage_room.dae","level01_12_water_cave_tunnels.dae","level01_13_A_iron_mine_shafts.dae",
+        "level01_13_B_iron_storage_tunnels.dae","level01_13_C_iron_base_tunnels.dae","level01_14_refinery.dae","level01_15_icecave.dae",
+        "level01_16_destroyed_shaft.dae","level01_17_worm_nest.dae","level01_18_mining_room.dae","level01_19_door_shaft.dae","level01_20_base_entrance.dae"};
+    const size_t count=sizeof(maps)/sizeof(maps[0]);
+    const std::string current=cString::ToLowerCase(cString::GetFileName(map.file));
+    if(Ready() && !qaMapsReady.count(current)) {
+        qaMapsReady.insert(current); qaMapTime=0;
+        int entities=0; auto it=init->mpMapHandler->GetGameEntityIterator(); while(it.HasNext()) { it.Next(); ++entities; }
+        Log("[COOP/QA] Map ready role=%s index=%u map=%s epoch=%u entities=%d\n",IsHost()?"host":"client",unsigned(qaMapsReady.size()),current.c_str(),map.epoch,entities);
+    }
+    qaMapTime+=dt;
+    if(IsHost() && Ready() && qaMapsReady.count(current) && qaMapTime>4 && qaMapIndex+1<count) {
+        // Avanza alla mappa successiva nell'elenco (anche se lo script ne ha caricata un'altra).
+        for(size_t n=0;n<count;++n) if(cString::ToLowerCase(maps[n])==current) qaMapIndex=n;
+        if(qaMapIndex+1<count) { ++qaMapIndex; qaMapTime=0; init->mpMapHandler->ChangeMap(maps[qaMapIndex],"","","",.1f,.1f,"",""); }
+    }
+    size_t done=0; for(size_t n=0;n<count;++n) if(qaMapsReady.count(cString::ToLowerCase(maps[n]))) ++done;
+    // L'uscita volontaria del partner dopo aver completato tutte le mappe non è un errore.
+    if(!session.Connected() && !(done==count && session.PartnerLeftVoluntarily())) qaMapsDisconnected=true;
+    const bool finished=done==count && qaMapTime>(IsHost()?8.0f:4.0f);
+    if(finished || qaMapTime>90) {
+        const bool ok=finished && !qaMapsDisconnected;
+        Log("[COOP/QA] %s campaign maps role=%s ready=%u/%u disconnected=%d\n",ok?"PASS":"FAIL",IsHost()?"host":"client",unsigned(done),unsigned(count),qaMapsDisconnected?1:0);
+        init->mpGame->Exit();
+    }
+}
 void cCoopNetwork::RunHammerQA(float dt) {
     if(IsClient()) init->mbSimpleWeaponSwing=getenv("PENUMBRA_COOP_QA_SIMPLE") && std::string(getenv("PENUMBRA_COOP_QA_SIMPLE"))=="1";
     auto* player=init->mpPlayer;

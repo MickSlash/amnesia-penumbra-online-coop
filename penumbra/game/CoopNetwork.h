@@ -72,6 +72,12 @@ private:
     void UpdateLife(float dt);
     void PublishJournal();
     void RunCampaignQA(float dt);
+    void RunMapsQA(float dt);
+    // QA "maps": tutte le mappe della campagna caricate in sequenza.
+    size_t qaMapIndex = 0;
+    float qaMapTime = 0;
+    std::set<std::string> qaMapsReady;
+    bool qaMapsDisconnected = false;
     void ReportDiagnostics();
     hpl::iPhysicsBody* CreateCollider(const std::string& name,const hpl::cVector3f& size);
     void InjectQAHitch();
@@ -183,6 +189,8 @@ private:
     uint8_t lifeMask = 0;
     hpl::cVector3f spawn;
     std::set<std::string> baselineNames;
+    std::set<std::string> unsendableLogged;
+    float waitingWorld = 0;
     std::vector<uint8_t> journalBytes;
     uint32_t journalRevision = 0, receivedJournal = 0;
     float journalTime = 0;
