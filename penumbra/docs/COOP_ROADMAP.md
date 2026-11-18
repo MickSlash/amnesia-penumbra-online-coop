@@ -41,7 +41,7 @@ Niente push senza autorizzazione esplicita.
 | 1 | Analisi del progetto esistente | ✅ |
 | 2 | Stabilità: movimento, fisica, autorità, interazioni | in corso |
 | 3 | Campagna completa di Overture, inventari, consumabili, oggetti unici, spettatore | da fare |
-| 4 | Da 2 a 4 giocatori | in corso: rete, movimento, silhouette, nemici e checkpoint fatti; inventari per giocatore e scelta dal launcher da fare |
+| 4 | Da 2 a 4 giocatori | in corso: rete, movimento, silhouette, nemici e checkpoint fatti; scelta nel launcher fatta; inventari per giocatore da fare |
 | 5 | Presentazione e accesso: modelli, animazioni, audio, menu nel gioco, Steam | da fare |
 | 6 | Validazione completa: automatica per ogni livello e reale su due PC | da fare |
 | 7 | Black Plague, poi Requiem | non iniziato (su richiesta) |
@@ -51,7 +51,6 @@ Niente push senza autorizzazione esplicita.
 Fase 4, da 2 a 4 giocatori, secondo il progetto in `COOP_ARCHITECTURE.md` ("Da 2 a 4 giocatori"). Fatti i passi 1-7.
 
 Prossimi passi:
-- numero di giocatori scelto dal launcher (oggi solo `PENUMBRA_COOP_PLAYERS`);
 - corpo di un ospite 3-4 disconnesso tolto dal mondo;
 - poi la Fase 3 per più giocatori: inventari separati, consumabili per giocatore, oggetti unici tracciati.
 
