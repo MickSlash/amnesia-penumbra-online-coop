@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../game/network/NetSession.h"
+#include "../../game/network/HostTransport.h"
 #include "../../game/network/Prediction.h"
 #include "../../game/network/Interpolation.h"
 #include "../../game/network/ScriptPreloads.h"
@@ -8,6 +9,7 @@
 #include <thread>
 #include <cstdlib>
 #include <enet/enet.h>
+#include <mmsystem.h>
 using namespace online;
 static void Check(bool ok, const char* message) {
     if (!ok) { std::cerr << "FAIL: " << message << '\n'; std::exit(1); }
@@ -709,7 +711,7 @@ static void NativeMovementPredictionTest() {
 static void HeldStateCodecTest() {
     Snapshot snapshot; snapshot.epoch = 3; snapshot.players[0].heldEntity = 99; snapshot.players[0].heldMode = uint8_t(HeldMode::Grab);
     auto bytes = EncodeSnapshot(snapshot); Snapshot read;
-    Check(bytes.size() == SnapshotBytes && DecodeSnapshot(bytes.data(), bytes.size(), read) && read.players[0].heldEntity == 99 && read.players[0].heldMode == 1, "held object roundtrip");
+    Check(bytes.size() == SnapshotBytes(2) && DecodeSnapshot(bytes.data(), bytes.size(), read) && read.players[0].heldEntity == 99 && read.players[0].heldMode == 1, "held object roundtrip");
     snapshot.players[0].heldMode = 4; Check(EncodeSnapshot(snapshot).empty(), "unknown held mode rejected");
     snapshot.players[0].heldMode = 0; Check(EncodeSnapshot(snapshot).empty(), "held entity without a mode rejected");
     snapshot.players[0].heldEntity = 0; Check(!EncodeSnapshot(snapshot).empty(), "nothing held is valid");
@@ -757,9 +759,106 @@ static void BunchedInputTransportTest() {
     client.Stop(); host.Stop();
     std::cout << "PASS: redundant input batches over UDP\n";
 }
+// Protocollo 7: ID dei giocatori negli snapshot e assegnazione con Welcome.
+static void PlayerSlotTest() {
+    Snapshot four; four.epoch = 2; four.playerCount = 4;
+    four.players[1].id = 3; four.players[2].id = 2; four.players[3].id = 4; four.players[3].x = 4321;
+    auto bytes = EncodeSnapshot(four); Snapshot read;
+    Check(bytes.size() == SnapshotBytes(4) && DecodeSnapshot(bytes.data(), bytes.size(), read) && read.playerCount == 4 &&
+        read.players[1].id == 3 && read.players[2].id == 2 && read.players[3].id == 4 && read.players[3].x == 4321, "four players roundtrip");
+    for(size_t n = 0; n < bytes.size(); ++n) Check(!DecodeSnapshot(bytes.data(), n, read), "truncated four-player snapshot");
+    StressCodec(four, EncodeSnapshot, DecodeSnapshot);
+    Snapshot three = four; three.playerCount = 3; bytes = EncodeSnapshot(three);
+    Check(bytes.size() == SnapshotBytes(3) && DecodeSnapshot(bytes.data(), bytes.size(), read) && read.playerCount == 3, "three players roundtrip");
+    bytes[21] = 4; Check(!DecodeSnapshot(bytes.data(), bytes.size(), read), "player count must match the size");
+    Snapshot bad = four; bad.players[2].id = 3; Check(EncodeSnapshot(bad).empty(), "duplicate player ID rejected");
+    bad = four; bad.players[0].id = 2; bad.players[2].id = 1; Check(EncodeSnapshot(bad).empty(), "host must come first");
+    bad = four; bad.players[3].id = 5; Check(EncodeSnapshot(bad).empty(), "player ID beyond the maximum rejected");
+    bad = four; bad.playerCount = 1; Check(EncodeSnapshot(bad).empty(), "a snapshot names host and recipient");
+    bad = four; bad.playerCount = 5; Check(EncodeSnapshot(bad).empty(), "at most four players");
+    Session host(Log), client(Log);
+    Check(host.SetGuestPlayerId(3) && !host.SetGuestPlayerId(1) && !host.SetGuestPlayerId(5), "guest ID range");
+    Check(host.StartHost(27059) && client.StartClient("127.0.0.1", 27059), "slot startup");
+    Check(!host.SetGuestPlayerId(4), "guest ID fixed while running");
+    auto pump = [&](int ms) { for(int i = 0; i < ms; ++i) { host.Poll(); client.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    pump(100); Check(host.Connected() && client.Connected() && client.GuestPlayerId() == 3, "Welcome assigns the slot");
+    MapState map; map.epoch = 5; map.fingerprint = 1; map.file = "maps/test.dae";
+    Check(host.SendMap(map), "slot map"); pump(20); Check(client.SendMapReady(5), "slot map ready"); pump(20);
+    Snapshot addressed; addressed.epoch = 5; addressed.sequence = 1; addressed.playerCount = 3;
+    addressed.players[1].id = 3; addressed.players[2].id = 2; addressed.players[2].x = 777;
+    Check(host.SendSnapshot(addressed), "addressed snapshot"); pump(20);
+    Check(client.ReadSnapshot(read) && read.players[1].id == 3 && read.players[2].x == 777, "guest reads its own slot and the others");
+    Snapshot wrong = addressed; wrong.sequence = 2; wrong.players[1].id = 2; wrong.players[2].id = 3;
+    Check(host.SendSnapshot(wrong), "misaddressed snapshot sent"); pump(50);
+    Check(!client.Connected(), "a snapshot addressed to another guest is rejected");
+    client.Stop(); host.Stop();
+    std::cout << "PASS: player IDs and slot assignment\n";
+}
+// Un socket host, tre Session ospite: ID distinti, traffico separato per
+// ospite, quarto rifiutato, slot riusato dopo un'uscita volontaria, stessa
+// identità che torna nel proprio slot.
+static void MultiGuestTransportTest() {
+    Session a(Log), b(Log), c(Log);
+    HostTransport transport(Log);
+    Check(transport.Start(27060, {&a, &b, &c}), "transport startup");
+    Session g1(Log), g2(Log), g3(Log), g4(Log);
+    Check(g1.SetLocalIdentity(0x1111) && g2.SetLocalIdentity(0x2222) && g3.SetLocalIdentity(0x3333) && g4.SetLocalIdentity(0x4444), "guest identities");
+    std::vector<Session*> clients = {&g1, &g2, &g3, &g4};
+    auto pump = [&](int ms) { for(int i = 0; i < ms; ++i) { transport.Poll(); for(auto* s : clients) s->Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    Check(g1.StartClient("127.0.0.1", 27060), "guest 1 start"); pump(150);
+    Check(g2.StartClient("127.0.0.1", 27060), "guest 2 start"); pump(150);
+    Check(g3.StartClient("127.0.0.1", 27060), "guest 3 start"); pump(150);
+    Check(transport.ConnectedGuests() == 3 && g1.Connected() && g2.Connected() && g3.Connected(), "three guests connected");
+    Check(g1.GuestPlayerId() == 2 && g2.GuestPlayerId() == 3 && g3.GuestPlayerId() == 4, "slots assigned in order");
+    Check(a.GuestPlayerId() == 2 && b.GuestPlayerId() == 3 && c.GuestPlayerId() == 4 && a.Connected() && b.Connected() && c.Connected(), "host sessions own one guest each");
+    Check(g4.StartClient("127.0.0.1", 27060), "guest 4 start"); pump(300);
+    Check(!g4.Connected() && transport.ConnectedGuests() == 3, "a fourth guest is rejected");
+    // Traffico per ospite: ogni Session riceve solo i comandi del suo peer.
+    PlayerInput input; input.forward = 1000;
+    input.sequence = 1; input.lookYaw = 200; Check(g1.SendInput(input), "guest 1 input");
+    input.sequence = 1; input.lookYaw = 300; Check(g2.SendInput(input), "guest 2 input");
+    input.sequence = 1; input.lookYaw = 400; Check(g3.SendInput(input), "guest 3 input");
+    pump(30);
+    PlayerInput read;
+    Check(a.ReadInput(read) && read.lookYaw == 200 && b.ReadInput(read) && read.lookYaw == 300 && c.ReadInput(read) && read.lookYaw == 400, "inputs reach their own session");
+    MapState map; map.epoch = 9; map.fingerprint = 1; map.file = "maps/test.dae";
+    Check(a.SendMap(map) && b.SendMap(map) && c.SendMap(map), "map to every guest"); pump(30);
+    Check(g1.SendMapReady(9) && g2.SendMapReady(9) && g3.SendMapReady(9), "every guest ready"); pump(30);
+    Check(a.IsMapReady(9) && b.IsMapReady(9) && c.IsMapReady(9), "readiness per guest");
+    for(auto* s : {&a, &b, &c}) {
+        Snapshot snapshot; snapshot.epoch = 9; snapshot.sequence = 1; snapshot.playerCount = 4;
+        snapshot.players[1].id = s->GuestPlayerId();
+        uint8_t next = 2; for(size_t i = 2; i < 4; ++i) { if(next == s->GuestPlayerId()) ++next; snapshot.players[i].id = next++; }
+        snapshot.players[1].x = 1000 * s->GuestPlayerId();
+        Check(s->SendSnapshot(snapshot), "addressed snapshot per guest");
+    }
+    pump(30);
+    Snapshot state;
+    Check(g1.ReadSnapshot(state) && state.players[1].x == 2000 && g2.ReadSnapshot(state) && state.players[1].x == 3000 &&
+        g3.ReadSnapshot(state) && state.players[1].x == 4000 && state.playerCount == 4, "each guest sees its own pose");
+    // Uscita volontaria: lo slot si libera per un nuovo ospite.
+    g2.CloseVoluntarily(); pump(200);
+    Check(!b.Connected() && b.PartnerLeftVoluntarily() && transport.ConnectedGuests() == 2, "voluntary leave frees the slot");
+    Check(g4.StartClient("127.0.0.1", 27060), "guest 4 retry"); pump(200);
+    Check(g4.Connected() && g4.GuestPlayerId() == 3 && b.Connected() && b.ExpectedIdentity() == 0x4444, "a new guest takes the freed slot");
+    // Caduta senza uscita: lo stesso ospite torna nel suo slot.
+    g3.SuspendTransportForTest(); pump(50);
+    Check(g3.StartClient("127.0.0.1", 27060, true), "guest 3 reconnect"); pump(300);
+    Check(g3.Connected() && g3.GuestPlayerId() == 4 && c.Connected() && transport.ConnectedGuests() == 3, "same identity returns to its slot");
+    for(auto* s : clients) s->Stop();
+    transport.Stop();
+    std::cout << "PASS: one host socket, three guest sessions, slot reuse and reconnection\n";
+}
 int main(int argc, char** argv) {
+    // ENet chiede il timer a 1 ms a ogni enet_initialize e lo rilascia a ogni
+    // enet_deinitialize. Dopo molti avvii e arresti nello stesso processo
+    // Windows può lasciare Sleep a 15,6 ms e i comandi scadono (250 ms) nei
+    // test con pause di 20 ms. Una richiesta per tutta l'esecuzione lo evita.
+    timeBeginPeriod(1);
+    if(argc == 1) MultiGuestTransportTest();
     if(argc == 1) PropMotionTransportTest();
     if(argc == 1) BunchedInputTransportTest();
+    if(argc == 1) PlayerSlotTest();
     ScriptPreloadTest();
     MediaCodecTest();
     InputBatchCodecTest();
@@ -784,7 +883,7 @@ int main(int argc, char** argv) {
     auto stateBytes = EncodeSnapshot(snapshot); Snapshot stateRead;
     snapshot.hostTick = 0xfedcba98u; snapshot.players[1].heldEntity = 0x01020304u; snapshot.players[1].heldBody = 7; snapshot.players[1].heldMode = uint8_t(HeldMode::Move); snapshot.players[1].teleport = 201;
     stateBytes = EncodeSnapshot(snapshot);
-    Check(stateBytes.size() == SnapshotBytes && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) && stateRead.hostTick == 0xfedcba98u && stateRead.players[1].heldEntity == 0x01020304u && stateRead.players[1].heldBody == 7 && stateRead.players[1].heldMode == 2 && stateRead.players[1].teleport == 201 &&
+    Check(stateBytes.size() == SnapshotBytes(2) && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) && stateRead.hostTick == 0xfedcba98u && stateRead.players[1].heldEntity == 0x01020304u && stateRead.players[1].heldBody == 7 && stateRead.players[1].heldMode == 2 && stateRead.players[1].teleport == 201 &&
         stateRead.players[0].x == -54321 && stateRead.sequence == 17, "signed snapshot roundtrip");
     for(size_t n = 0; n < stateBytes.size(); ++n) Check(!DecodeSnapshot(stateBytes.data(), n, stateRead), "truncated snapshot");
     stateBytes.push_back(0); Check(!DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead), "snapshot trailing byte");
@@ -821,7 +920,7 @@ int main(int argc, char** argv) {
     for(size_t n = 0; n < entityBytes.size(); ++n) Check(!DecodeEntity(entityBytes.data(), n, entityRead), "truncated entity");
     entity.health=-1; Check(EncodeEntity(entity).empty(),"negative enemy health rejected"); entity.health=74250;
     entity.enemyState=13; Check(EncodeEntity(entity).empty(),"unknown enemy state rejected"); entity.enemyState=2;
-    entity.target=3; Check(EncodeEntity(entity).empty(),"unknown enemy target rejected"); entity.target=2;
+    entity.target=4; Check(!EncodeEntity(entity).empty(),"enemy targets any of four players"); entity.target=5; Check(EncodeEntity(entity).empty(),"unknown enemy target rejected"); entity.target=2;
     entityBytes.push_back(0); Check(!DecodeEntity(entityBytes.data(), entityBytes.size(), entityRead), "entity trailing byte");
     entity.file = "../secret.ent"; Check(EncodeEntity(entity).empty(), "entity asset traversal rejected");
     entity.file = "entities/box.ent"; entity.bodies.resize(33); Check(EncodeEntity(entity).empty(), "entity body count bounded");
@@ -842,7 +941,7 @@ int main(int argc, char** argv) {
     for(size_t n = 0; n < storyBytes.size(); ++n) Check(!DecodePresentation(storyBytes.data(), n, storyRead), "truncated story event");
     storyBytes.push_back(0); Check(!DecodePresentation(storyBytes.data(), storyBytes.size(), storyRead), "story trailing byte");
     story.text[0] = "../secret.ogg"; Check(EncodePresentation(story).empty(), "story asset traversal rejected");
-    story.text[0] = "voice/test.ogg"; story.target = 3; Check(EncodePresentation(story).empty(), "story recipient bounded");
+    story.text[0] = "voice/test.ogg"; story.target = 5; Check(EncodePresentation(story).empty(), "story recipient bounded");
     story.target = 0; story.kind = PresentationKind(99); Check(EncodePresentation(story).empty(), "story kind bounded");
     story.kind = PresentationKind::Message; story.text[0] = std::string(4097, 'x'); Check(EncodePresentation(story).empty(), "story text bounded");
     story = Presentation(); story.epoch = 1; story.kind = PresentationKind::Hint; story.text[0] = "Diary"; story.text[1] = std::string(4096, 'x');

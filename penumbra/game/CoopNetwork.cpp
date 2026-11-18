@@ -152,8 +152,8 @@ uint64_t Fingerprint(const std::string& path) {
     while(file) { file.read(block,sizeof block); for(std::streamsize i=0;i<file.gcount();++i) hash=(hash^uint8_t(block[i]))*1099511628211ull; }
     return hash;
 }
-online::PlayerState Capture(cPlayer* p,cPlayerHands* hands) {
-    online::PlayerState s; auto* body=p->GetCharacterBody(); auto* camera=p->GetCamera();
+online::PlayerState Capture(cPlayer* p,cPlayerHands* hands,uint8_t id) {
+    online::PlayerState s; s.id=id; auto* body=p->GetCharacterBody(); auto* camera=p->GetCamera();
     cVector3f pos=body->GetFeetPosition(); s.x=int32_t(std::round(pos.x*1000)); s.y=int32_t(std::round(pos.y*1000)); s.z=int32_t(std::round(pos.z*1000));
     s.yaw=int16_t(Wrapped(camera->GetYaw())*1000); s.pitch=int16_t(camera->GetPitch()*1000);
     s.health=uint16_t(std::clamp(p->GetHealth(),0.0f,100.0f)*100); s.oil=uint16_t(std::clamp(p->GetPower(),0.0f,100.0f)*100);
@@ -346,8 +346,8 @@ void cCoopNetwork::LoadPartner(cSavedGame* save) {
         remotePlayer->ChangeState(ePlayerState_Normal); remotePlayer->LoadFromGlobal(&save->mPlayer2); RestoreWeapon(save->msClientWeapon); Log("[COOP/SAVE] Client weapon restored state=%d\n",int(remotePlayer->GetState()));
     }
     Log("[COOP/SAVE] Restored host_health=%.2f client_health=%.2f host_power=%.2f client_power=%.2f host_pos=%s client_pos=%s host_weapon=%s client_weapon=%s\n",init->mpPlayer->GetHealth(),remotePlayer->GetHealth(),init->mpPlayer->GetPower(),remotePlayer->GetPower(),init->mpPlayer->GetCharacterBody()->GetPosition().ToString().c_str(),remotePlayer->GetCharacterBody()->GetPosition().ToString().c_str(),save->msHostWeapon.c_str(),save->msClientWeapon.c_str());
-    deathTime[0]=deathTime[1]=0; lifeMask=0; latest.players[0]=Capture(init->mpPlayer,init->mpPlayerHands);
-    latest.players[1]=Capture(remotePlayer,remoteHands); lastInput=0;
+    deathTime[0]=deathTime[1]=0; lifeMask=0; latest.players[0]=Capture(init->mpPlayer,init->mpPlayerHands,online::HostPlayerId);
+    latest.players[1]=Capture(remotePlayer,remoteHands,session.GuestPlayerId()); lastInput=0;
     baselineSent=false; published.clear(); inventoryBytes.clear(); journalBytes.clear(); mediaBytes.clear();
 }
 void cCoopNetwork::RequestSave() {
@@ -437,7 +437,7 @@ bool cCoopNetwork::ClientLook(float yaw,float pitch) {
 }
 bool cCoopNetwork::RelayMessage(const tWString& text) {
     if(!IsHost()) return false;
-    online::Presentation e; e.kind=online::PresentationKind::Message; e.target=IsRemoteContext()?2:0; e.text[0]=cString::To8Char(text); pendingPresentation.push_back(e);
+    online::Presentation e; e.kind=online::PresentationKind::Message; e.target=IsRemoteContext()?session.GuestPlayerId():0; e.text[0]=cString::To8Char(text); pendingPresentation.push_back(e);
     return IsRemoteContext();
 }
 void cCoopNetwork::RelayFade(bool out,float seconds) {
@@ -446,7 +446,7 @@ void cCoopNetwork::RelayFade(bool out,float seconds) {
 }
 void cCoopNetwork::RelayGuiSound(const std::string& file,float volume) {
     if(!IsHost()) return;
-    online::Presentation e; e.kind=online::PresentationKind::GuiSound; e.target=IsRemoteContext()?2:0; e.text[0]=file; e.values[0]=int32_t(std::clamp(volume,0.0f,1.0f)*1000); pendingPresentation.push_back(e);
+    online::Presentation e; e.kind=online::PresentationKind::GuiSound; e.target=IsRemoteContext()?session.GuestPlayerId():0; e.text[0]=file; e.values[0]=int32_t(std::clamp(volume,0.0f,1.0f)*1000); pendingPresentation.push_back(e);
 }
 void cCoopNetwork::Update(float dt) {
     if(!IsOnline()) return;
@@ -484,7 +484,7 @@ void cCoopNetwork::UpdateHost(float dt) {
     // The physics step that opened this tick integrated the previous command,
     // so the partner's pose is captured now and acknowledges exactly that one.
     // Applying this tick's command first would send a pose that lacks it.
-    const online::PlayerState remotePose=Capture(remotePlayer,remoteHands); const uint32_t remoteAck=lastInput;
+    const online::PlayerState remotePose=Capture(remotePlayer,remoteHands,session.GuestPlayerId()); const uint32_t remoteAck=lastInput;
     // One queued command per tick (protocol 4); `repeated` replays the previous
     // command while the jitter buffer refills.
     online::PlayerInput input; bool repeated=false;
@@ -610,7 +610,7 @@ void cCoopNetwork::UpdateHost(float dt) {
         sendTime+=dt; backupTime+=dt;
         if(sendTime+0.000001f>=1.0f/60) {
             sendTime=std::max(0.0f,sendTime-1.0f/60); latest.epoch=map.epoch; latest.sequence=++sequence; latest.acknowledgedInput=remoteAck; latest.hostTick=hostTick;
-            latest.players[0]=Capture(init->mpPlayer,init->mpPlayerHands); latest.players[1]=remotePose;
+            latest.players[0]=Capture(init->mpPlayer,init->mpPlayerHands,online::HostPlayerId); latest.players[1]=remotePose;
             for(int n=0;n<2;++n) {
                 const cVector3f feet(latest.players[n].x/1000.0f,latest.players[n].y/1000.0f,latest.players[n].z/1000.0f);
                 if(hasSentFeet[n] && (feet-sentFeet[n]).SqrLength()>1.0f) ++teleportCount[n];
@@ -763,7 +763,7 @@ void cCoopNetwork::UpdateClient(float dt) {
     ApplyHeldPrediction();
     online::Presentation event;
     while(session.ReadPresentation(event)) {
-        if(event.epoch!=map.epoch || event.target==1) continue;
+        if(event.epoch!=map.epoch || (event.target && event.target!=session.GuestPlayerId())) continue;
         if(event.kind==online::PresentationKind::Hint) init->mpEffectHandler->GetSubTitle()->Add(cString::To16Char(event.text[0]),3,false);
         if(event.kind==online::PresentationKind::Message) init->mpGameMessageHandler->Add(cString::To16Char(event.text[0]));
         if(event.kind==online::PresentationKind::Fade) { if(event.values[0]) init->mpFadeHandler->FadeOut(event.values[1]/1000.0f); else init->mpFadeHandler->FadeIn(event.values[1]/1000.0f); }
@@ -1013,7 +1013,7 @@ bool cCoopNetwork::PublishEntity(iGameEntity* entity,bool baseline) {
             auto* enemy=static_cast<iGameEnemy*>(entity);
             e.health=int32_t(std::clamp(enemy->GetHealth(),0.0f,100000000.0f)*10);
             e.enemyState=uint8_t(std::max(0,enemy->GetCurrentStateId()));
-            e.target=enemy->GetNetworkTarget()==remotePlayer?2:1;
+            e.target=enemy->GetNetworkTarget()==remotePlayer?session.GuestPlayerId():online::HostPlayerId;
             auto* body=enemy->GetMover()->GetCharBody();
             auto frame=cMath::MatrixRotateY(body->GetYaw()); frame.SetTranslation(body->GetPosition()); e.character=Pack(frame);
             if(auto* mesh=enemy->GetMeshEntity()) for(int n=0;n<mesh->GetAnimationStateNum() && n<1024;++n) {

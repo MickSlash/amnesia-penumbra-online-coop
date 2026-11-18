@@ -12,6 +12,7 @@
 #include "InputQueue.h"
 struct _ENetHost;
 struct _ENetPeer;
+struct _ENetEvent;
 namespace online {
 // 4: batched movement commands (InputBatch) consumed one per host tick;
 // snapshots acknowledge the command already integrated by physics.
@@ -19,8 +20,13 @@ namespace online {
 // client-side interpolation on the host timeline (Interpolation.h).
 // 6: each player state names the object it holds, pulls or pushes, and
 // counts intentional teleports (respawn, scripts) so they are never eased.
-constexpr uint16_t ProtocolVersion = 6;
-constexpr size_t SnapshotBytes = 141;
+// 7: ID dei giocatori (1 = host, 2..4 = ospiti). Welcome assegna l'ID
+// all'ospite; gli snapshot hanno da 2 a 4 giocatori, ognuno con il suo ID.
+constexpr uint16_t ProtocolVersion = 7;
+constexpr size_t MaxPlayers = 4;
+constexpr uint8_t HostPlayerId = 1;
+// Intestazione 22 byte (con il numero di giocatori) + 61 byte per giocatore.
+constexpr size_t SnapshotBytes(size_t players) { return 22 + players * 61; }
 // What a player is doing with an object (PlayerState::heldMode).
 enum class HeldMode : uint8_t { None = 0, Grab = 1, Move = 2, Push = 3 };
 constexpr uint32_t VoluntaryDisconnectReason = 0x504f0001;
@@ -47,7 +53,7 @@ enum class PresentationKind : uint8_t { Note = 1, Diary = 2, Voice = 3, Message 
 struct Presentation {
     uint32_t epoch = 0;
     PresentationKind kind = PresentationKind::Message;
-    uint8_t target = 0; // 0 = both, 1 = host, 2 = client
+    uint8_t target = 0; // 0 = tutti, altrimenti l'ID del giocatore
     std::array<std::string, 4> text;
     std::array<int32_t, 6> values = {};
 };
@@ -71,11 +77,17 @@ struct PlayerState {
     // Incremented by the host whenever the player moved more than 1 m within a
     // tick (no walk or fall does that): the client snaps instead of correcting.
     uint8_t teleport = 0;
+    uint8_t id = 0; // ID di rete del giocatore, 1..MaxPlayers
 };
+// Ogni snapshot è indirizzato a un solo ospite (una Session per ospite):
+// players[0] è l'host, players[1] il destinatario (acknowledgedInput si
+// riferisce ai suoi comandi), players[2..playerCount-1] gli altri ospiti.
 struct Snapshot {
     uint32_t epoch = 0, sequence = 0, acknowledgedInput = 0;
     uint32_t hostTick = 0; // host logic tick the poses were captured on
-    PlayerState players[2]; // stable network IDs 1 (host), 2 (client)
+    uint8_t playerCount = 2;
+    PlayerState players[MaxPlayers];
+    Snapshot() { for(size_t i = 0; i < MaxPlayers; ++i) players[i].id = uint8_t(i + 1); }
 };
 struct MapState { uint32_t epoch = 0; uint64_t fingerprint = 0; std::string file; };
 enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, WeaponLook = 7, Checkpoint = 8 };
@@ -141,6 +153,14 @@ public:
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
     bool StartHost(uint16_t port, bool resume = false);
+    // Host con più ospiti: la Session usa il socket di un HostTransport, che
+    // le passa gli eventi del suo peer con HandleEvent (vedi HostTransport.h).
+    bool AttachHost(_ENetHost* host, uint16_t port, bool resume = false);
+    bool HostAttached() const { return host_ && !ownsHost_ && role_ == Role::Host; }
+    bool OwnsPeer(const _ENetPeer* peer) const { return peer && peer == peer_; }
+    uint64_t ExpectedIdentity() const { return expectedIdentity_; }
+    void ForgetIdentity() { expectedIdentity_ = 0; checkpointAck_ = 0; }
+    void HandleEvent(const _ENetEvent& event);
     bool StartClient(const std::string& address, uint16_t port, bool resume = false);
     void Stop();
     void CloseVoluntarily();
@@ -209,6 +229,10 @@ public:
     void SetListenPort(uint16_t port) { listenPort_ = port; }
     uint64_t LocalIdentity() const { return identity_; }
     bool SetLocalIdentity(uint64_t identity) { if(role_ != Role::Offline || !identity) return false; identity_ = identity; return true; }
+    // ID dell'ospite di questa connessione: sull'host quello assegnato con
+    // Welcome (impostabile prima di StartHost), sul client il proprio.
+    uint8_t GuestPlayerId() const { return guestId_; }
+    bool SetGuestPlayerId(uint8_t id) { if(role_ != Role::Offline || id <= HostPlayerId || id > MaxPlayers) return false; guestId_ = id; return true; }
 private:
     bool Initialize();
     bool Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reliable, bool bulk = false);
@@ -218,6 +242,7 @@ private:
     void SetLoading(bool loading);
     void ClearPeerState();
     void BoundReliableRetries();
+    void Maintain(uint32_t now);
     Logger log_;
     _ENetHost* host_ = nullptr;
     _ENetPeer* peer_ = nullptr;
@@ -262,5 +287,7 @@ private:
     CheckpointReceiver checkpointReceiver_;
     uint32_t checkpointAck_ = 0;
     uint32_t checkpointSent_ = 0, checkpointDelivered_ = 0;
+    uint8_t guestId_ = 2;
+    bool ownsHost_ = true;
 };
 }
