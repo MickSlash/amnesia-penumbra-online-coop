@@ -39,6 +39,32 @@ bool ScriptSound(const tString& name,float volume) {
     activeNetwork->RelayGuiSound(name,volume);
     return activeNetwork->IsHost() && activeNetwork->IsRemoteContext();
 }
+// Replays the client's unacknowledged commands with its own iCharacterBody, so
+// collisions, sliding along walls and gradual step climbing match the host's
+// simulation of the same commands. The body runs in prediction mode (no
+// callbacks, camera or side effects) and is restored afterwards.
+struct NativeStepper {
+    iCharacterBody* body; iCharacterBody::tPredictionState saved;
+    explicit NativeStepper(iCharacterBody* b) : body(b) {}
+    void Begin(const online::PlayerState& s) {
+        saved=body->GetPredictionState();
+        auto start=saved;
+        start.mvPosition=start.mvLastPosition=cVector3f(s.x/1000.0f,s.y/1000.0f,s.z/1000.0f)+cVector3f(0,body->GetShape()->GetSize().y/2,0);
+        start.mvVelocity=cVector3f(0,0,0); start.mvForce=cVector3f(0,0,0);
+        start.mfMoveSpeed[eCharDir_Forward]=s.forwardSpeed/1000.0f; start.mfMoveSpeed[eCharDir_Right]=s.sideSpeed/1000.0f;
+        start.mbMoving[0]=start.mbMoving[1]=false; start.mfCheckStepClimbCount=0; start.mbOnGround=true; start.mbClimbing=false;
+        body->SetPredictionState(start); body->SetPredicting(true);
+    }
+    online::PredictedPosition Step(const online::PlayerInput& input, float dt) {
+        body->SetYaw(input.yaw/1000.0f);
+        if(input.forward) body->Move(eCharDir_Forward,input.forward/1000.0f,dt);
+        if(input.strafe) body->Move(eCharDir_Right,input.strafe/1000.0f,dt);
+        body->Update(dt);
+        const cVector3f position=body->GetPosition(); return {position.x,position.z};
+    }
+    void End() { body->SetPredicting(false); body->SetPredictionState(saved); }
+};
+bool KinematicPrediction() { const char* mode=getenv("PENUMBRA_COOP_PREDICTION"); return mode && std::string(mode)=="kinematic"; }
 struct PlayerScope {
     cInit* init; cPlayer* player; cPlayerHands* hands; bool simple;
     PlayerScope(cInit* i, cPlayer* p, cPlayerHands* h) : init(i), player(i->mpPlayer), hands(i->mpPlayerHands), simple(i->mbSimpleWeaponSwing) {
@@ -380,12 +406,20 @@ void cCoopNetwork::Update(float dt) {
 void cCoopNetwork::UpdateHost(float dt) {
     if(!map.epoch || !remotePlayer->GetCharacterBody()) return;
     const bool canPlay=Ready() && init->mpGame->GetUpdater()->GetCurrentContainerName()=="Default";
-    online::PlayerInput input; const bool hasInput=canPlay && !remotePlayer->IsDead() && session.ReadInput(input) && input.epoch==map.epoch && !(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))!="hammer" && ((qaTime>4 && qaTime<6) || (qaTime>15 && qaTime<18) || (qaTime>24 && qaTime<26)));
+    // The physics step that opened this tick integrated the previous command,
+    // so the partner's pose is captured now and acknowledges exactly that one.
+    // Applying this tick's command first would send a pose that lacks it.
+    const online::PlayerState remotePose=Capture(remotePlayer,remoteHands); const uint32_t remoteAck=lastInput;
+    // One queued command per tick (protocol 4); `repeated` replays the previous
+    // command while the jitter buffer refills.
+    online::PlayerInput input; bool repeated=false;
+    const bool hasInput=canPlay && !remotePlayer->IsDead() && session.NextInput(input,repeated) && input.epoch==map.epoch && !(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))!="hammer" && ((qaTime>4 && qaTime<6) || (qaTime>15 && qaTime<18) || (qaTime>24 && qaTime<26)));
     if(canPlay && !remotePlayer->IsDead()) {
         // Diagnostics: how client commands map onto host ticks. The host keeps
         // only the newest input, so commands that arrive together are skipped.
+        hostDiag.queueDepth.Add(double(session.InputQueueDepth())); hostDiag.queueTarget=unsigned(session.InputQueueTarget());
         if(!hasInput) ++hostDiag.idleTicks;
-        else if(input.sequence!=lastInput) {
+        else if(!repeated) {
             const uint32_t advance=input.sequence-lastInput;
             if(lastInput && advance<1000) { hostDiag.skippedInputs+=advance-1; hostDiag.commandDrift+=int64_t(advance)-1; }
             const uint64_t now=Milliseconds();
@@ -399,7 +433,7 @@ void cCoopNetwork::UpdateHost(float dt) {
         // Local UI and camera effects belong to their owner; remote physics has its own state.
         if(hasInput) {
             if(remotePlayer->GetState()==ePlayerState_Move || remotePlayer->GetState()==ePlayerState_WeaponMelee) {
-                if(input.sequence!=lastInput && remotePlayer->GetState()==ePlayerState_Move) { remotePlayer->AddYaw(input.lookYaw/10000.0f); remotePlayer->AddPitch(input.lookPitch/10000.0f); }
+                if(!repeated && remotePlayer->GetState()==ePlayerState_Move) { remotePlayer->AddYaw(input.lookYaw/10000.0f); remotePlayer->AddPitch(input.lookPitch/10000.0f); }
                 if(remotePlayer->GetState()==ePlayerState_WeaponMelee && remoteSimpleSwing) remotePlayer->AddYaw(0);
                 if(remotePlayer->GetState()==ePlayerState_WeaponMelee && !qaAimLocked) { remotePlayer->GetCamera()->SetYaw(input.yaw/1000.0f); remotePlayer->GetCamera()->SetPitch(input.pitch/1000.0f); remotePlayer->GetCharacterBody()->SetYaw(input.yaw/1000.0f); }
             } else if(!qaAimLocked && !(getenv("PENUMBRA_COOP_QA") && qaStage==2 && qaTime<8.6f && remotePlayer->GetState()==ePlayerState_Normal)) {
@@ -484,8 +518,8 @@ void cCoopNetwork::UpdateHost(float dt) {
         worldTime+=dt; if(worldDirty || worldTime+0.000001f>=1.0f/30) { worldTime=std::max(0.0f,worldTime-1.0f/30); worldDirty=false; PublishWorld(false); }
         sendTime+=dt; backupTime+=dt;
         if(sendTime+0.000001f>=1.0f/60) {
-            sendTime=std::max(0.0f,sendTime-1.0f/60); latest.epoch=map.epoch; latest.sequence=++sequence; latest.acknowledgedInput=lastInput;
-            latest.players[0]=Capture(init->mpPlayer,init->mpPlayerHands); latest.players[1]=Capture(remotePlayer,remoteHands);
+            sendTime=std::max(0.0f,sendTime-1.0f/60); latest.epoch=map.epoch; latest.sequence=++sequence; latest.acknowledgedInput=remoteAck;
+            latest.players[0]=Capture(init->mpPlayer,init->mpPlayerHands); latest.players[1]=remotePose;
             latest.players[1].flags=(latest.players[1].flags&~4)|((canPlay && !remotePlayer->IsDead() && ((latest.players[0].flags&4) || (latest.players[0].flags&8)))?4:0);
             const uint8_t deadMask=(init->mpPlayer->IsDead()?1:0)|(remotePlayer->IsDead()?2:0);
             if(deadMask!=lifeMask) { session.SendLife(latest); lifeMask=deadMask; }
@@ -522,7 +556,11 @@ void cCoopNetwork::UpdateClient(float dt) {
             lastSnapshotAt=now;
             if(clientDiag.lastArrival) clientDiag.snapshotInterval.Add(double(now-clientDiag.lastArrival));
             clientDiag.lastArrival=now; ++clientDiag.snapshots;
-            clientDiag.HostPose(snapshot.players[1].x/1000.0f,snapshot.players[1].z/1000.0f);
+            const double hostStep=clientDiag.HostPose(snapshot.players[1].x/1000.0f,snapshot.players[1].z/1000.0f);
+            { const auto& h=snapshot.players[1]; const float f=h.forwardSpeed/1000.0f, r=h.sideSpeed/1000.0f; const float cap=(f>=0?h.forwardMax:h.backwardMax)/1000.0f;
+              if(f||r) { const double nominal=std::min(std::sqrt(f*f+r*r),cap)/60; clientDiag.nominalStep.Add(nominal*100);
+                  if(hostStep>=0 && hostStep<1) { ++clientDiag.movingPoses; if(hostStep<nominal*.2) ++clientDiag.stalledPoses; clientDiag.lastPoseFree=hostStep>=nominal*.8; } }
+              else clientDiag.lastPoseFree=false; }
             snapshotAge=0;
             auto* player=init->mpPlayer; auto* body=player->GetCharacterBody(); const auto& s=snapshot.players[1];
             cVector3f target(s.x/1000.0f,s.y/1000.0f,s.z/1000.0f);
@@ -538,7 +576,7 @@ void cCoopNetwork::UpdateClient(float dt) {
             if(s.flags&16) { player->GetCamera()->SetYaw(s.yaw/1000.0f); player->GetCamera()->SetPitch(s.pitch/1000.0f); }
             lastSnapshot=snapshot.sequence;
         }
-        if(positioned && (snapshot.players[1].flags&4) && !(snapshot.players[1].flags&(1|8))) {
+        if(positioned && (snapshot.players[1].flags&4) && !(snapshot.players[1].flags&8)) {
             auto* body=init->mpPlayer->GetCharacterBody(); auto* physics=init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld();
             online::PredictionCollisionCache cache;
             const float height=body->GetPosition().y, step=body->GetMaxStepSize();
@@ -558,10 +596,19 @@ void cCoopNetwork::UpdateClient(float dt) {
                 ++clientDiag.replaySteps; if(blocked) ++clientDiag.replayBlocked;
                 return blocked?from:to;
             };
-            auto pos=prediction.ReconcileSmoothed(snapshot.players[1],snapshot.acknowledgedInput,snapshot.sequence,dt,collide);
+            // Replay with this body's own limits: run, crouch and health speed
+            // are local move states the host applies to the same commands.
+            online::MovementLimits limits;
+            limits.forwardMax=body->GetMaxPositiveMoveSpeed(eCharDir_Forward); limits.backwardMax=-body->GetMaxNegativeMoveSpeed(eCharDir_Forward);
+            limits.sideMax=body->GetMaxPositiveMoveSpeed(eCharDir_Right);
+            limits.forwardAcc=body->GetMoveAcc(eCharDir_Forward); limits.forwardDec=body->GetMoveDeacc(eCharDir_Forward);
+            limits.sideAcc=body->GetMoveAcc(eCharDir_Right); limits.sideDec=body->GetMoveDeacc(eCharDir_Right);
+            online::PredictedPosition pos;
+            if(KinematicPrediction()) pos=prediction.ReconcileSmoothed(snapshot.players[1],snapshot.acknowledgedInput,snapshot.sequence,dt,limits,collide);
+            else { NativeStepper stepper(body); pos=prediction.ReconcileSmoothedWith(snapshot.players[1],snapshot.acknowledgedInput,snapshot.sequence,dt,stepper,collide); }
             float error=0; bool reset=false;
             if(prediction.TakePoseCorrection(error,reset)) {
-                clientDiag.correction.Add(error); if(error>.02f) ++clientDiag.over2cm; if(error>.1f) ++clientDiag.over10cm; if(reset) ++clientDiag.reset25cm;
+                clientDiag.correction.Add(error); if(clientDiag.lastPoseFree) clientDiag.freeCorrection.Add(error); if(error>.02f) ++clientDiag.over2cm; if(error>.1f) ++clientDiag.over10cm; if(reset) ++clientDiag.reset25cm;
             }
             if(prediction.LastReplayTruncated()) ++clientDiag.replayTruncated;
             clientDiag.pending.Add(double(prediction.Pending()));
@@ -569,7 +616,7 @@ void cCoopNetwork::UpdateClient(float dt) {
             if(hammerTime>40 && hammerTime<48) correctionMax=std::max(correctionMax,prediction.CorrectionDistance());
             body->SetNetworkHorizontalPosition(pos.x,pos.z);
         }
-        if(positioned && ((snapshot.players[1].flags&(1|8|16|32)) || !(snapshot.players[1].flags&4))) ++clientDiag.unpredictedTicks;
+        if(positioned && !online::MovementPrediction::Predicts(snapshot.players[1])) ++clientDiag.unpredictedTicks;
         UpdateAvatar(snapshot.players[0],dt);
     }
     if(positioned) { const auto feet=init->mpPlayer->GetCharacterBody()->GetFeetPosition(); clientDiag.ShownPose(feet.x,feet.z); }
@@ -679,16 +726,17 @@ void cCoopNetwork::ReportDiagnostics() {
     std::string line=text;
     if(IsHost()) {
         auto& d=hostDiag; d.totalCommandDrift+=d.commandDrift;
-        std::snprintf(text,sizeof text," ticks=%u burst_ticks=%u new_input_ticks=%u reused_input_ticks=%u expired_input_ticks=%u skipped_inputs=%llu command_drift=%lld command_drift_total=%lld",
-            d.clock.ticks,d.clock.burst,d.newInputs,d.reusedTicks,d.idleTicks,(unsigned long long)d.skippedInputs,(long long)d.commandDrift,(long long)d.totalCommandDrift);
-        line+=text+d.clock.interval.Format("tick_gap_ms")+d.inputInterval.Format("new_input_gap_ms");
+        const auto queue=session.TakeInputStats();
+        std::snprintf(text,sizeof text," ticks=%u burst_ticks=%u new_input_ticks=%u reused_input_ticks=%u expired_input_ticks=%u skipped_inputs=%llu command_drift=%lld command_drift_total=%lld queue_target=%u queue_starvations=%u queue_dropped=%u queue_lost=%u",
+            d.clock.ticks,d.clock.burst,d.newInputs,d.reusedTicks,d.idleTicks,(unsigned long long)d.skippedInputs,(long long)d.commandDrift,(long long)d.totalCommandDrift,d.queueTarget,queue.starvations,queue.dropped,queue.lost);
+        line+=text+d.clock.interval.Format("tick_gap_ms")+d.inputInterval.Format("new_input_gap_ms")+d.queueDepth.Format("queue_depth");
         d.ResetWindow();
     } else {
         auto& d=clientDiag;
         std::snprintf(text,sizeof text," ticks=%u burst_ticks=%u snapshots=%u unpredicted_ticks=%u replay_truncated=%u poses_over_2cm=%u poses_over_10cm=%u resets_over_25cm=%u hard_over_2m=%u",
             d.clock.ticks,d.clock.burst,d.snapshots,d.unpredictedTicks,d.replayTruncated,d.over2cm,d.over10cm,d.reset25cm,d.hard2m);
-        std::snprintf(text+strlen(text),sizeof text-strlen(text)," host_path_m=%.3f shown_path_m=%.3f replay_steps=%u replay_blocked=%u",d.hostPath,d.shownPath,d.replaySteps,d.replayBlocked);
-        line+=text+d.hostStep.Format("host_step_cm",100)+d.clock.interval.Format("tick_gap_ms")+d.snapshotInterval.Format("snapshot_gap_ms")+d.correction.Format("correction_cm",100)+d.pending.Format("pending")+d.ackLag.Format("ack_lag");
+        std::snprintf(text+strlen(text),sizeof text-strlen(text)," host_path_m=%.3f shown_path_m=%.3f replay_steps=%u replay_blocked=%u moving_poses=%u stalled_poses=%u",d.hostPath,d.shownPath,d.replaySteps,d.replayBlocked,d.movingPoses,d.stalledPoses);
+        line+=text+d.hostStep.Format("host_step_cm",100)+d.nominalStep.Format("nominal_step_cm")+d.freeCorrection.Format("free_correction_cm",100)+d.clock.interval.Format("tick_gap_ms")+d.snapshotInterval.Format("snapshot_gap_ms")+d.correction.Format("correction_cm",100)+d.pending.Format("pending")+d.ackLag.Format("ack_lag");
         d.ResetWindow();
     }
     Log("%s\n",line.c_str());
@@ -697,6 +745,16 @@ void cCoopNetwork::ReportDiagnostics() {
 // second during the scripted hammer walk, like a slow frame on a real PC. HPL1
 // then runs the missed 60 Hz logic ticks back to back.
 void cCoopNetwork::InjectQAHitch() {
+    // QA only: where the partner walks during the hammer walk, to tell blocked
+    // poses (crate debris, walls) from netcode errors.
+    if(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))=="hammer" && IsHost() && hammerTime>39.5f && hammerTime<48 && remotePlayer && remotePlayer->GetCharacterBody()) {
+        static float logClock=0; logClock+=1.0f/60;
+        if(logClock>=.25f) {
+            logClock=0; auto* body=remotePlayer->GetCharacterBody(); const auto a=body->GetFeetPosition(), b=init->mpPlayer->GetCharacterBody()->GetFeetPosition();
+            Log("[COOP/QA] Walk remote=%.2f/%.2f/%.2f host=%.2f/%.2f/%.2f distance_xz=%.2f speed=%.2f/%.2f yaw=%.2f\n",a.x,a.y,a.z,b.x,b.y,b.z,std::sqrt((a.x-b.x)*(a.x-b.x)+(a.z-b.z)*(a.z-b.z)),
+                body->GetMoveSpeed(eCharDir_Forward),body->GetMoveSpeed(eCharDir_Right),body->GetYaw());
+        }
+    }
     const char* role=getenv("PENUMBRA_COOP_QA_HITCH");
     if(!role || !getenv("PENUMBRA_COOP_QA") || std::string(getenv("PENUMBRA_COOP_QA"))!="hammer" || std::string(role)!=(IsHost()?"host":"client")) return;
     if(hammerTime<=40 || hammerTime>=48) { hitchClock=0; return; }

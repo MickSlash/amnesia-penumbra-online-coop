@@ -632,10 +632,93 @@ static void PropMotionTransportTest() {
     Check(!client.ReadEntity(read) && !host.SendEntityMotion(box), "prop motion discarded across map transition");
     std::cout << "PASS: live prop coalescing, reliable backpressure bypass, stale pose rejection, removal, articulated fragments and sequence wrap\n";
 }
+static void InputBatchCodecTest() {
+    PlayerInput a, b; a.epoch = b.epoch = 9; a.sequence = 41; b.sequence = 42;
+    a.forward = 1000; a.strafe = -1000; a.yaw = -3142; a.pitch = 1571; a.buttons = 5; a.lookYaw = -31420; a.lookPitch = 7;
+    b.forward = -250; b.lookYaw = 12;
+    auto bytes = EncodeInputBatch({a, b}); std::vector<PlayerInput> read;
+    Check(bytes.size() == 10 + 2*17 && DecodeInputBatch(bytes.data(), bytes.size(), read) && read.size() == 2 &&
+        read[0].sequence == 41 && read[0].strafe == -1000 && read[0].yaw == -3142 && read[0].buttons == 5 && read[0].lookYaw == -31420 &&
+        read[1].sequence == 42 && read[1].forward == -250 && read[1].lookYaw == 12 && read[1].epoch == 9, "input batch roundtrip");
+    for(size_t n = 0; n < bytes.size(); ++n) Check(!DecodeInputBatch(bytes.data(), n, read), "truncated input batch");
+    bytes.push_back(0); Check(!DecodeInputBatch(bytes.data(), bytes.size(), read), "input batch trailing byte"); bytes.pop_back();
+    bytes[9] = 0; Check(!DecodeInputBatch(bytes.data(), bytes.size(), read), "empty input batch"); bytes[9] = 2;
+    bytes[10 + 12] = 64; Check(!DecodeInputBatch(bytes.data(), bytes.size(), read), "input batch buttons bounded");
+    Check(EncodeInputBatch({}).empty() && EncodeInputBatch(std::vector<PlayerInput>(MaxInputBatch + 1, a)).empty(), "input batch size bounded");
+    b.epoch = 10; Check(EncodeInputBatch({a, b}).empty(), "input batch never mixes map epochs"); b.epoch = 9;
+    b.forward = 1001; Check(EncodeInputBatch({a, b}).empty(), "input batch axes bounded"); b.forward = -250;
+    StressCodec(std::vector<PlayerInput>{a, b}, EncodeInputBatch, DecodeInputBatch);
+    std::cout << "PASS: bounded redundant input batch codec\n";
+}
+static void InputQueueTest() {
+    InputQueue queue; PlayerInput command, out; bool repeated = false;
+    Check(!queue.Next(out, repeated), "no command before the first arrival");
+    for(uint32_t s = 1; s <= 3; ++s) { command.sequence = s; command.lookYaw = int16_t(10*s); Check(queue.Offer(command), "queue accepts newer command"); }
+    command.sequence = 2; Check(!queue.Offer(command), "queue ignores redundant copies");
+    for(uint32_t s = 1; s <= 3; ++s) Check(queue.Next(out, repeated) && !repeated && out.sequence == s && out.lookYaw == int16_t(10*s), "one command per tick, in order");
+    Check(queue.Next(out, repeated) && repeated && out.sequence == 3 && out.lookYaw == 0, "dry queue repeats without look delta");
+    Check(queue.Target() == 2, "starvation raises the jitter buffer");
+    command.sequence = 4; command.lookYaw = 0; queue.Offer(command);
+    Check(queue.Next(out, repeated) && repeated, "refilling waits for the target depth");
+    command.sequence = 5; queue.Offer(command);
+    Check(queue.Next(out, repeated) && !repeated && out.sequence == 4, "buffered commands resume in order");
+    command.sequence = 8; queue.Offer(command);
+    auto stats = queue.TakeStats();
+    Check(stats.lost == 2 && stats.starvations == 1 && stats.repeated == 2 && stats.consumed == 4, "queue statistics");
+    for(uint32_t s = 9; s <= 20; ++s) { command.sequence = s; command.lookYaw = 1; command.buttons = s == 10 ? 1 : 0; queue.Offer(command); }
+    Check(queue.Next(out, repeated) && !repeated && out.sequence == 17 && out.lookYaw == 9 && (out.buttons & 1), "backlog trimmed to bound latency, merging look deltas and jumps");
+    Check(queue.TakeStats().dropped == 10 && queue.Depth() == 3, "trim keeps target plus two commands");
+    for(unsigned i = 0; i < InputQueue::QuietTicksToShrink + 4; ++i) { command.sequence = 21 + i; queue.Offer(command); queue.Next(out, repeated); }
+    Check(queue.Target() == 1, "quiet ticks shrink the jitter buffer");
+    command.sequence = 500; Check(!queue.Offer(command), "past sequence rejected");
+    queue.Clear(); Check(!queue.Next(out, repeated) && queue.Target() == 1, "clear resets queue");
+    std::cout << "PASS: one command per tick input queue with adaptive jitter buffer\n";
+}
+static void NativeMovementPredictionTest() {
+    auto free = [](PredictedPosition, PredictedPosition to) { return to; };
+    MovementLimits limits; limits.forwardMax = limits.backwardMax = limits.sideMax = 3; limits.forwardAcc = limits.sideAcc = 30; limits.forwardDec = limits.sideDec = 30;
+    PlayerState state; state.forwardSpeed = state.sideSpeed = 3000;
+    MovementPrediction diagonal; PlayerInput input; input.forward = 1000; input.strafe = 1000;
+    for(uint32_t s = 1; s <= 30; ++s) { input.sequence = s; diagonal.Push(input, 1.0f/60); }
+    auto p = diagonal.Reconcile(state, 0, limits, free);
+    Check(std::fabs(std::sqrt(p.x*p.x + p.z*p.z) - 1.5f) < 0.01f, "diagonal steps are capped at the forward limit like iCharacterBody");
+    MovementPrediction analog; PlayerState still; input.strafe = 0; input.forward = 500;
+    for(uint32_t s = 1; s <= 30; ++s) { input.sequence = s; analog.Push(input, 1.0f/60); }
+    p = analog.Reconcile(still, 0, limits, free);
+    Check(p.z < -1.2f, "a partial input scales acceleration, not the speed limit");
+    MovementPrediction crouched; PlayerState low; low.flags = 4 | 1; input.forward = 1000; input.buttons = 2;
+    input.sequence = 1; crouched.Push(input, 1.0f/60);
+    p = crouched.Reconcile(low, 0, limits, free);
+    Check(p.z < 0 && crouched.Pending() == 1, "crouched movement keeps predicting with the crouch limits");
+    input.buttons = 1; input.sequence = 2; crouched.Push(input, 1.0f/60);
+    p = crouched.Reconcile(low, 0, limits, free);
+    Check(!crouched.LastReplayTruncated() && p.z < -0.012f, "a jump does not stop the horizontal replay");
+    std::cout << "PASS: prediction replays native character movement\n";
+}
+static void BunchedInputTransportTest() {
+    Session host(Log), client(Log);
+    Check(host.StartHost(27058) && client.StartClient("127.0.0.1", 27058), "bunched input startup");
+    auto pump = [&](int ms) { for(int i = 0; i < ms; ++i) { host.Poll(); client.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    pump(100); Check(host.Connected() && client.Connected(), "bunched input handshake");
+    PlayerInput input; input.forward = 1000;
+    for(uint32_t s = 1; s <= 3; ++s) { input.sequence = s; input.lookYaw = int16_t(100*s); Check(client.SendInput(input), "send bunched command"); }
+    pump(20);
+    PlayerInput next; bool repeated = false;
+    for(uint32_t s = 1; s <= 3; ++s)
+        Check(host.NextInput(next, repeated) && !repeated && next.sequence == s && next.lookYaw == int16_t(100*s), "commands sent together are each simulated once, in order");
+    Check(host.NextInput(next, repeated) && repeated && next.sequence == 3, "host repeats the last command while waiting");
+    pump(300); Check(!host.NextInput(next, repeated), "silent input still expires");
+    client.Stop(); host.Stop();
+    std::cout << "PASS: redundant input batches over UDP\n";
+}
 int main(int argc, char** argv) {
     if(argc == 1) PropMotionTransportTest();
+    if(argc == 1) BunchedInputTransportTest();
     ScriptPreloadTest();
     MediaCodecTest();
+    InputBatchCodecTest();
+    InputQueueTest();
+    NativeMovementPredictionTest();
     PlayerInput input; input.sequence = 0x12345678; input.tick = 42;
     input.forward = -1000; input.strafe = 500; input.yaw = -3141; input.pitch = 1570; input.buttons = 15;
     input.lookYaw = -1234; input.lookPitch = 31420;

@@ -47,15 +47,25 @@ struct ClientNetDiagnostics {
     unsigned replaySteps = 0, replayBlocked = 0;
     // Horizontal distance the host body moved between consecutive poses (cm).
     WindowStat hostStep;
+    // Step the host body would make in one tick from its reported speed (cm).
+    WindowStat nominalStep;
+    // Poses where the host body moved less than a fifth of its nominal step.
+    unsigned stalledPoses = 0, movingPoses = 0;
+    // Prediction error on poses where the host body moved freely (at least 80 %
+    // of its nominal step): isolates the netcode from collision differences.
+    WindowStat freeCorrection;
+    bool lastPoseFree = false;
     // Horizontal distance walked by the authoritative host body and by the body
     // shown on the client; a steady difference is a speed model mismatch.
     double hostPath = 0, shownPath = 0;
     bool hasHost = false, hasShown = false;
     float hostX = 0, hostZ = 0, shownX = 0, shownZ = 0;
     uint64_t lastArrival = 0;
-    void HostPose(float x, float z) {
-        if(hasHost) { const double step = std::sqrt((x-hostX)*(x-hostX) + (z-hostZ)*(z-hostZ)); hostPath += step; if(step < 1) hostStep.Add(step); }
+    double HostPose(float x, float z) {
+        double step = -1;
+        if(hasHost) { step = std::sqrt((x-hostX)*(x-hostX) + (z-hostZ)*(z-hostZ)); hostPath += step; if(step < 1) hostStep.Add(step); }
         hostX = x; hostZ = z; hasHost = true;
+        return step;
     }
     void ShownPose(float x, float z) {
         if(hasShown) shownPath += std::sqrt((x-shownX)*(x-shownX) + (z-shownZ)*(z-shownZ));
@@ -71,8 +81,8 @@ struct ClientNetDiagnostics {
 };
 struct HostNetDiagnostics {
     TickClock clock;
-    WindowStat inputInterval;
-    unsigned newInputs = 0, reusedTicks = 0, idleTicks = 0;
+    WindowStat inputInterval, queueDepth;
+    unsigned newInputs = 0, reusedTicks = 0, idleTicks = 0, queueTarget = 0;
     uint64_t skippedInputs = 0;     // client commands overwritten before a host tick read them
     int64_t commandDrift = 0;       // client commands acknowledged minus host ticks that simulated input
     int64_t totalCommandDrift = 0;

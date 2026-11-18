@@ -6,6 +6,20 @@
 #include <array>
 namespace online {
 struct PredictedPosition { float x = 0, z = 0; };
+// Character body limits used to replay commands (m/s, m/s^2). The client
+// passes its own body's current values: run, crouch and the health speed
+// multiplier are local move states, so they match what the host will apply to
+// the same commands. Tests and fallbacks derive them from the host snapshot.
+struct MovementLimits {
+    float forwardMax = 0, backwardMax = 0, sideMax = 0;
+    float forwardAcc = 0, forwardDec = 0, sideAcc = 0, sideDec = 0;
+    static MovementLimits FromState(const PlayerState& s) {
+        MovementLimits l;
+        l.forwardMax = s.forwardMax/1000.0f; l.backwardMax = s.backwardMax/1000.0f; l.sideMax = s.sideMax/1000.0f;
+        l.forwardAcc = l.sideAcc = s.acceleration/1000.0f; l.forwardDec = l.sideDec = s.deceleration/1000.0f;
+        return l;
+    }
+};
 // Resolution push of a shape test (resolved position minus tested position);
 // all zero when nothing was touched.
 struct PredictionContact { float x=0,y=0,z=0; };
@@ -53,7 +67,7 @@ public:
         if(!poseCorrection_) return false;
         distance = poseDistance_; reset = poseReset_; poseCorrection_ = false; return true;
     }
-    // Diagnostics: the last replay stopped early (jump/crouch or the 500 ms cap).
+    // Diagnostics: the last replay stopped early at the 500 ms horizon.
     bool LastReplayTruncated() const { return truncated_; }
     void Push(const PlayerInput& input, float dt) {
         if(!std::isfinite(dt) || dt <= 0) return;
@@ -62,41 +76,57 @@ public:
     }
     size_t Pending() const { return commands_.size(); }
     float CorrectionDistance() const { return std::sqrt(correction_.x*correction_.x + correction_.z*correction_.z); }
-    template<class Collision>
-    PredictedPosition Reconcile(const PlayerState& state, uint32_t acknowledged, Collision collide) {
+    // Pose and speed come from the host snapshot; every command not yet
+    // acknowledged is replayed by a stepper (see KinematicStepper, and the
+    // native character body stepper of the game). Death, door-controlled look
+    // and interactions (flags 8, 16, 32) stay authoritative; crouching and jumps
+    // keep their horizontal replay.
+    //
+    // Stepper interface: Begin(state) before the first command, Step(input, dt)
+    // returning the position after one command, End() after the last one.
+    template<class Stepper>
+    PredictedPosition Replay(const PlayerState& state, uint32_t acknowledged, Stepper& stepper) {
         while(!commands_.empty() && uint32_t(acknowledged - commands_.front().input.sequence) < 0x80000000u) commands_.pop_front();
         PredictedPosition p = {state.x/1000.0f,state.z/1000.0f};
         truncated_ = false;
-        if(!(state.flags & 4) || (state.flags & (1|8|16|32))) { Clear(); return p; }
-        float forward = state.forwardSpeed/1000.0f, side = state.sideSpeed/1000.0f, age = 0;
-        auto speed = [](float current, float target, float change) { return current + std::max(-change,std::min(change,target-current)); };
+        if(!Predicts(state)) { Clear(); return p; }
+        if(commands_.empty()) return p;
+        stepper.Begin(state);
+        float age = 0;
         for(const auto& command : commands_) {
-            const auto& input = command.input; const float dt = std::min(command.dt,0.5f-age);
+            const float dt = std::min(command.dt,0.5f-age);
             if(dt <= 0) { truncated_ = true; break; }
             age += dt;
-            if(input.buttons & 3) { truncated_ = true; break; } // jumps/crouch remain authoritative
-            const float diagonal = input.forward && input.strafe ? 0.70710678f : 1.0f;
-            const float forwardMax = (input.forward < 0 ? state.backwardMax : state.forwardMax)/1000.0f * diagonal;
-            const float sideMax = state.sideMax/1000.0f * diagonal;
-            forward = speed(forward, input.forward/1000.0f * forwardMax, (input.forward ? state.acceleration : state.deceleration)/1000.0f * dt);
-            side = speed(side, input.strafe/1000.0f * sideMax, (input.strafe ? state.acceleration : state.deceleration)/1000.0f * dt);
-            const float yaw = input.yaw/1000.0f;
-            // HPL forward is -Z; right is +X at yaw zero.
-            PredictedPosition next = {p.x + (-std::sin(yaw)*forward + std::cos(yaw)*side)*dt,
-                                      p.z + (-std::cos(yaw)*forward - std::sin(yaw)*side)*dt};
-            p = collide(p,next);
+            p = stepper.Step(command.input, dt);
         }
+        stepper.End();
         return p;
     }
     template<class Collision>
+    PredictedPosition Reconcile(const PlayerState& state, uint32_t acknowledged, Collision collide) {
+        return Reconcile(state, acknowledged, MovementLimits::FromState(state), collide);
+    }
+    template<class Collision>
+    PredictedPosition Reconcile(const PlayerState& state, uint32_t acknowledged, const MovementLimits& limits, Collision collide);
+    static bool Predicts(const PlayerState& state) { return (state.flags & 4) && !(state.flags & (8|16|32)); }
+    template<class Collision>
     PredictedPosition ReconcileSmoothed(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, Collision collide) {
-        if(!std::isfinite(dt) || dt <= 0 || !(state.flags & 4) || (state.flags & (1|8|16|32))) {
-            hasPrevious_ = false; correction_ = {}; return Reconcile(state,acknowledged,collide);
+        return ReconcileSmoothed(state, acknowledged, poseSequence, dt, MovementLimits::FromState(state), collide);
+    }
+    template<class Collision>
+    PredictedPosition ReconcileSmoothed(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, const MovementLimits& limits, Collision collide);
+    // Replay with `stepper`, then ease small corrections over ~80 ms. `slide`
+    // keeps the eased visual offset out of walls.
+    template<class Stepper, class Slide>
+    PredictedPosition ReconcileSmoothedWith(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, Stepper& stepper, Slide slide) {
+        auto collide = slide;
+        if(!std::isfinite(dt) || dt <= 0 || !Predicts(state)) {
+            hasPrevious_ = false; correction_ = {}; return Replay(state,acknowledged,stepper);
         }
         const bool newPose = hasPrevious_ && poseSequence != previousSequence_;
         PredictedPosition before;
-        if(newPose) before = Reconcile(previousState_,previousAcknowledged_,collide);
-        PredictedPosition raw = Reconcile(state,acknowledged,collide);
+        if(newPose) before = Replay(previousState_,previousAcknowledged_,stepper);
+        PredictedPosition raw = Replay(state,acknowledged,stepper);
         if(newPose) {
             const float dx = before.x - raw.x, dz = before.z - raw.z;
             const bool reset = dx*dx + dz*dz > 0.0625f || std::abs(int64_t(state.y) - previousState_.y) > 250;
@@ -125,4 +155,44 @@ private:
     bool truncated_ = false, poseCorrection_ = false, poseReset_ = false;
     float poseDistance_ = 0;
 };
+
+// Hand-written replay of the native movement rules, without collisions beyond
+// the given test: cPlayer::MoveForwards/MoveSideways -> iCharacterBody::Move
+// (the input scales the acceleration, the speed clamps to the full limits) and
+// iCharacterBody::Update (axes without input decelerate; the step is capped at
+// the forward limit of the current direction). Used by tests and as fallback.
+template<class Collision>
+struct KinematicStepper {
+    MovementLimits limits; Collision collide;
+    float forward = 0, side = 0; PredictedPosition p;
+    KinematicStepper(const MovementLimits& l, Collision c) : limits(l), collide(c) {}
+    void Begin(const PlayerState& state) { forward = state.forwardSpeed/1000.0f; side = state.sideSpeed/1000.0f; p = {state.x/1000.0f,state.z/1000.0f}; }
+    PredictedPosition Step(const PlayerInput& input, float dt) {
+        auto decelerate = [](float speed, float change) { return speed > 0 ? std::max(0.0f, speed - change) : std::min(0.0f, speed + change); };
+        if(input.forward) forward = std::clamp(forward + limits.forwardAcc*(input.forward/1000.0f)*dt, -limits.backwardMax, limits.forwardMax);
+        else forward = decelerate(forward, limits.forwardDec*dt);
+        if(input.strafe) side = std::clamp(side + limits.sideAcc*(input.strafe/1000.0f)*dt, -limits.sideMax, limits.sideMax);
+        else side = decelerate(side, limits.sideDec*dt);
+        const float yaw = input.yaw/1000.0f;
+        // HPL forward is -Z; right is +X at yaw zero.
+        float stepX = (-std::sin(yaw)*forward + std::cos(yaw)*side)*dt;
+        float stepZ = (-std::cos(yaw)*forward - std::sin(yaw)*side)*dt;
+        const float maxStep = (forward >= 0 ? limits.forwardMax : limits.backwardMax)*dt;
+        const float length = std::sqrt(stepX*stepX + stepZ*stepZ);
+        if(length > maxStep && length > 0) { stepX *= maxStep/length; stepZ *= maxStep/length; }
+        p = collide(p,{p.x + stepX, p.z + stepZ});
+        return p;
+    }
+    void End() {}
+};
+template<class Collision>
+PredictedPosition MovementPrediction::Reconcile(const PlayerState& state, uint32_t acknowledged, const MovementLimits& limits, Collision collide) {
+    KinematicStepper<Collision> stepper(limits, collide);
+    return Replay(state, acknowledged, stepper);
+}
+template<class Collision>
+PredictedPosition MovementPrediction::ReconcileSmoothed(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, const MovementLimits& limits, Collision collide) {
+    KinematicStepper<Collision> stepper(limits, collide);
+    return ReconcileSmoothedWith(state, acknowledged, poseSequence, dt, stepper, collide);
+}
 }

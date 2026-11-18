@@ -8,10 +8,14 @@
 #include <deque>
 #include <map>
 #include "Checkpoint.h"
+#include "PlayerInput.h"
+#include "InputQueue.h"
 struct _ENetHost;
 struct _ENetPeer;
 namespace online {
-constexpr uint16_t ProtocolVersion = 3;
+// 4: batched movement commands (InputBatch) consumed one per host tick;
+// snapshots acknowledge the command already integrated by physics.
+constexpr uint16_t ProtocolVersion = 4;
 constexpr uint32_t VoluntaryDisconnectReason = 0x504f0001;
 constexpr uint16_t DefaultPort = 27120;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
@@ -21,7 +25,7 @@ constexpr uint32_t ConservativeDatagramBytes = 576;
 // reliable packet. A 256 KiB cap can reject the very retransmit that drains it.
 constexpr uint32_t TransportWaitingDataBytes = 4 * 1024 * 1024;
 enum class Role { Offline, Host, Client };
-enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17, Loading = 18, WorldApplied = 19 };
+enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17, Loading = 18, WorldApplied = 19, InputBatch = 20 };
 struct JournalEntry {
     uint8_t kind = 0; // note, diary, quest
     bool active = true;
@@ -42,13 +46,6 @@ struct Presentation {
 };
 std::vector<uint8_t> EncodePresentation(const Presentation& event);
 bool DecodePresentation(const uint8_t* data, size_t size, Presentation& event);
-struct PlayerInput {
-    uint32_t sequence = 0, tick = 0, epoch = 0;
-    int16_t forward = 0, strafe = 0; // normalized signed axes, -1000..1000
-    int16_t yaw = 0, pitch = 0; // radians * 1000
-    int16_t lookYaw = 0, lookPitch = 0; // native mouse look deltas *10000, consumed once
-    uint8_t buttons = 0; // jump, crouch, run, rotate grabbed object
-};
 struct PlayerState {
     int32_t x = 0, y = 0, z = 0; // feet position, millimetres
     int16_t yaw = 0, pitch = 0;
@@ -116,6 +113,10 @@ std::vector<uint8_t> EncodeMap(const MapState& map);
 bool DecodeMap(const uint8_t* data, size_t size, MapState& map);
 std::vector<uint8_t> EncodeInput(const PlayerInput& input);
 bool DecodeInput(const uint8_t* data, size_t size, PlayerInput& input);
+// The newest movement commands of one map epoch, oldest first (1..MaxInputBatch).
+constexpr size_t MaxInputBatch = 6;
+std::vector<uint8_t> EncodeInputBatch(const std::vector<PlayerInput>& inputs);
+bool DecodeInputBatch(const uint8_t* data, size_t size, std::vector<PlayerInput>& inputs);
 class Session {
 public:
     using Logger = std::function<void(const std::string&)>;
@@ -135,7 +136,12 @@ public:
     void BeginMapLoad();
     void RecoverConnection(const char* reason);
     bool SendInput(const PlayerInput& input);
-    bool ReadInput(PlayerInput& input) const; // expires after 250 ms
+    bool ReadInput(PlayerInput& input) const; // newest received; expires after 250 ms
+    // Host: the command to simulate on this tick, one per call (see InputQueue).
+    bool NextInput(PlayerInput& input, bool& repeated);
+    size_t InputQueueDepth() const { return inputQueue_.Depth(); }
+    size_t InputQueueTarget() const { return inputQueue_.Target(); }
+    InputQueue::Stats TakeInputStats() { return inputQueue_.TakeStats(); }
     bool SendSnapshot(const Snapshot& snapshot);
     // Low-rate reliable pose on control channel; never a life discontinuity.
     bool SendSnapshotBackup(const Snapshot& snapshot);
@@ -205,6 +211,8 @@ private:
     uint32_t lastDiagnostic_ = 0;
     uint32_t transportDatagramBytes_ = TransportDatagramBytes, lastSocketError_ = 0;
     PlayerInput input_;
+    InputQueue inputQueue_;
+    std::deque<PlayerInput> sentInputs_;
     Snapshot snapshot_;
     MapState map_;
     bool hasSnapshot_ = false, hasMap_ = false;

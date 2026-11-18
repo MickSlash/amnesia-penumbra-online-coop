@@ -15,7 +15,7 @@ REA non è stato usato: il sorgente completo di HPL1 e del codice di gioco di Ov
 Il rubber banding del client ha **tre cause principali**, in ordine di peso misurato:
 
 1. **L'host conserva un solo input del client e conferma (ACK) il più recente ricevuto, non quello effettivamente simulato.** Quando gli input arrivano a gruppi (jitter della rete, perdita di pacchetti, un frame lento su uno dei due PC), alcuni comandi non vengono mai simulati singolarmente e altri tick riusano un input vecchio. La previsione del client presume invece una corrispondenza 1:1 fra comandi e tick. Con 40 ms di jitter il 39 % dei tick dell'host riusa un input già visto, e le correzioni oltre 10 cm passano da 1–2 a 23–47 ogni 5 secondi.
-2. **La previsione usa un modello cinematico scritto a mano, non il movimento nativo del motore.** Anche in locale, senza rete, mentre si cammina dritti il 54 % delle pose richiede una correzione oltre 2 cm: il corpo dell'host avanza in passi irregolari (1,8 ± 1,3 cm per tick, fino a 10 cm), mentre il modello del client li prevede regolari.
+2. **La previsione usa un modello cinematico scritto a mano, non il movimento nativo del motore.** Il modello sbaglia in diagonale e con comandi parziali (verificato nel codice). Anche in locale, senza rete, il 54 % delle pose della camminata richiede una correzione oltre 2 cm. *Correzione del 18/11 (§7):* gran parte di quelle correzioni non viene dal modello. Nella prova il corpo dell'host resta bloccato dai frammenti delle casse e da un muro, mentre il client prevede di attraversarli (causa C4).
 3. **Stati non previsti.** Accovacciato, durante il salto, trascinando oggetti o porte (`ePlayerState_Move`) e da morto il client non prevede: resta alla posizione in ritardo dell'host oppure si muove liberamente. Alla ripresa della previsione arriva una correzione di tutto l'errore accumulato.
 
 A queste si aggiungono **discrepanze fisiche** fra le due simulazioni (oggetti statici sul client, nemici senza collisione sul client) e **interpolazioni senza buffer** per partner, oggetti e nemici, che con arrivi irregolari si muovono a scatti.
@@ -57,7 +57,7 @@ Prova `hammer` di `RunNativeTest.ps1`: due processi sullo stesso PC, mappa `leve
 
 | Scenario | RTT ms | Tick host con input riusato | Pose > 2 cm | Pose > 10 cm | Scatti > 25 cm | Correzione media / max |
 | --- | --- | --- | --- | --- | --- | --- |
-| A — locale, tastiera | 21–23 | 0–5 % | 129–166 / 300 | 1–2 | 0 | 2,7 cm / 11 cm |
+| A — locale, tastiera | 21–23 | 0–2 % | 129–166 / 300 | 1–2 | 0 | 2,7 cm / 11 cm |
 | C — relay 35 ms, 5 % perdita | 123–127 | 13 % | 104–175 / 300 | 16–18 | 0 | 2,8–3,4 cm / 15 cm |
 | D — relay 35 ms + jitter 0–40 ms, 5 % perdita | 157 | 36–40 % | 48–140 / 180 | 23–47 | 2 | 3,3–5,8 cm / 30 cm |
 | E — locale, frame lento sul client | 23–27 | 5–12 % | 114–149 / 300 | 12 | 1–2 | 3,0–3,3 cm / 35 cm |
@@ -89,9 +89,9 @@ Correlazione MISURATA: la quota di tick con input riusato (0–5 % → 13 % → 
 
 - `MovementPrediction` (`network/Prediction.h`) ricostruisce il movimento con accelerazione, decelerazione e velocità massima lette dallo snapshot.
 - Il motore invece usa `iCharacterBody::Update` (`HPL1Engine/sources/physics/CharacterBody.cpp`), che risolve collisioni, gradini, pendii e gravità.
-- MISURATO (scenario A, camminata dritta, nessuna rete): il corpo dell'host avanza di 1,80 cm per posa con deviazione standard 1,29 cm e massimo 10 cm. Il test di collisione del client blocca solo 0–6 passi su circa 1.700, quindi non è la causa. Le correzioni medie di 2,7 cm corrispondono a circa un tick e mezzo di movimento.
+- MISURATO (scenario A, camminata dritta, nessuna rete): il corpo dell'host avanza di 1,80 cm per posa con deviazione standard 1,29 cm e massimo 10 cm. Il test di collisione del client blocca solo 0–6 passi su circa 1.700. Le correzioni medie di 2,7 cm corrispondono a circa un tick e mezzo di movimento.
 - VERIFICATO NEL CODICE: `iCharacterBody::Move` moltiplica l'**accelerazione** per l'intensità del comando, mentre la velocità massima resta piena. La previsione invece moltiplica la **velocità massima**. Con la tastiera, intensità ±1, i due modelli coincidono. Con valori parziali, come la prova storica a 0,5 o un futuro gamepad, divergono. MISURATO nello scenario B: host 5,1 m, client 2,0 m.
-- IPOTESI: l'irregolarità del passo dell'host viene dalla risoluzione delle collisioni con il terreno (neve, rocce, gradini) in `iCharacterBody::Update`. Si può verificare registrando lo spostamento per tick di un giocatore locale senza rete.
+- ~~IPOTESI: l'irregolarità del passo dell'host viene dal terreno.~~ **Smentita il 18/11** (§7). Il registro della posizione mostra il corpo dell'host fermo contro i frammenti delle casse e contro un muro per il 49–73 % delle pose, con velocità piena. L'irregolarità è un blocco, che il test di collisione del client non riproduce (C4).
 
 ### C3 — Stati senza previsione (VERIFICATO NEL CODICE)
 
@@ -182,3 +182,107 @@ La riscrittura di componenti HPL1 in Rust è sconsigliata: cambierebbe il compor
 - Due processi sullo stesso PC, una prova per scenario: i valori sono indicativi. Una prova reale su due PC via Radmin resta necessaria, e la diagnostica `[COOP/NETDIAG]` serve proprio a misurarla.
 - La camminata della prova è in linea retta su una sola mappa. Collisioni con oggetti e nemici (C4), accovacciamento, salto e trascinamento (C3) sono verificati nel codice ma non misurati. Servono scenari dedicati.
 - Il jitter del relay è uniforme e indipendente per pacchetto. Le VPN reali hanno spesso picchi correlati, cioè raffiche.
+
+## 7. Aggiornamento 18 novembre — protocollo 4
+
+### Modifiche
+
+| Passo del piano | Cosa è stato fatto | File |
+| --- | --- | --- |
+| 1 | Il client invia gli ultimi 6 comandi in ogni pacchetto (`InputBatch`). L'host li accoda e ne simula esattamente uno per tick, con un buffer adattivo da 1 a 4 comandi. Gli arretrati oltre il buffer vengono scartati unendo delta del mouse e salti al comando successivo. Se la coda è vuota, l'host ripete l'ultimo comando senza delta. | `game/network/InputQueue.h` (nuovo), `PlayerInput.h` (nuovo), `NetSession.*`, `CoopNetwork.cpp` |
+| 2 | L'host cattura la posa del partner **prima** di applicare il comando del tick e conferma quello già integrato dalla fisica. | `CoopNetwork.cpp` (`UpdateHost`) |
+| 3b | Il replay segue `iCharacterBody::Move/Update`: l'intensità scala l'accelerazione, il passo è limitato al massimo in avanti (le diagonali non sono più veloci), si usano i limiti del corpo locale (corsa, accovacciato, salute). La previsione continua da accovacciati e durante il salto. | `game/network/Prediction.h`, `CoopNetwork.cpp` (`UpdateClient`) |
+
+Test di protocollo: tutti PASS. Quelli nuovi coprono:
+
+- codifica del batch e 10.000 pacchetti alterati;
+- ordine e ripetizione della coda, buffer adattivo, taglio degli arretrati con fusione dei delta, perdite;
+- replay nativo in diagonale, con comando parziale, da accovacciati e con salto;
+- comandi inviati tutti insieme su UDP reale, ognuno simulato una sola volta.
+
+Nuova diagnostica:
+
+- `queue_target`, `queue_starvations`, `queue_dropped`, `queue_lost`, `queue_depth_*` (host);
+- `nominal_step_cm_*`, `moving_poses`, `stalled_poses`, `free_correction_cm_*` (client);
+- nella prova `hammer`, il registro `[COOP/QA] Walk` con la posizione del partner sull'host.
+
+### Misure (stesse prove di §2, una per scenario)
+
+| Scenario | Tick host con input riusato: prima → dopo | Comandi saltati ogni 5 s: prima → dopo |
+| --- | --- | --- |
+| A — locale | 0–2 % → 0 | 0–5 → 0 |
+| C — 35 ms, 5 % perdita | 13 % → 0–0,3 % | 36–42 → 0 |
+| D — 35 ms + jitter 40 ms | 36–40 % → 0–0,3 % | 105–122 → 0 |
+| E — frame lento sul client | 5–12 % → ≤ 2 % | 16–36 → ≤ 2 |
+| F — frame lento sull'host | 10 % → 0–3 % | 29–30 → ≤ 9 |
+
+Il buffer si adatta: con jitter si stabilizza a 3–4 comandi (profondità media 2–2,5, circa 40 ms in più di latenza dell'host sul movimento del client); in locale resta a 1. L'ACK medio del client passa da 2 a circa 4–5 comandi in locale, per l'ordine corretto rispetto alla fisica e il buffer. La previsione nasconde questo ritardo al giocatore.
+
+**Correzioni del client:** nel complesso non sono calate (A: 2,2–3,4 cm di media per posa; D: fino a 5,8 cm, 46–58 pose oltre 10 cm). Il motivo, misurato, è che la camminata della prova è quasi sempre bloccata:
+
+- `stalled_poses` 49–73 % nella prima finestra: il corpo dell'host ha velocità piena ma non si sposta;
+- il registro `[COOP/QA] Walk` lo mostra fermo a z ≈ 7,8 sopra i frammenti delle casse rotte (y 0,16 → 0,24) e poi contro un ostacolo a z ≈ 9,1 camminando all'indietro;
+- `replay_blocked` è vicino a zero nelle stesse finestre: il client prevede di passare.
+
+**Nelle pose in cui l'host si muove libero** l'errore di previsione è 0,1–2,5 cm in locale e 0,5–1,3 cm con jitter (`free_correction_cm_mean`). Resta un errore di circa un tick in alcune finestre (camminata all'indietro, 2,5 cm). È da spiegare: IPOTESI, differenza di direzione fra la telecamera del client e il corpo dell'host durante la prova.
+
+### Conseguenze sul piano
+
+1. **Coerenza delle collisioni (passo 5) diventa la priorità successiva.** Le correzioni rimaste vengono soprattutto da ostacoli che bloccano l'host e non il client: frammenti e oggetti fisici, probabilmente anche il personaggio dell'altro giocatore. Il test di collisione del client usa `CheckShapeWorldCollision(..., abCollideCharacter=false)` e accetta piccoli ostacoli come "gradini" (`StepBlocked`), mentre il corpo nativo non sempre riesce a salirci.
+2. **La prova `hammer` va affiancata da una camminata in campo libero.** Così si separano gli errori di rete da quelli di collisione. Il controllo `max_horizontal_step_m < 0.2` misura soprattutto gli urti contro i frammenti.
+3. **I passi 4 (buffer di interpolazione) e 7 (trascinamento)** restano invariati.
+
+## 8. Aggiornamento 18 novembre — previsione con il corpo nativo (coerenza delle collisioni)
+
+### Modifiche
+
+- **Motore** (`HPL1Engine/.../CharacterBody.*`): `iCharacterBody` ha una modalità previsione (`SetPredicting`, `GetPredictionState`, `SetPredictionState`). In questa modalità `Update` esegue lo stesso movimento (collisioni, scivolamento lungo i muri, salita graduale dei gradini, gravità) ma salta tutti gli effetti esterni:
+  - callback di spinta e di gravità e `OnHitGround`;
+  - telecamera ed entità;
+  - aggancio a piattaforme;
+  - risveglio dei corpi vicini.
+- **Previsione** (`Prediction.h`): il replay è separato dal simulatore (`Replay`, `ReconcileSmoothedWith`). Il modello cinematico resta come `KinematicStepper` per i test e per i confronti.
+- **Client** (`CoopNetwork.cpp`, `NativeStepper`):
+  - salva lo stato del proprio corpo;
+  - lo porta alla posa e alla velocità dell'host;
+  - per ogni comando non confermato chiama `SetYaw`, `Move` e `Update` come l'host;
+  - legge la posizione orizzontale e ripristina il corpo.
+
+  Con `PENUMBRA_COOP_PREDICTION=kinematic` torna al modello cinematico, per i confronti.
+
+### Misure A/B (stesso eseguibile, una prova per modo e scenario)
+
+| Finestra | Misura | Nativa | Cinematica |
+| --- | --- | --- | --- |
+| A, partenza contro i frammenti (host bloccato nel 76–82 % delle pose) | pose > 2 cm | **5** | 135 |
+| | correzione media | **0,64 cm** | 2,81 cm |
+| | strada client / host | **1,00** | 2,47 |
+| A, ritorno verso il muro | pose > 2 cm | 211 | 154 |
+| | correzione media | 2,17 cm | 2,67 cm |
+| | strada client / host | 0,49 | 0,82 |
+| D (jitter), partenza | pose > 10 cm | **14** | 38 |
+| | correzione media | **2,16 cm** | 4,32 cm |
+| | strada client / host | **2,2** | 3,1 |
+| D (jitter), ritorno | pose > 10 cm | **0** | 25 |
+| | correzione media | **0,72 cm** | 3,22 cm |
+| | strada client / host | **1,7** | 2,7 |
+| Costo `UpdateClient` | locale | 0,7–1,2 ms/tick | 0,2–0,7 ms/tick |
+| | jitter (circa 13 comandi in attesa) | 1,8–2,9 ms/tick | 0,3–1,1 ms/tick |
+
+Lettura:
+
+- Contro gli ostacoli la previsione nativa riproduce il blocco dell'host: le correzioni spariscono quasi del tutto.
+- Con jitter le correzioni oltre 10 cm calano di circa l'80 %.
+- Nel ritorno verso il muro, in locale, restano circa 2 cm per posa e il client mostra metà della strada dell'host. IPOTESI: è lo stesso errore residuo di un tick visto in §7; da indagare con una camminata in campo libero.
+
+Costo: il replay nativo fa più collisioni per comando. Con RTT 150 ms costa fino a 3 ms per tick sul client. Ottimizzazioni possibili:
+
+- non rifare il replay della posa precedente (usato solo per misurare e ammorbidire la correzione);
+- fermarsi ai comandi successivi all'ultima posa nota.
+
+### Rimane da fare per la coerenza delle collisioni
+
+- **Il partner non ha un corpo sul client.** Sull'host il personaggio del client urta l'host (`mbCollideCharacter`), sul client no.
+- **Nemici senza collisione sul client.**
+- **Arretrati dopo blocchi lunghi.** Dopo un blocco di circa 1 s del client, l'host scarta i comandi oltre il buffer. Il client li aveva già mostrati e viene riportato indietro. Meglio recuperarli con 1–2 passi del corpo in più per tick.
+- **Prova in campo libero**, per isolare l'errore residuo.

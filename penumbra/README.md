@@ -1,4 +1,4 @@
-# Penumbra: Overture — Online Co-op 0.3 sperimentale
+# Penumbra: Overture — Online Co-op 0.4 sperimentale
 
 Mod per **due giocatori** su Windows. Richiede un'installazione originale di **Penumbra: Overture** su entrambi i PC. Questa versione aggiunge nemici autorevoli, morte/respawn e checkpoint cooperativi. La campagna completa resta da validare.
 
@@ -7,7 +7,7 @@ Mod per **due giocatori** su Windows. Richiede un'installazione originale di **P
 1. Estrarre lo ZIP in una cartella separata e aprire **PenumbraCoopLauncher.exe**.
 2. Selezionare la cartella del gioco, per esempio `E:\Steam\steamapps\common\Penumbra Overture`. Il launcher trova anche `redist`.
 3. L'host sceglie **Ospita partita**. Il client inserisce l'IP dell'host e sceglie **Connettiti all'host**. Porta predefinita: **UDP 27120**.
-4. Aggiornare entrambi alla **0.3, protocollo 3**: le build precedenti non sono compatibili.
+4. Aggiornare entrambi alla stessa build (**0.4, protocollo 4**): le build precedenti non sono compatibili.
 
 Per giocare non serve PowerShell. Non vengono sostituiti gli eseguibili originali. Il pacchetto non contiene mappe, texture, audio o DLL commerciali: usa quelle della propria installazione `redist`. Se mancano MSVC x86 o OpenAL, installare il runtime x86 e l'OpenAL fornito con il gioco.
 

@@ -50,6 +50,8 @@ namespace hpl {
 
 		mbCollideCharacter = true;
 
+		mbPredicting = false;
+
 		mbTestCollision = true;
 
 		float fRadius = cMath::Max(avSize.x, avSize.z)*0.5f;
@@ -499,6 +501,27 @@ namespace hpl {
 		mvPosition.z = mvLastPosition.z = z;
 		mpBody->SetPosition(mvPosition);
 	}
+
+	iCharacterBody::tPredictionState iCharacterBody::GetPredictionState()
+	{
+		tPredictionState state;
+		state.mvPosition = mvPosition; state.mvLastPosition = mvLastPosition;
+		state.mvVelocity = mvVelolcity; state.mvForce = mvForce;
+		for(int i=0; i<2; ++i) { state.mfMoveSpeed[i] = mfMoveSpeed[i]; state.mbMoving[i] = mbMoving[i]; }
+		state.mfYaw = mfYaw; state.mfCheckStepClimbCount = mfCheckStepClimbCount;
+		state.mbOnGround = mbOnGround; state.mbClimbing = mbClimbing;
+		return state;
+	}
+
+	void iCharacterBody::SetPredictionState(const tPredictionState& aState)
+	{
+		mvPosition = aState.mvPosition; mvLastPosition = aState.mvLastPosition;
+		mvVelolcity = aState.mvVelocity; mvForce = aState.mvForce;
+		for(int i=0; i<2; ++i) { mfMoveSpeed[i] = aState.mfMoveSpeed[i]; mbMoving[i] = aState.mbMoving[i]; }
+		mfYaw = aState.mfYaw; mfCheckStepClimbCount = aState.mfCheckStepClimbCount;
+		mbOnGround = aState.mbOnGround; mbClimbing = aState.mbClimbing;
+		mpBody->SetPosition(mvPosition);
+	}
 	cVector3f iCharacterBody::GetFeetPosition()
 	{
 		return mvPosition - cVector3f(0,mpBody->GetShape()->GetSize().y/2,0);
@@ -638,7 +661,7 @@ namespace hpl {
 
 		//Clear attached body
 		iPhysicsBody *pLastAttached = mpAttachedBody;
-		SetAttachedBody(NULL);
+		if(mbPredicting==false) SetAttachedBody(NULL);
 
 		//Update the move matrix.
 		UpdateMoveMarix();
@@ -680,7 +703,7 @@ namespace hpl {
 
 		//////////////////////////
 		//Enable objects around the character
-		if(mvLastPosition != mvPosition)
+		if(mbPredicting==false && mvLastPosition != mvPosition)
 		{
 			cBoundingVolume largeBV = *mpBody->GetBV();
 			largeBV.SetSize(largeBV.GetSize()*1.02f);
@@ -747,8 +770,7 @@ namespace hpl {
 		{
 			mpBody->SetPosition(mvPosition);
 
-			UpdateCamera();
-			UpdateEntity();
+			if(mbPredicting==false) { UpdateCamera(); UpdateEntity(); }
 
 			mvVelolcity =0; //This is a fix so the velocity is not screwed up later on.
 
@@ -765,7 +787,7 @@ namespace hpl {
 		if(mvLastPosition.x != mvPosition.x || mvLastPosition.z != mvLastPosition.z)
 		{
 			mpWorld->CheckShapeWorldCollision(&vNewPos,mpBody->GetShape(), cMath::MatrixTranslate(mvPosition),mpBody,
-											false, true, mpCollideCallbackPush,mbCollideCharacter);
+											false, true, mbPredicting ? NULL : mpCollideCallbackPush,mbCollideCharacter);
 		}
 		else
 		{
@@ -869,8 +891,7 @@ namespace hpl {
 			//Set the postion to the body
 			mpBody->SetPosition(mvPosition);
 
-			UpdateCamera();
-			UpdateEntity();
+			if(mbPredicting==false) { UpdateCamera(); UpdateEntity(); }
 
 			mvVelolcity =0; //This is a fix so the velocity is not screwed up later on. (still is though...)
 
@@ -946,7 +967,7 @@ namespace hpl {
 		vNewPos = mvPosition;
 		bCollide = mpWorld->CheckShapeWorldCollision(&vNewPos,mpBody->GetShape(),
 											cMath::MatrixTranslate(mvPosition), mpBody,false,true,
-											mpCollideCallbackGravity,mbCollideCharacter);
+											mbPredicting ? NULL : mpCollideCallbackGravity,mbCollideCharacter);
 
 
 		//Set new velocity depending on collisions.
@@ -991,7 +1012,7 @@ namespace hpl {
 			{
 				if(mbOnGround == false)
 				{
-					if(mpCallback) mpCallback->OnHitGround(this,vLastVelocity);
+					if(mpCallback && mbPredicting==false) mpCallback->OnHitGround(this,vLastVelocity);
 				}
 
 				mbOnGround = true;
@@ -1015,18 +1036,20 @@ namespace hpl {
 
 		//////////////////////////////
 		//Update attached objects
-		UpdateCamera();
-		UpdateEntity();
+		if(mbPredicting==false) { UpdateCamera(); UpdateEntity(); }
 
 		////////////////////////////
 		//Update body if it is attached
-		if(pLastAttached != mpAttachedBody)	mbAttachmentJustAdded = true;
-		UpdateAttachment();
+		if(mbPredicting==false)
+		{
+			if(pLastAttached != mpAttachedBody)	mbAttachmentJustAdded = true;
+			UpdateAttachment();
+		}
 
 		//////////////////////////////
 		//Enable close by objects
 
-		if(mbEnableNearbyBodies)
+		if(mbEnableNearbyBodies && mbPredicting==false)
 		{
 			cWorld3D *pWorld = mpWorld->GetWorld3D();
 			cPortalContainerEntityIterator bodyIt = pWorld->GetPortalContainer()->GetEntityIterator(
