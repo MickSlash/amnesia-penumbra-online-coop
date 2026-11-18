@@ -484,3 +484,57 @@ Due giocatori, stessa build:
 - Nemici, attacchi ad area e checkpoint sono ancora a 2 giocatori (`COOP_KNOWN_ISSUES.md`).
 - Le prove a 3-4 giocatori non passano dal relay di rete degradata.
 - Non è stata fatta nessuna partita reale su più PC.
+
+## 13. Aggiornamento 18 novembre — nemici e checkpoint per 3-4 giocatori (passi 5-6)
+
+### Modifiche
+
+- **Nemici:**
+  - `SelectNetworkTarget` sceglie il bersaglio fra tutti i giocatori in partita, con un contatore di visibilità per ID;
+  - gli attacchi ad area colpiscono tutti i giocatori in partita;
+  - `BeforeObjectBreak` fa lasciare l'oggetto a qualsiasi ospite lo tenga.
+- **Slot vuoti e ingresso in corsa:**
+  - gli ospiti 3-4 entrano nel mondo solo se connessi; chi si connette durante una mappa entra in un punto libero vicino all'host;
+  - il primo ospite resta come nella partita a due.
+- **Checkpoint:**
+  - salva gli ospiti 3 e 4 (`mbPlayer3`/`mPlayer3`, `mbPlayer4`/`mPlayer4`, con l'arma);
+  - un ospite non ancora nel mondo riceve lo stato salvato quando entra;
+  - i salvataggi del formato precedente restano validi.
+- **Prova `party`**, dopo la camminata:
+  - un cane compare accanto all'ultimo ospite (gli altri tornano al punto di partenza) e deve sceglierlo e ferirlo;
+  - poi la salute dell'ospite viene portata a 50 e salvata nel checkpoint, quindi cambiata e l'ospite spostato;
+  - il checkpoint ricaricato deve riportare salute e posizione.
+
+### Difetti della prova corretti durante il lavoro
+
+- **Il cane cadeva nel vuoto:** compariva dietro l'ospite, fuori dal terreno. Ora compare sul tratto appena percorso.
+- **Ospiti inattivi sull'host:** gli ospiti seguono lo stato dell'host, che nella prova restava inattivo, e i nemici ignorano i giocatori inattivi. Come nella prova `hammer`, la prova ora attiva l'host.
+
+### Misure
+
+Prova `party` (stesso PC):
+
+| Giocatori | Esito | Bersaglio del cane | Salute dopo il morso | Checkpoint (salute salvata 50) |
+| --- | --- | --- | --- | --- |
+| 2 | PASS | giocatore 2 | 71,7 | 51,6; errore di posizione 0,015 m |
+| 3 | PASS 2/2 | giocatore 3 | 59,8–71,7 | 51,6; 0,004 m |
+| 4 | PASS 2/2 | giocatore 4 | 58,1–69,4 | 51,6; 0,027 m |
+
+La salute ricaricata è 51,6 invece di 50 per la rigenerazione naturale dei secondi dopo il caricamento.
+
+Ripresa in un processo nuovo (`resume`):
+- da un salvataggio del formato precedente: PASS;
+- da uno nuovo: PASS.
+
+Due giocatori, stessa build:
+
+| Prova | Esito |
+| --- | --- |
+| full, intro | PASS |
+| hammer | PASS (`step_beyond_host_m`=0,040) |
+| hammer con RTT 80 ms, jitter 20 ms, 2 % di perdita | PASS (0,093) |
+| campaign | PASS |
+| campaign con la stessa rete degradata | PASS |
+| maps | PASS, 25/25 |
+
+Limiti: come in §12, nessuna prova a 3-4 giocatori con rete degradata né su più PC. L'inventario è ancora comune.

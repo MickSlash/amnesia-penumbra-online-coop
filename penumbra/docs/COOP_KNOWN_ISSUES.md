@@ -4,14 +4,10 @@ Ogni voce indica se è misurata, verificata nel codice o solo ipotizzata. Le voc
 
 ## Overture
 
-- **3-4 giocatori, parti ancora a 2** (VERIFICATO NEL CODICE):
-  - i nemici scelgono il bersaglio solo fra host e primo ospite;
-  - gli attacchi ad area dei nemici colpiscono solo host e primo ospite (`AttackHandler.cpp`);
-  - il checkpoint salva solo il primo ospite; gli altri ripartono con lo stato di inizio mappa;
-  - l'inventario è ancora quello comune;
-  - il corpo di uno slot mai connesso resta, inattivo, nel mondo fisico vicino all'host.
-
-  Si attivano solo con `PENUMBRA_COOP_PLAYERS` sull'host. Il launcher resta a 2.
+- **3-4 giocatori, cose ancora da fare** (VERIFICATO NEL CODICE):
+  - l'inventario è ancora quello comune a tutti;
+  - un ospite 3 o 4 che si disconnette lascia il corpo, inattivo, fino al cambio di mappa;
+  - il launcher e il menu restano a 2 giocatori: 3-4 si attivano solo con `PENUMBRA_COOP_PLAYERS` sull'host.
 - **Prove a 3-4 giocatori solo sullo stesso PC** (`-Mode party`): tutti i processi sono sullo stesso PC, senza rete reale né rete degradata. Il relay di prova serve solo il primo client.
 - **Scatto intermittente del client con frame lenti** (prova hammer con `-Hitch client`): in 1 esecuzione su 3, un passo del client 0,30 m oltre il passo dell'host durante la camminata contro i frammenti. Probabile combinazione fra recupero dei tick dopo il blocco e salita sui frammenti. Da indagare con il registro `Large client step`.
 - **Spingere oggetti camminando:** ora i corpi entro la massa spingibile non bloccano il client (protocollo 6), ma restano statici sul client finché l'host non li sposta: si vedono muovere con un giro di ritardo. Non ancora misurato con una prova dedicata.

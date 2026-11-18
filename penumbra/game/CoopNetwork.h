@@ -16,6 +16,7 @@ class iGameEntity;
 class iGameEnemy;
 class cGameTrigger;
 class cSavedGame;
+class cPlayer_GlobalSave;
 
 class cCoopNetwork : public hpl::iUpdateable, public hpl::iSoundEntityGlobalCallback {
 public:
@@ -40,6 +41,10 @@ public:
     bool EnemyTrigger(iGameEnemy* enemy,cGameTrigger* trigger);
     void PrepareSave();
     cPlayer* PartnerPlayer() const { return remotePlayer; }
+    // Host: giocatori bersagliabili per ID meno uno (nullptr se non in partita).
+    std::vector<cPlayer*> TargetablePlayers() const;
+    // Host: i giocatori in partita, per gli attacchi ad area.
+    std::vector<cPlayer*> DamageablePlayers() const;
     void SavePartner(cSavedGame* save);
     void LoadPartner(cSavedGame* save);
     void RestoreWeapon(const std::string& model);
@@ -85,6 +90,11 @@ public:
         uint32_t poseAck = 0;
         bool poseValid = false;
         float deathTime = 0;
+        bool everInWorld = false; // il suo corpo è già entrato in una mappa
+        // Stato dal checkpoint per un ospite non ancora nel mondo: applicato
+        // quando entra (EnterWorld), scartato al prossimo cambio di mappa.
+        std::shared_ptr<cPlayer_GlobalSave> pendingSave;
+        std::string pendingWeapon;
         hpl::cVector3f sentFeet;
         bool hasSentFeet = false;
         uint8_t teleportCount = 0;
@@ -109,6 +119,8 @@ private:
     void Bind(Guest& guest) { g = &guest; remotePlayer = guest.player; remoteHands = guest.hands; }
     void UpdateGuest(float dt);
     void ResetGuestMap(Guest& guest);
+    hpl::cVector3f FreeSpot(hpl::iCharacterBody* body,const hpl::cVector3f& center,const std::vector<hpl::cVector3f>& taken);
+    void EnterWorld(Guest& guest,const hpl::cVector3f& center,std::vector<hpl::cVector3f>& taken);
     void Present(const online::Presentation& event);
     std::vector<std::unique_ptr<Guest>> guests;
     Guest* g = nullptr;
@@ -143,6 +155,11 @@ private:
     void RunPartyQA(float dt);
     // QA "party": host e 1-3 ospiti (vedi RunPartyQA).
     bool qaPartyStarted = false, qaPartyWalking = false, qaPartyDone = false, qaPartyMap = false;
+    bool qaPartyMoved = false, qaPartyTargeted = false, qaPartyBitten = false;
+    Guest* qaPartyVictim = nullptr;
+    int qaPartyStage = 0;
+    float qaPartyStageTime = 0;
+    hpl::cVector3f qaPartySavedFeet;
     float qaPartyTime = 0;
     std::map<uint8_t, hpl::cVector3f> qaPartyStart;
     // QA "maps": tutte le mappe della campagna caricate in sequenza.

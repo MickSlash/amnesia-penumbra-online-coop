@@ -71,10 +71,10 @@ Il numero di giocatori, host compreso, è scelto sull'host con `PENUMBRA_COOP_PL
 | Host (`CoopNetwork`) | Lo stato per ospite è in `Guest`: sessione, `cPlayer`, mani, epoch della mappa, stato pubblicato, inventario, diario, media, code di eventi, snapshot, diagnostica, vita e teletrasporti. `UpdateHost` cattura le pose di tutti a inizio tick, poi lega a turno ogni ospite connesso (`Bind`) ed esegue `UpdateGuest`, il codice per singolo ospite già collaudato. Ogni ospite ha il suo epoch: una riconnessione non fa ricaricare la mappa agli altri. Gli ospiti sono piazzati in punti liberi attorno all'host. | — |
 | Client | Una cronologia per ogni altro ospite (`otherHistory`), riprodotta sulla linea temporale dell'host. Una silhouette per ID (`avatars`), rimossa quando quel giocatore lascia lo snapshot. Previsione solo per sé. | — |
 | Vita | Rinascita accanto a un compagno vivo qualsiasi; checkpoint quando tutti sono a terra da 5 s. | — |
-| Nemici | Bersaglio scelto ancora fra host e primo ospite; `EntityState::target` porta già l'ID. | Passo 5: bersagli, danni, `PlayerForBody` e attacchi ad area per tutti. |
-| Salvataggi | Checkpoint del solo primo ospite (`SavePartner`/`LoadPartner`). | Passo 6: stato per ID nel checkpoint. |
-| Agganci del motore | Fuori dal ciclo resta legato il primo ospite: gli agganci non ancora estesi (nemici, salvataggi) vedono lui. `IsRemoteContext`, `RemoteSimpleSwing`, `RemoteExamineDown`, `PlayerForBody` e `DamagePlayer` valgono per ogni ospite. | Passo 5. |
-| Slot vuoti | Il `cPlayer` di uno slot mai connesso è inattivo ma il suo corpo resta nel mondo fisico. | Passo 5: toglierlo dal mondo fisico. |
+| Nemici | `SelectNetworkTarget` sceglie fra tutti i giocatori in partita (`TargetablePlayers`, per ID). `EntityState::target` porta l'ID del bersaglio. Gli attacchi ad area colpiscono tutti i giocatori in partita (`DamageablePlayers`). | — |
+| Salvataggi | Il checkpoint salva il primo ospite (`mPlayer2`) e gli ospiti 3 e 4 se nel mondo (`mbPlayer3`/`mPlayer3`, `mbPlayer4`/`mPlayer4`, con l'arma). I salvataggi precedenti restano validi: mancano solo i campi nuovi. Un ospite non ancora nel mondo riceve lo stato salvato quando entra (`pendingSave`). | Inventario per giocatore (oggi comune). |
+| Agganci del motore | `IsRemoteContext`, `RemoteSimpleSwing`, `RemoteExamineDown`, `PlayerForBody`, `DamagePlayer`, `BeforeObjectBreak`, nemici e attacchi ad area valgono per ogni ospite. Fuori dal ciclo resta legato il primo ospite (`PartnerPlayer`, prove automatiche). | — |
+| Slot vuoti e ingresso in corsa | Il primo ospite entra sempre nel mondo, come nella partita a due. Gli altri entrano solo se connessi al caricamento della mappa, altrimenti quando si connettono (`EnterWorld`, in un punto libero vicino all'host). | Un ospite 3-4 che si disconnette lascia il corpo, inattivo, fino al cambio di mappa. |
 
 Passi:
 
@@ -82,6 +82,6 @@ Passi:
 2. ✅ Trasporto multi-ospite (`HostTransport`), con test di protocollo per 3 ospiti.
 3. ✅ Stato per ospite sull'host.
 4. ✅ Silhouette e cronologie per gli altri ospiti sul client.
-5. Nemici e vita per ogni giocatore.
-6. Checkpoint per ogni giocatore.
-7. ✅ Prove native con 3 e 4 istanze: `RunNativeTest.ps1 -Mode party -Players 3|4`.
+5. ✅ Nemici e vita per ogni giocatore.
+6. ✅ Checkpoint per ogni giocatore.
+7. ✅ Prove native con 3 e 4 istanze: `RunNativeTest.ps1 -Mode party -Players 2|3|4` (camminata, nemico sull'ultimo ospite, checkpoint salvato e ricaricato).

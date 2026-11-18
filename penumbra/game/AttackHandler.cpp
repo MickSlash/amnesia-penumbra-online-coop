@@ -424,7 +424,8 @@ void cAttackHandler::CreateSplashDamage(const cVector3f& avCenter, float afRadiu
 
     if(aTarget & eAttackTargetFlag_Player)
 	{
-        cPlayer* victims[]={mpInit->mpCoop && mpInit->mpCoop->IsHost()?mpInit->mpCoop->HostPlayer():mpInit->mpPlayer,mpInit->mpCoop && mpInit->mpCoop->IsHost()?mpInit->mpCoop->PartnerPlayer():NULL};
+        std::vector<cPlayer*> victims;
+        if(mpInit->mpCoop && mpInit->mpCoop->IsHost()) victims=mpInit->mpCoop->DamageablePlayers(); else victims.push_back(mpInit->mpPlayer);
         for(auto* victim:victims) {
         if(!victim || !victim->GetCharacterBody() || victim->IsDead()) continue;
 		cBoundingVolume* pCharBV = victim->GetCharacterBody()->GetBody()->GetBV();

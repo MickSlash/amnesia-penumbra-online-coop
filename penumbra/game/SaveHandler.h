@@ -344,6 +344,11 @@ public:
 	int mlCoopVersion = 0;
     cPlayer_GlobalSave mPlayer2;
     tString msHostWeapon,msClientWeapon;
+    // Co-op a 3-4 giocatori: ospiti con ID 3 e 4, salvati se presenti.
+    // Assenti nei salvataggi precedenti: il caricamento li lascia a false.
+    bool mbPlayer3 = false, mbPlayer4 = false;
+    cPlayer_GlobalSave mPlayer3, mPlayer4;
+    tString msPlayer3Weapon, msPlayer4Weapon;
     cPlayer_GlobalSave mPlayer;
 	cMapHandler_GlobalSave mMapHandler;
 	cInventory_GlobalSave mInventory;

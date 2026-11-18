@@ -271,9 +271,54 @@ void cCoopNetwork::BeforeMapLoad() {
     enemyColliders.clear(); avatars.clear();
     positioned=false; hasClientPosition=false; snapshotAge=0;
     prediction.Clear(); ResetPlayback();
-    for(auto& guest:guests) ResetGuestMap(*guest);
+    for(auto& guest:guests) { ResetGuestMap(*guest); guest->pendingSave.reset(); guest->pendingWeapon.clear(); }
     restoredEquipment=false; baselineNames.clear(); receivedJournal=0;
     currentMusic.clear(); currentSkybox.clear();
+}
+// Punto libero vicino a `center` per il corpo `body`: prima le posizioni
+// storiche (a destra a 0,6 m, poi sinistra, dietro, davanti), poi anelli più
+// larghi; mai dentro muri o arredi, né a meno di 0,5 m da un altro giocatore.
+cVector3f cCoopNetwork::FreeSpot(iCharacterBody* body,const cVector3f& center,const std::vector<cVector3f>& taken) {
+    auto* physics=init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld();
+    std::vector<cVector3f> candidates={cVector3f(0.6f,0,0),cVector3f(-0.6f,0,0),cVector3f(0,0,0.6f),cVector3f(0,0,-0.6f)};
+    for(int trial=0;trial<24;++trial) {
+        const float angle=trial*k2Pif/8, radius=.9f+.4f*(trial/8);
+        candidates.push_back(cVector3f(std::cos(angle)*radius,0,std::sin(angle)*radius));
+    }
+    for(const auto& offset:candidates) {
+        const auto feet=center+offset;
+        bool crowded=false;
+        for(const auto& other:taken) { auto d=other-feet; d.y=0; if(d.SqrLength()<0.25f) crowded=true; }
+        if(crowded) continue;
+        const auto matrix=cMath::MatrixTranslate(feet+cVector3f(0,.1f+body->GetSize().y/2,0));
+        if(!physics->CheckShapeWorldCollision(nullptr,body->GetShape(),matrix,body->GetBody(),false,true,nullptr,false)) return feet;
+    }
+    Log("[COOP/MAP] No free spawn spot near the host; using the default offset\n");
+    return center+cVector3f(0.6f,0,0);
+}
+// Crea il corpo dell'ospite nel mondo, in un punto libero vicino a `center`.
+void cCoopNetwork::EnterWorld(Guest& guest,const cVector3f& center,std::vector<cVector3f>& taken) {
+    auto* player=guest.player;
+    { PlayerScope scope(init,player,guest.hands); player->OnWorldLoad(); guest.hands->OnWorldLoad(); if(!guest.everInWorld) player->SetPower(100); }
+    guest.everInWorld=true;
+    // Players pass through each other (group 1) but, as in the original
+    // game, still collide with enemies. Disabling character collision
+    // altogether let players and enemies walk through each other.
+    player->GetCharacterBody()->SetCharacterGroup(1);
+    if(guest.pendingSave) {
+        // Stato e posizione dall'ultimo checkpoint caricato.
+        PlayerScope scope(init,player,guest.hands);
+        player->ChangeState(ePlayerState_Normal); player->LoadFromGlobal(guest.pendingSave.get()); RestoreWeapon(guest.pendingWeapon);
+        guest.pendingSave.reset(); guest.pendingWeapon.clear();
+        taken.push_back(player->GetCharacterBody()->GetFeetPosition());
+        Log("[COOP/SAVE] Player %u joined with its checkpoint state health=%.2f\n",unsigned(guest.session.GuestPlayerId()),player->GetHealth());
+        return;
+    }
+    const cVector3f feet=FreeSpot(player->GetCharacterBody(),center,taken);
+    player->GetCharacterBody()->SetFeetPosition(feet); taken.push_back(feet);
+    player->GetCamera()->SetYaw(init->mpPlayer->GetCamera()->GetYaw());
+    player->GetCamera()->SetPitch(init->mpPlayer->GetCamera()->GetPitch());
+    player->GetCharacterBody()->SetYaw(player->GetCamera()->GetYaw());
 }
 void cCoopNetwork::AfterMapLoad(const tString& file) {
     if(!IsOnline()) return;
@@ -282,43 +327,14 @@ void cCoopNetwork::AfterMapLoad(const tString& file) {
         if(!currentMap.fingerprint) FatalError("Cannot fingerprint cooperative map '%s'\n",currentMap.file.c_str());
         spawn=init->mpPlayer->GetCharacterBody()->GetFeetPosition();
         init->mpPlayer->GetCharacterBody()->SetCharacterGroup(1);
-        // Ospiti attorno all'host in punti liberi: prima le posizioni storiche
-        // (a destra a 0,6 m, poi sinistra, dietro, davanti), poi anelli più
-        // larghi; mai dentro muri o arredi, né a meno di 0,5 m da un altro.
-        auto* physics=init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld();
         std::vector<cVector3f> taken={spawn};
-        auto freeSpot=[&](iCharacterBody* body) {
-            std::vector<cVector3f> candidates={cVector3f(0.6f,0,0),cVector3f(-0.6f,0,0),cVector3f(0,0,0.6f),cVector3f(0,0,-0.6f)};
-            for(int trial=0;trial<24;++trial) {
-                const float angle=trial*k2Pif/8, radius=.9f+.4f*(trial/8);
-                candidates.push_back(cVector3f(std::cos(angle)*radius,0,std::sin(angle)*radius));
-            }
-            for(const auto& offset:candidates) {
-                const auto feet=spawn+offset;
-                bool crowded=false;
-                for(const auto& other:taken) { auto d=other-feet; d.y=0; if(d.SqrLength()<0.25f) crowded=true; }
-                if(crowded) continue;
-                const auto matrix=cMath::MatrixTranslate(feet+cVector3f(0,.1f+body->GetSize().y/2,0));
-                if(!physics->CheckShapeWorldCollision(nullptr,body->GetShape(),matrix,body->GetBody(),false,true,nullptr,false)) return feet;
-            }
-            Log("[COOP/MAP] No free spawn spot near the host; using the default offset\n");
-            return spawn+cVector3f(0.6f,0,0);
-        };
         for(size_t n=0;n<guests.size();++n) {
             auto& guest=*guests[n];
             guest.map.file=currentMap.file; guest.map.fingerprint=currentMap.fingerprint; ++guest.map.epoch;
-            auto* player=guest.player;
-            { PlayerScope scope(init,player,guest.hands); player->OnWorldLoad(); guest.hands->OnWorldLoad(); if(guest.map.epoch==1) player->SetPower(100); }
-            player->GetCharacterBody()->SetCharacterGroup(1);
-            const cVector3f feet=freeSpot(player->GetCharacterBody());
-            player->GetCharacterBody()->SetFeetPosition(feet); taken.push_back(feet);
-            // Players pass through each other (group 1) but, as in the original
-            // game, still collide with enemies. Disabling character collision
-            // altogether let players and enemies walk through each other.
-            player->GetCharacterBody()->SetCharacterGroup(1);
-            player->GetCamera()->SetYaw(init->mpPlayer->GetCamera()->GetYaw());
-            player->GetCamera()->SetPitch(init->mpPlayer->GetCamera()->GetPitch());
-            player->GetCharacterBody()->SetYaw(player->GetCamera()->GetYaw());
+            // Il primo ospite entra sempre nel mondo, come nella partita a due;
+            // gli altri solo se connessi, altrimenti quando si connettono: un
+            // corpo di uno slot vuoto resterebbe, inattivo, vicino all'host.
+            if(n==0 || guest.session.Connected()) EnterWorld(guest,spawn,taken);
             if(guest.session.Connected()) guest.session.SendMap(guest.map);
         }
     } else {
@@ -350,7 +366,7 @@ void cCoopNetwork::ClientWeaponModel(const std::string& model) {
     }
 }
 void cCoopNetwork::UpdateEnemy(iGameEnemy* enemy,float dt) {
-    enemy->SelectNetworkTarget(init->mpPlayer,Ready()?remotePlayer:nullptr,dt);
+    enemy->SelectNetworkTarget(TargetablePlayers(),dt);
     auto* target=enemy->GetNetworkTarget();
     if(!target) target=init->mpPlayer;
     PlayerScope scope(init,target,HandsFor(target));
@@ -360,6 +376,23 @@ bool cCoopNetwork::EnemyTrigger(iGameEnemy* enemy,cGameTrigger* trigger) {
     auto* target=enemy->GetNetworkTarget(); if(!target) target=init->mpPlayer;
     PlayerScope scope(init,target,HandsFor(target));
     return enemy->HandleTrigger(trigger);
+}
+// Per ID meno uno: l'host e gli ospiti che hanno applicato il mondo (nullptr
+// per gli altri). Su questi giocatori i nemici scelgono il bersaglio.
+std::vector<cPlayer*> cCoopNetwork::TargetablePlayers() const {
+    std::vector<cPlayer*> players(online::MaxPlayers,nullptr);
+    players[0]=hostPlayer;
+    for(const auto& guest:guests) {
+        const uint8_t id=guest->session.GuestPlayerId();
+        if(id>=2 && id<=online::MaxPlayers && guest->player && guest->player->GetCharacterBody() && guest->map.epoch &&
+           guest->session.Connected() && guest->session.IsWorldApplied(guest->map.epoch)) players[id-1]=guest->player;
+    }
+    return players;
+}
+std::vector<cPlayer*> cCoopNetwork::DamageablePlayers() const {
+    std::vector<cPlayer*> players;
+    for(auto* p:TargetablePlayers()) if(p) players.push_back(p);
+    return players;
 }
 cPlayer* cCoopNetwork::PlayerForBody(iPhysicsBody* body) const {
     auto* local=hostPlayer;
@@ -392,6 +425,20 @@ void cCoopNetwork::SavePartner(cSavedGame* save) {
     save->mPlayer2.mState=ePlayerState_Normal; // A physics grab cannot survive a load.
     save->mPlayer2.mbActive=true;
     save->msClientWeapon=remoteHands->GetCurrentModel(1)?remoteHands->GetCurrentModel(1)->msName:"";
+    // Ospiti 3 e 4, se il loro corpo è nel mondo.
+    for(int n=1;n<3;++n) {
+        bool& present=n==1?save->mbPlayer3:save->mbPlayer4;
+        auto& data=n==1?save->mPlayer3:save->mPlayer4;
+        auto& weapon=n==1?save->msPlayer3Weapon:save->msPlayer4Weapon;
+        present=false; weapon.clear();
+        if(size_t(n)>=guests.size() || !guests[n]->player || !guests[n]->player->GetCharacterBody()) continue;
+        auto& guest=*guests[n];
+        PlayerScope other(init,guest.player,guest.hands);
+        guest.player->SaveToGlobal(&data);
+        data.mState=ePlayerState_Normal; data.mbActive=true;
+        weapon=guest.hands->GetCurrentModel(1)?guest.hands->GetCurrentModel(1)->msName:"";
+        present=true;
+    }
 }
 void cCoopNetwork::RestoreWeapon(const std::string& model) {
     if(model.empty()) { init->mpPlayer->ChangeState(ePlayerState_Normal); init->mpPlayerHands->SetCurrentModel(1,""); return; }
@@ -414,6 +461,21 @@ void cCoopNetwork::LoadPartner(cSavedGame* save) {
         remotePlayer->ChangeState(ePlayerState_Normal); remotePlayer->LoadFromGlobal(&save->mPlayer2); RestoreWeapon(save->msClientWeapon); Log("[COOP/SAVE] Client weapon restored state=%d\n",int(remotePlayer->GetState()));
     }
     Log("[COOP/SAVE] Restored host_health=%.2f client_health=%.2f host_power=%.2f client_power=%.2f host_pos=%s client_pos=%s host_weapon=%s client_weapon=%s\n",init->mpPlayer->GetHealth(),remotePlayer->GetHealth(),init->mpPlayer->GetPower(),remotePlayer->GetPower(),init->mpPlayer->GetCharacterBody()->GetPosition().ToString().c_str(),remotePlayer->GetCharacterBody()->GetPosition().ToString().c_str(),save->msHostWeapon.c_str(),save->msClientWeapon.c_str());
+    for(int n=1;n<3 && size_t(n)<guests.size();++n) {
+        auto& guest=*guests[n];
+        guest.pendingSave.reset(); guest.pendingWeapon.clear();
+        if(!(n==1?save->mbPlayer3:save->mbPlayer4)) continue;
+        const auto& data=n==1?save->mPlayer3:save->mPlayer4;
+        const auto& weapon=n==1?save->msPlayer3Weapon:save->msPlayer4Weapon;
+        if(guest.player && guest.player->GetCharacterBody()) {
+            PlayerScope other(init,guest.player,guest.hands);
+            guest.player->ChangeState(ePlayerState_Normal); guest.player->LoadFromGlobal(const_cast<cPlayer_GlobalSave*>(&data)); RestoreWeapon(weapon);
+            Log("[COOP/SAVE] Restored player=%u health=%.2f power=%.2f pos=%s\n",unsigned(guest.session.GuestPlayerId()),guest.player->GetHealth(),guest.player->GetPower(),guest.player->GetCharacterBody()->GetPosition().ToString().c_str());
+        } else {
+            guest.pendingSave=std::make_shared<cPlayer_GlobalSave>(data); guest.pendingWeapon=weapon;
+            Log("[COOP/SAVE] Player %u not in the world; checkpoint state kept until it joins\n",unsigned(guest.session.GuestPlayerId()));
+        }
+    }
     hostDeathTime=0;
     for(auto& guest:guests) {
         guest->deathTime=0; guest->lifeMask=0; guest->lastInput=0; guest->poseValid=false; guest->baselineSent=false;
@@ -488,14 +550,19 @@ void cCoopNetwork::WeaponHit(const std::string& entity,float health) {
     }
 }
 void cCoopNetwork::BeforeObjectBreak(iGameEntity* entity) {
-    if(!IsHost() || !remotePlayer || !entity) return;
-    const auto state=remotePlayer->GetState();
-    if(state!=ePlayerState_Grab && state!=ePlayerState_Move && state!=ePlayerState_Push) return;
-    for(int n=0;n<entity->GetBodyNum();++n) if(remotePlayer->GetPushBody()==entity->GetBody(n)) {
-        PlayerScope scope(init,remotePlayer,remoteHands);
-        if(getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Release partner holding broken entity=%s state=%d\n",entity->GetName().c_str(),int(state));
-        remotePlayer->ChangeState(ePlayerState_Normal); remotePlayer->SetPushBody(nullptr);
-        break;
+    if(!IsHost() || !entity) return;
+    // Ogni ospite che tiene, trascina o spinge l'oggetto lo lascia prima che si rompa.
+    for(auto& guest:guests) {
+        auto* player=guest->player;
+        if(!player || !player->GetCharacterBody()) continue;
+        const auto state=player->GetState();
+        if(state!=ePlayerState_Grab && state!=ePlayerState_Move && state!=ePlayerState_Push) continue;
+        for(int n=0;n<entity->GetBodyNum();++n) if(player->GetPushBody()==entity->GetBody(n)) {
+            PlayerScope scope(init,player,guest->hands);
+            if(getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Release partner holding broken entity=%s state=%d\n",entity->GetName().c_str(),int(state));
+            player->ChangeState(ePlayerState_Normal); player->SetPushBody(nullptr);
+            break;
+        }
     }
 }
 void cCoopNetwork::RelayParticle(const std::string& file,const cMatrixf& matrix) {
@@ -556,6 +623,12 @@ void cCoopNetwork::Update(float dt) {
             guest.generation=guest.session.Generation(); guest.baselineSent=false; guest.published.clear(); guest.poseValid=false;
             guest.inventoryBytes.clear(); guest.journalBytes.clear(); guest.mediaBytes.clear();
             positioned=false; restoredEquipment=false; ResetPlayback(); prediction.Clear();
+            if(IsHost() && guest.map.epoch && guest.player && !guest.player->GetCharacterBody()) {
+                std::vector<cVector3f> taken={hostPlayer->GetCharacterBody()->GetFeetPosition()};
+                for(auto& other:guests) if(other->player && other->player->GetCharacterBody()) taken.push_back(other->player->GetCharacterBody()->GetFeetPosition());
+                EnterWorld(guest,taken[0],taken);
+                Log("[COOP/MAP] Player %u joined during the map\n",unsigned(guest.session.GuestPlayerId()));
+            }
             if(IsHost() && guest.map.epoch) { ++guest.map.epoch; guest.session.SendMap(guest.map); }
             hadConnection=true;
         }
@@ -1147,7 +1220,7 @@ bool cCoopNetwork::PublishEntity(iGameEntity* entity,bool baseline) {
             auto* enemy=static_cast<iGameEnemy*>(entity);
             e.health=int32_t(std::clamp(enemy->GetHealth(),0.0f,100000000.0f)*10);
             e.enemyState=uint8_t(std::max(0,enemy->GetCurrentStateId()));
-            e.target=enemy->GetNetworkTarget()==remotePlayer?g->session.GuestPlayerId():online::HostPlayerId;
+            { auto* owner=GuestFor(enemy->GetNetworkTarget()); e.target=owner?owner->session.GuestPlayerId():online::HostPlayerId; }
             auto* body=enemy->GetMover()->GetCharBody();
             auto frame=cMath::MatrixRotateY(body->GetYaw()); frame.SetTranslation(body->GetPosition()); e.character=Pack(frame);
             if(auto* mesh=enemy->GetMeshEntity()) for(int n=0;n<mesh->GetAnimationStateNum() && n<1024;++n) {
@@ -1533,10 +1606,14 @@ void cCoopNetwork::RunPartyQA(float dt) {
         if(!qaPartyStarted && ready+1==expected && outside) {
             qaPartyStarted=true; qaPartyTime=0;
             for(auto& guest:guests) if(guest->session.Connected()) qaPartyStart[guest->session.GuestPlayerId()]=guest->player->GetCharacterBody()->GetFeetPosition();
+            qaPartyStart[online::HostPlayerId]=hostPlayer->GetCharacterBody()->GetFeetPosition();
             Log("[COOP/QA] Party ready role=host players=%u\n",expected);
         }
         if(qaPartyStarted) qaPartyTime+=dt;
-        if(qaPartyStarted && qaPartyTime>10) {
+        // Come nella prova hammer: l'host è attivo (gli ospiti seguono il suo
+        // stato e i nemici ignorano i giocatori inattivi).
+        if(qaPartyStarted) { hostPlayer->SetActive(true); init->mpGameMessageHandler->Reset(); }
+        if(qaPartyStarted && qaPartyTime>10 && !qaPartyDone) {
             bool ok=true; std::set<uint8_t> ids;
             for(auto& guest:guests) {
                 if(!guest->session.Connected()) continue;
@@ -1547,9 +1624,70 @@ void cCoopNetwork::RunPartyQA(float dt) {
                 Log("[COOP/QA] Party guest id=%u moved_m=%.3f snapshot_players=%u ok=%d\n",unsigned(id),moved,unsigned(guest->latest.playerCount),guestOK?1:0);
                 ok=ok && guestOK;
             }
-            ok=ok && ids.size()+1==expected;
-            Log("[COOP/QA] %s party of %u players role=host\n",ok?"PASS":"FAIL",expected);
-            init->mpGame->Exit(); return;
+            qaPartyMoved=ok && ids.size()+1==expected; qaPartyDone=true;
+            // Fase del nemico: l'ultimo ospite resta solo, gli altri si
+            // allontanano di 12 m, e un cane compare a 1,2 m da lui. Deve
+            // sceglierlo come bersaglio (ID > 2 se i giocatori sono più di
+            // due) e ferirlo con l'attacco nativo.
+            for(auto& guest:guests) if(guest->session.Connected()) qaPartyVictim=guest.get();
+            if(qaPartyVictim) {
+                const cVector3f feet=qaPartyVictim->player->GetCharacterBody()->GetFeetPosition();
+                // Gli altri tornano al punto di partenza (terreno noto), a circa 5 m dal cane.
+                hostPlayer->GetCharacterBody()->SetFeetPosition(qaPartyStart[online::HostPlayerId]);
+                for(auto& guest:guests) if(guest.get()!=qaPartyVictim && guest->player->GetCharacterBody()) guest->player->GetCharacterBody()->SetFeetPosition(qaPartyStart[guest->session.GuestPlayerId()]);
+                qaPartyVictim->player->SetHealth(100);
+                auto* world=init->mpGame->GetScene()->GetWorld3D();
+                // Sul tratto appena percorso (c'è terreno), rivolto verso l'ospite.
+                cVector3f back=qaPartyStart[qaPartyVictim->session.GuestPlayerId()]-feet; back.y=0;
+                if(back.SqrLength()>0.01f) back.Normalise(); else back=cVector3f(0,0,-1);
+                const cVector3f dogFeet=feet+back*1.2f+cVector3f(0,.2f,0);
+                world->CreateEntity("CoopQA_PartyDog",cMath::MatrixTranslate(dogFeet+cVector3f(0,.3f,0)),"character_dog.ent",true);
+                auto* dog=init->mpMapHandler->GetGameEntity("CoopQA_PartyDog",false);
+                if(!dog || dog->GetType()!=eGameEntityType_Enemy) FatalError("[COOP/QA] Enemy fixture missing\n");
+                if(world->GetAINodeList("ground")->empty()) for(int n=0;n<24;++n) world->AddAINode("CoopQA_PartyNode"+std::to_string(n),"ground",dogFeet+cVector3f((n%3-1)*.6f,.3f,(n/3)*.4f));
+                auto* enemy=static_cast<iGameEnemy*>(dog);
+                enemy->OnWorldLoad(); enemy->SetActive(true); enemy->GetMover()->GetCharBody()->SetFeetPosition(dogFeet); enemy->GetMover()->GetCharBody()->SetYaw(std::atan2(back.x,back.z));
+                Log("[COOP/QA] Party enemy spawned near player=%u\n",unsigned(qaPartyVictim->session.GuestPlayerId()));
+            }
+            qaPartyTime=10;
+        }
+        if(qaPartyDone && qaPartyVictim) {
+            auto* dog=static_cast<iGameEnemy*>(init->mpMapHandler->GetGameEntity("CoopQA_PartyDog",false));
+            if(dog && dog->GetNetworkTarget()==qaPartyVictim->player) qaPartyTargeted=true;
+            if(dog && int(qaPartyTime*2)!=int((qaPartyTime-dt)*2)) {
+                const auto p=dog->GetMover()->GetCharBody()->GetFeetPosition(), v=qaPartyVictim->player->GetCharacterBody()->GetFeetPosition();
+                Log("[COOP/QA] Party dog t=%.1f active=%d state=%d health=%.0f target=%s pos=%.2f/%.2f/%.2f victim=%.2f/%.2f/%.2f victim_active=%d\n",qaPartyTime,dog->IsActive()?1:0,dog->GetCurrentStateId(),dog->GetHealth(),
+                    !dog->GetNetworkTarget()?"none":dog->GetNetworkTarget()==hostPlayer?"host":"guest",p.x,p.y,p.z,v.x,v.y,v.z,qaPartyVictim->player->IsActive()?1:0);
+            }
+            if(qaPartyTargeted && qaPartyVictim->player->GetHealth()<99) qaPartyBitten=true;
+            auto* victim=qaPartyVictim->player;
+            if(qaPartyStage==0 && (qaPartyBitten || qaPartyTime>25)) {
+                Log("[COOP/QA] Party enemy player=%u targeted=%d damaged=%d health=%.1f\n",unsigned(qaPartyVictim->session.GuestPlayerId()),qaPartyTargeted?1:0,qaPartyBitten?1:0,victim->GetHealth());
+                if(!(qaPartyMoved && qaPartyTargeted && qaPartyBitten)) { Log("[COOP/QA] FAIL party of %u players role=host\n",expected); init->mpGame->Exit(); return; }
+                // Fase del checkpoint: salute 50 salvata, poi cambiata e
+                // ospite spostato; dopo il caricamento devono tornare quelle.
+                if(dog) dog->SetActive(false);
+                victim->SetHealth(50); qaPartySavedFeet=victim->GetCharacterBody()->GetFeetPosition();
+                const bool saved=init->mpSaveHandler->SaveCheckpoint();
+                Log("[COOP/QA] Party checkpoint saved=%d player=%u health=%.1f\n",saved?1:0,unsigned(qaPartyVictim->session.GuestPlayerId()),victim->GetHealth());
+                victim->SetHealth(95); victim->GetCharacterBody()->SetFeetPosition(qaPartyStart[qaPartyVictim->session.GuestPlayerId()]);
+                qaPartyStage=saved?1:9; qaPartyStageTime=qaPartyTime;
+            }
+            if(qaPartyStage==1 && qaPartyTime-qaPartyStageTime>1) {
+                const bool loaded=init->mpSaveHandler->LoadCheckpoint();
+                Log("[COOP/QA] Party checkpoint load started=%d\n",loaded?1:0);
+                qaPartyStage=loaded?2:9; qaPartyStageTime=qaPartyTime; return;
+            }
+            if(qaPartyStage==2 && qaPartyTime-qaPartyStageTime>4 && ready+1==expected && victim->GetCharacterBody()) {
+                auto delta=victim->GetCharacterBody()->GetFeetPosition()-qaPartySavedFeet; delta.y=0;
+                const bool ok=std::fabs(victim->GetHealth()-50)<5 && delta.Length()<0.5f;
+                Log("[COOP/QA] Party checkpoint restored player=%u health=%.1f position_error_m=%.3f ok=%d\n",unsigned(qaPartyVictim->session.GuestPlayerId()),victim->GetHealth(),delta.Length(),ok?1:0);
+                Log("[COOP/QA] %s party of %u players role=host\n",ok?"PASS":"FAIL",expected);
+                init->mpGame->Exit(); return;
+            }
+            if(qaPartyStage==9 || (qaPartyStage==2 && qaPartyTime-qaPartyStageTime>60)) {
+                Log("[COOP/QA] FAIL party of %u players role=host checkpoint_stage=%d\n",expected,qaPartyStage); init->mpGame->Exit(); return;
+            }
         }
         if(!qaPartyStarted && qaTime>90) { Log("[COOP/QA] FAIL party of %u players role=host ready=%u\n",expected,ready+1); init->mpGame->Exit(); }
         return;
@@ -1563,7 +1701,7 @@ void cCoopNetwork::RunPartyQA(float dt) {
     qaPartyWalking=qaPartyStarted && qaPartyTime>3 && qaPartyTime<5.5f;
     // Dopo l'esito il client resta connesso: l'host controlla tutti insieme e
     // chiude per primo.
-    if(qaPartyDone) { if(!g->session.Connected() || qaPartyTime>25) init->mpGame->Exit(); return; }
+    if(qaPartyDone) { if(!g->session.Connected() || qaPartyTime>120) init->mpGame->Exit(); return; }
     if(qaPartyStarted && qaPartyTime>8) {
         qaPartyDone=true;
         auto delta=init->mpPlayer->GetCharacterBody()->GetFeetPosition()-qaPartyStart[0]; delta.y=0;

@@ -53,7 +53,7 @@ for($n=2;$n-lt$Players;++$n) {
     $processes+=$extra; $roles+="client$n"
 }
 @($processes | ForEach-Object Id) | Set-Content (Join-Path $run 'pids.txt')
-$deadline=(Get-Date).AddSeconds($(if($Mode-eq'maps'){900}elseif($Mode-eq'party'){120}elseif($Mode-eq'campaign'){180}elseif($Mode-eq'hammer'){95}else{65}))
+$deadline=(Get-Date).AddSeconds($(if($Mode-eq'maps'){900}elseif($Mode-eq'party'){200}elseif($Mode-eq'campaign'){180}elseif($Mode-eq'hammer'){95}else{65}))
 while((Get-Date)-lt $deadline -and @($processes | Where-Object { !$_.HasExited }).Count) { Start-Sleep -Milliseconds 250 }
 $passed=$true
 foreach($process in $processes) {
