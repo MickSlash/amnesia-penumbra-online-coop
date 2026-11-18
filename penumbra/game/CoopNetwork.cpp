@@ -160,12 +160,16 @@ void cCoopNetwork::BeforeMapLoad() {
         if(remoteLight) world->DestroyLight(remoteLight);
         if(remoteTool) world->DestroyMeshEntity(remoteTool);
         if(remoteFlashlight) world->DestroyMeshEntity(remoteFlashlight);
+        if(auto* physics=world->GetPhysicsWorld()) {
+            for(auto& pair:enemyColliders) if(pair.second) physics->DestroyBody(pair.second);
+        }
     }
+    enemyColliders.clear();
     for(auto& part:avatar) part=nullptr;
     remoteLight=nullptr; hasAvatarPosition=false; positioned=false; baselineSent=false;
     remoteTool=nullptr; remoteToolID=0; toolSwing=0; hasClientPosition=false; snapshotAge=0;
     remoteFlashlight=nullptr;
-    prediction.Clear(); motion.clear(); published.clear(); pendingPresentation.clear();
+    prediction.Clear(); ResetPlayback(); published.clear(); pendingPresentation.clear();
     restoredEquipment=false; baselineNames.clear(); journalBytes.clear(); receivedJournal=0; remoteButtons=0; lastInput=0;
     remoteExamineDown=false;
     mediaBytes.clear(); pendingMedia.clear(); currentMusic.clear(); currentSkybox.clear(); inventoryBytes.clear();
@@ -178,12 +182,16 @@ void cCoopNetwork::AfterMapLoad(const tString& file) {
         { PlayerScope scope(init,remotePlayer,remoteHands); remotePlayer->OnWorldLoad(); remoteHands->OnWorldLoad(); if(map.epoch==1) remotePlayer->SetPower(100); }
         spawn=init->mpPlayer->GetCharacterBody()->GetFeetPosition();
         remotePlayer->GetCharacterBody()->SetFeetPosition(spawn+cVector3f(0.6f,0,0));
-        remotePlayer->GetCharacterBody()->SetCollideCharacter(false); init->mpPlayer->GetCharacterBody()->SetCollideCharacter(false);
+        // Players pass through each other (group 1) but, as in the original
+        // game, still collide with enemies. Disabling character collision
+        // altogether let players and enemies walk through each other.
+        remotePlayer->GetCharacterBody()->SetCharacterGroup(1); init->mpPlayer->GetCharacterBody()->SetCharacterGroup(1);
         remotePlayer->GetCamera()->SetYaw(init->mpPlayer->GetCamera()->GetYaw());
         remotePlayer->GetCamera()->SetPitch(init->mpPlayer->GetCamera()->GetPitch());
         remotePlayer->GetCharacterBody()->SetYaw(remotePlayer->GetCamera()->GetYaw());
         if(session.Connected()) session.SendMap(map);
     } else {
+        init->mpPlayer->GetCharacterBody()->SetCharacterGroup(1);
         init->mpPlayer->SetActive(false); init->mpFadeHandler->FadeIn(0); session.SendMapReady(map.epoch);
     }
     Log("[COOP/MAP] Loaded epoch=%u map=%s role=%s\n",map.epoch,file.c_str(),IsHost()?"host":"client");
@@ -380,7 +388,7 @@ void cCoopNetwork::Update(float dt) {
     session.Poll();
     RunQA(dt);
     if(session.Connected() && generation!=session.Generation()) {
-        generation=session.Generation(); baselineSent=false; positioned=false; restoredEquipment=false; published.clear(); motion.clear(); prediction.Clear();
+        generation=session.Generation(); baselineSent=false; positioned=false; restoredEquipment=false; published.clear(); ResetPlayback(); prediction.Clear();
         inventoryBytes.clear(); journalBytes.clear(); mediaBytes.clear();
         if(IsHost() && map.epoch) { ++map.epoch; session.SendMap(map); }
         hadConnection=true;
@@ -404,6 +412,7 @@ void cCoopNetwork::Update(float dt) {
     }
 }
 void cCoopNetwork::UpdateHost(float dt) {
+    ++hostTick;
     if(!map.epoch || !remotePlayer->GetCharacterBody()) return;
     const bool canPlay=Ready() && init->mpGame->GetUpdater()->GetCurrentContainerName()=="Default";
     // The physics step that opened this tick integrated the previous command,
@@ -431,7 +440,7 @@ void cCoopNetwork::UpdateHost(float dt) {
         PlayerScope scope(init,remotePlayer,remoteHands);
         remotePlayer->SetActive((init->mpPlayer==remotePlayer ? (hostPlayer->IsActive() || hostPlayer->IsDead()) : true) && !remotePlayer->IsDead());
         // Local UI and camera effects belong to their owner; remote physics has its own state.
-        if(hasInput) {
+        auto apply=[&](const online::PlayerInput& input,bool repeated) {
             if(remotePlayer->GetState()==ePlayerState_Move || remotePlayer->GetState()==ePlayerState_WeaponMelee) {
                 if(!repeated && remotePlayer->GetState()==ePlayerState_Move) { remotePlayer->AddYaw(input.lookYaw/10000.0f); remotePlayer->AddPitch(input.lookPitch/10000.0f); }
                 if(remotePlayer->GetState()==ePlayerState_WeaponMelee && remoteSimpleSwing) remotePlayer->AddYaw(0);
@@ -446,6 +455,16 @@ void cCoopNetwork::UpdateHost(float dt) {
             if((input.buttons&1) && !(remoteButtons&1)) remotePlayer->Jump();
             remotePlayer->SetJumpButtonDown((input.buttons&1)!=0); remoteButtons=input.buttons; lastInput=input.sequence;
             remotePlayer->MoveForwards(input.forward/1000.0f,dt); remotePlayer->MoveSideways(input.strafe/1000.0f,dt);
+        };
+        if(hasInput) {
+            // After a client stall the backlog is caught up: the older command
+            // is integrated now and the next one by the coming physics step, so
+            // both are simulated and the snapshot acknowledges the newer one.
+            online::PlayerInput extra;
+            if(!repeated && session.CatchUpInput(extra)) {
+                apply(input,false);
+                if(extra.epoch==map.epoch) { remotePlayer->GetCharacterBody()->Update(dt); apply(extra,false); ++hostDiag.caughtUp; }
+            } else apply(input,repeated);
         } else { remotePlayer->StopInteract(); remotePlayer->MoveForwards(0,dt); remotePlayer->MoveSideways(0,dt); remoteButtons=0; remoteExamineDown=false; }
         remotePlayer->Update(dt);
         if(!remotePlayer->IsDead()) remotePlayer->AddHealth(dt*(init->mDifficulty==eGameDifficulty_Easy?1.4f:init->mDifficulty==eGameDifficulty_Normal?.4f:.14f));
@@ -518,7 +537,7 @@ void cCoopNetwork::UpdateHost(float dt) {
         worldTime+=dt; if(worldDirty || worldTime+0.000001f>=1.0f/30) { worldTime=std::max(0.0f,worldTime-1.0f/30); worldDirty=false; PublishWorld(false); }
         sendTime+=dt; backupTime+=dt;
         if(sendTime+0.000001f>=1.0f/60) {
-            sendTime=std::max(0.0f,sendTime-1.0f/60); latest.epoch=map.epoch; latest.sequence=++sequence; latest.acknowledgedInput=remoteAck;
+            sendTime=std::max(0.0f,sendTime-1.0f/60); latest.epoch=map.epoch; latest.sequence=++sequence; latest.acknowledgedInput=remoteAck; latest.hostTick=hostTick;
             latest.players[0]=Capture(init->mpPlayer,init->mpPlayerHands); latest.players[1]=remotePose;
             latest.players[1].flags=(latest.players[1].flags&~4)|((canPlay && !remotePlayer->IsDead() && ((latest.players[0].flags&4) || (latest.players[0].flags&8)))?4:0);
             const uint8_t deadMask=(init->mpPlayer->IsDead()?1:0)|(remotePlayer->IsDead()?2:0);
@@ -536,6 +555,11 @@ void cCoopNetwork::UpdateHost(float dt) {
     if(Ready()) UpdateLife(dt);
 }
 void cCoopNetwork::UpdateClient(float dt) {
+    ++clientTick;
+    if(hasHostTick) {
+        const double delay=jitterDelay.Delay(); playback.Advance(newestHostTick,delay);
+        clientDiag.playbackDelay.Add(double(newestHostTick)-playback.Tick()); if(playback.Tick()>=double(newestHostTick)) ++clientDiag.playbackHeld;
+    }
     online::MapState received;
     if(session.ReadMap(received) && received.epoch!=map.epoch) {
         if(Fingerprint(received.file)!=received.fingerprint) { Log("[COOP/MAP] Data mismatch %s\n",received.file.c_str()); session.Stop(); return; }
@@ -556,6 +580,7 @@ void cCoopNetwork::UpdateClient(float dt) {
             lastSnapshotAt=now;
             if(clientDiag.lastArrival) clientDiag.snapshotInterval.Add(double(now-clientDiag.lastArrival));
             clientDiag.lastArrival=now; ++clientDiag.snapshots;
+            partnerHistory.Add(snapshot.hostTick,snapshot.players[0]); jitterDelay.Arrival(clientTick,snapshot.hostTick); NoteHostTick(snapshot.hostTick);
             const double hostStep=clientDiag.HostPose(snapshot.players[1].x/1000.0f,snapshot.players[1].z/1000.0f);
             { const auto& h=snapshot.players[1]; const float f=h.forwardSpeed/1000.0f, r=h.sideSpeed/1000.0f; const float cap=(f>=0?h.forwardMax:h.backwardMax)/1000.0f;
               if(f||r) { const double nominal=std::min(std::sqrt(f*f+r*r),cap)/60; clientDiag.nominalStep.Add(nominal*100);
@@ -617,15 +642,31 @@ void cCoopNetwork::UpdateClient(float dt) {
             body->SetNetworkHorizontalPosition(pos.x,pos.z);
         }
         if(positioned && !online::MovementPrediction::Predicts(snapshot.players[1])) ++clientDiag.unpredictedTicks;
-        UpdateAvatar(snapshot.players[0],dt);
+        // Partner on the host timeline, between the two poses around the
+        // playback tick (no extrapolation past the newest pose).
+        online::PlayerState partner=snapshot.players[0];
+        const online::PlayerState *from=nullptr,*to=nullptr; float alpha=0;
+        const bool latestOnly=getenv("PENUMBRA_COOP_INTERPOLATION") && std::string(getenv("PENUMBRA_COOP_INTERPOLATION"))=="legacy";
+        if(!latestOnly && playback.Valid() && partnerHistory.Sample(playback.Tick(),from,to,alpha)) {
+            partner=*to;
+            const bool teleport=std::abs(int64_t(to->x)-from->x)+std::abs(int64_t(to->z)-from->z)>2000;
+            if(!teleport) {
+                partner.x=int32_t(from->x+(to->x-from->x)*alpha); partner.y=int32_t(from->y+(to->y-from->y)*alpha); partner.z=int32_t(from->z+(to->z-from->z)*alpha);
+                partner.yaw=int16_t(online::LerpAngle(from->yaw/1000.0f,to->yaw/1000.0f,alpha)*1000); partner.pitch=int16_t(from->pitch+(to->pitch-from->pitch)*alpha);
+            }
+        }
+        UpdateAvatar(partner,dt);
+        clientDiag.PartnerShown(avatarPosition.x,avatarPosition.z);
     }
     if(positioned) { const auto feet=init->mpPlayer->GetCharacterBody()->GetFeetPosition(); clientDiag.ShownPose(feet.x,feet.z); }
     snapshotAge+=dt;
-    for(auto& pair:motion) {
+    if(playback.Valid()) for(auto& pair:motion) {
         auto* e=init->mpMapHandler->GetGameEntity(pair.first,false); if(!e) continue;
-        auto& m=pair.second; m.age+=dt; const float alpha=std::min(1.0f,m.age/(1.0f/30));
-        if(m.meshMotion && e->GetMeshEntity()) e->GetMeshEntity()->SetMatrix(cMath::MatrixSlerp(alpha,m.meshFrom,Unpack(m.state.transform),true));
-        for(size_t n=0;n<m.state.bodies.size() && n<size_t(e->GetBodyNum());++n) e->GetBody(int(n))->SetMatrix(cMath::MatrixSlerp(alpha,m.from[n],Unpack(m.state.bodies[n]),true));
+        const Pose *from=nullptr,*to=nullptr; float alpha=0;
+        const bool latestOnly=getenv("PENUMBRA_COOP_INTERPOLATION") && std::string(getenv("PENUMBRA_COOP_INTERPOLATION"))=="legacy";
+        if(!pair.second.history.Sample(latestOnly?double(newestHostTick):playback.Tick(),from,to,alpha)) continue;
+        if(to->meshMotion && from->meshMotion && e->GetMeshEntity()) e->GetMeshEntity()->SetMatrix(cMath::MatrixSlerp(alpha,from->mesh,to->mesh,true));
+        for(size_t n=0;n<to->bodies.size() && n<from->bodies.size() && n<size_t(e->GetBodyNum());++n) e->GetBody(int(n))->SetMatrix(cMath::MatrixSlerp(alpha,from->bodies[n],to->bodies[n],true));
     }
     online::Presentation event;
     while(session.ReadPresentation(event)) {
@@ -706,6 +747,7 @@ void cCoopNetwork::UpdateClient(float dt) {
         if(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))!="hammer" && qaTime>2 && qaTime<3) {
             input.forward=-1000; input.strafe=0; input.buttons=0; p->MoveForwards(-1,dt);
         }
+        if(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))=="hammer" && hammerTime>52 && hammerTime<54.5f) { input.forward=1000; p->MoveForwards(1,dt); }
         if(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))=="hammer" && hammerTime>40 && hammerTime<48) {
             const int walk=getenv("PENUMBRA_COOP_QA_WALK")?std::clamp(atoi(getenv("PENUMBRA_COOP_QA_WALK")),100,1000):500; input.forward=int16_t((hammerTime<44)?walk:-walk); p->MoveForwards(input.forward/1000.0f,dt);
             if(hasClientPosition) { auto delta=p->GetCharacterBody()->GetFeetPosition()-lastClientPosition; delta.y=0; const float step=delta.Length(); stepMax=std::max(stepMax,step); movementDistance+=step; }
@@ -715,6 +757,18 @@ void cCoopNetwork::UpdateClient(float dt) {
         input.lookYaw=int16_t(std::clamp(lookYaw*10000,-31420.0f,31420.0f)); input.lookPitch=int16_t(std::clamp(lookPitch*10000,-31420.0f,31420.0f)); lookYaw=lookPitch=0;
         session.SendInput(input); prediction.Push(input,dt);
     }
+}
+iPhysicsBody* cCoopNetwork::CreateCollider(const std::string& name,const cVector3f& size) {
+    auto* world=init->mpGame->GetScene()->GetWorld3D(); auto* physics=world?world->GetPhysicsWorld():nullptr;
+    if(!physics || size.y<=0) return nullptr;
+    // Same shape as iCharacterBody: a sphere or an upright cylinder.
+    const float radius=std::max(size.x,size.z)*0.5f; cMatrixf offset=cMath::MatrixRotateZ(kPi2f);
+    iCollideShape* shape=std::fabs(radius*2-size.y)<0.01f ? physics->CreateSphereShape(radius,nullptr) : physics->CreateCylinderShape(radius,size.y,&offset);
+    auto* body=physics->CreateBody(name,shape);
+    // A character body without user data: the pick ray and light checks skip it,
+    // character movement collides with it.
+    body->SetMass(0); body->SetGravity(false); body->SetIsCharacter(true); body->SetCollideCharacter(true);
+    return body;
 }
 void cCoopNetwork::ReportDiagnostics() {
     const uint64_t now=Milliseconds();
@@ -727,8 +781,8 @@ void cCoopNetwork::ReportDiagnostics() {
     if(IsHost()) {
         auto& d=hostDiag; d.totalCommandDrift+=d.commandDrift;
         const auto queue=session.TakeInputStats();
-        std::snprintf(text,sizeof text," ticks=%u burst_ticks=%u new_input_ticks=%u reused_input_ticks=%u expired_input_ticks=%u skipped_inputs=%llu command_drift=%lld command_drift_total=%lld queue_target=%u queue_starvations=%u queue_dropped=%u queue_lost=%u",
-            d.clock.ticks,d.clock.burst,d.newInputs,d.reusedTicks,d.idleTicks,(unsigned long long)d.skippedInputs,(long long)d.commandDrift,(long long)d.totalCommandDrift,d.queueTarget,queue.starvations,queue.dropped,queue.lost);
+        std::snprintf(text,sizeof text," ticks=%u burst_ticks=%u new_input_ticks=%u reused_input_ticks=%u expired_input_ticks=%u skipped_inputs=%llu command_drift=%lld command_drift_total=%lld queue_target=%u queue_starvations=%u queue_dropped=%u queue_lost=%u queue_caught_up=%u",
+            d.clock.ticks,d.clock.burst,d.newInputs,d.reusedTicks,d.idleTicks,(unsigned long long)d.skippedInputs,(long long)d.commandDrift,(long long)d.totalCommandDrift,d.queueTarget,queue.starvations,queue.dropped,queue.lost,queue.caughtUp);
         line+=text+d.clock.interval.Format("tick_gap_ms")+d.inputInterval.Format("new_input_gap_ms")+d.queueDepth.Format("queue_depth");
         d.ResetWindow();
     } else {
@@ -736,7 +790,8 @@ void cCoopNetwork::ReportDiagnostics() {
         std::snprintf(text,sizeof text," ticks=%u burst_ticks=%u snapshots=%u unpredicted_ticks=%u replay_truncated=%u poses_over_2cm=%u poses_over_10cm=%u resets_over_25cm=%u hard_over_2m=%u",
             d.clock.ticks,d.clock.burst,d.snapshots,d.unpredictedTicks,d.replayTruncated,d.over2cm,d.over10cm,d.reset25cm,d.hard2m);
         std::snprintf(text+strlen(text),sizeof text-strlen(text)," host_path_m=%.3f shown_path_m=%.3f replay_steps=%u replay_blocked=%u moving_poses=%u stalled_poses=%u",d.hostPath,d.shownPath,d.replaySteps,d.replayBlocked,d.movingPoses,d.stalledPoses);
-        line+=text+d.hostStep.Format("host_step_cm",100)+d.nominalStep.Format("nominal_step_cm")+d.freeCorrection.Format("free_correction_cm",100)+d.clock.interval.Format("tick_gap_ms")+d.snapshotInterval.Format("snapshot_gap_ms")+d.correction.Format("correction_cm",100)+d.pending.Format("pending")+d.ackLag.Format("ack_lag");
+        std::snprintf(text+strlen(text),sizeof text-strlen(text)," playback_held=%u",d.playbackHeld);
+        line+=text+d.playbackDelay.Format("playback_delay_ticks")+d.partnerJerk.Format("partner_jerk_cm",100)+d.hostStep.Format("host_step_cm",100)+d.nominalStep.Format("nominal_step_cm")+d.freeCorrection.Format("free_correction_cm",100)+d.clock.interval.Format("tick_gap_ms")+d.snapshotInterval.Format("snapshot_gap_ms")+d.correction.Format("correction_cm",100)+d.pending.Format("pending")+d.ackLag.Format("ack_lag");
         d.ResetWindow();
     }
     Log("%s\n",line.c_str());
@@ -789,14 +844,14 @@ bool cCoopNetwork::PublishWorld(bool baseline) {
         const bool lifecycle=found==published.end() || found->second.flags!=e.flags || (e.subtype==eGameEntityType_Enemy && ((found->second.health<=0)!=(e.health<=0) || found->second.enemyState!=e.enemyState));
         const bool moved=found==published.end() || found->second.bodies!=e.bodies || found->second.transform!=e.transform || found->second.character!=e.character || !e.animations.empty();
         if(lifecycle || moved) {
-            e.sequence=++sequence;
+            e.sequence=++sequence; e.hostTick=hostTick;
             const bool sent=(baseline || lifecycle)?session.SendEntity(e):session.SendEntityMotion(e);
             if(sent) published[name]=e; else complete=false;
         }
     }
     for(auto it=published.begin();it!=published.end();) {
         if(alive.count(it->first)) { ++it; continue; }
-        auto e=it->second; e.flags=4; e.sequence=++sequence;
+        auto e=it->second; e.flags=4; e.sequence=++sequence; e.hostTick=hostTick;
         if(session.SendEntity(e)) it=published.erase(it); else { complete=false; ++it; }
     }
     return complete;
@@ -811,12 +866,17 @@ void cCoopNetwork::ApplyEntity(const online::EntityState& s) {
     if(!entity) return;
     if((s.flags&4) && entity->IsActive() && getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Replica removed entity=%s t_ms=%llu\n",s.name.c_str(),(unsigned long long)Milliseconds());
     entity->SetActive((s.flags&1)!=0 && !(s.flags&4));
-    if(s.flags&4) { motion.erase(s.name); return; }
+    if(s.flags&4) { motion.erase(s.name); auto collider=enemyColliders.find(s.name); if(collider!=enemyColliders.end() && collider->second) collider->second->SetActive(false); return; }
     if(auto* mesh=entity->GetMeshEntity()) if(s.bodies.empty()) mesh->SetMatrix(Unpack(s.transform));
     if(entity->GetType()==eGameEntityType_Enemy) {
         auto* enemy=static_cast<iGameEnemy*>(entity); enemy->ApplyNetworkState(s.health/10.0f,s.enemyState);
         auto* body=enemy->GetMover()->GetCharBody(); const auto frame=Unpack(s.character);
         body->SetPosition(frame.GetTranslation());
+        if(IsClient()) {
+            auto& collider=enemyColliders[s.name];
+            if(!collider) collider=CreateCollider("CoopEnemyBody_"+s.name,body->GetSize());
+            if(collider) { collider->SetActive(s.health>0 && (s.flags&1) && !(s.flags&4)); collider->SetPosition(frame.GetTranslation()); }
+        }
         if(auto* mesh=entity->GetMeshEntity()) {
             if(!s.liveMotion || s.health<=0) mesh->SetMatrix(Unpack(s.transform));
             for(int n=0;n<mesh->GetAnimationStateNum();++n) mesh->GetAnimationState(n)->SetActive(false);
@@ -826,14 +886,18 @@ void cCoopNetwork::ApplyEntity(const online::EntityState& s) {
             }
         }
     }
-    Motion m; m.state=s;
-    if(s.liveMotion && s.health>0 && entity->GetType()==eGameEntityType_Enemy && entity->GetMeshEntity()) { m.meshMotion=true; m.meshFrom=entity->GetMeshEntity()->GetWorldMatrix(); }
+    Pose pose;
+    if(s.liveMotion && s.health>0 && entity->GetType()==eGameEntityType_Enemy && entity->GetMeshEntity()) { pose.meshMotion=true; pose.mesh=Unpack(s.transform); }
     for(size_t n=0;n<s.bodies.size() && n<size_t(entity->GetBodyNum());++n) {
-        auto* body=entity->GetBody(int(n)); m.from.push_back(body->GetLocalMatrix());
+        auto* body=entity->GetBody(int(n)); pose.bodies.push_back(Unpack(s.bodies[n]));
         if(!body->IsCharacter()) { body->SetMass(0); body->SetGravity(false); body->SetLinearVelocity(cVector3f(0)); body->SetAngularVelocity(cVector3f(0)); }
         if(!s.liveMotion) body->SetMatrix(Unpack(s.bodies[n]));
     }
-    if(s.liveMotion) motion[s.name]=m;
+    // Live poses are played back on the host timeline; a reliable baseline or
+    // lifecycle pose is applied at once and restarts the history from itself.
+    auto& history=motion[s.name].history;
+    if(!s.liveMotion) history.Clear();
+    history.Add(s.hostTick,pose); NoteHostTick(s.hostTick);
 }
 void cCoopNetwork::UpdateAvatar(const online::PlayerState& s,float dt) {
     auto* world=init->mpGame->GetScene()->GetWorld3D(); if(!world) return;
@@ -851,8 +915,13 @@ void cCoopNetwork::UpdateAvatar(const online::PlayerState& s,float dt) {
         Log("[COOP/AVATAR] Created partner silhouette\n");
     }
     cVector3f target(s.x/1000.0f,s.y/1000.0f,s.z/1000.0f);
-    if(!hasAvatarPosition || (avatarPosition-target).SqrLength()>4) avatarPosition=target;
-    else avatarPosition+=(target-avatarPosition)*std::min(1.0f,dt*20);
+    // The client passes a pose interpolated on the host timeline and the host
+    // its exact local one, so no extra smoothing (it only added lag).
+    // PENUMBRA_COOP_INTERPOLATION=legacy restores the previous exponential
+    // smoothing of the newest pose, for comparisons only.
+    const bool legacy=IsClient() && getenv("PENUMBRA_COOP_INTERPOLATION") && std::string(getenv("PENUMBRA_COOP_INTERPOLATION"))=="legacy";
+    if(legacy && hasAvatarPosition && (avatarPosition-target).SqrLength()<=4) avatarPosition+=(target-avatarPosition)*std::min(1.0f,dt*20);
+    else avatarPosition=target;
     hasAvatarPosition=true;
     const float crouch=(s.flags&1)?0.7f:1;
     const cVector3f offsets[]={cVector3f(0,1.1f,0),cVector3f(0,1.58f,0),cVector3f(-.27f,1.1f,0),cVector3f(.27f,1.1f,0),cVector3f(-.11f,.35f,0),cVector3f(.11f,.35f,0)};
@@ -1125,6 +1194,8 @@ void cCoopNetwork::RunHammerQA(float dt) {
             qaStage=4;
         }
         if(hammerTime>10 && hammerTime<25) aim(remotePlayer,init->mpMapHandler->GetGameEntity("CoopQA_ClientCrate",false));
+        // Host strafes during the client's walk: the partner moves on the client.
+        if(hammerTime>40 && hammerTime<48) player->MoveSideways(std::fmod(hammerTime-40,2.0f)<1 ? 1.0f : -1.0f,dt);
         if(hammerTime>26 && hammerTime<39) {
             aim(player,init->mpMapHandler->GetGameEntity("CoopQA_HostCrate",false));
             const float t=hammerTime-26, phase=std::fmod(t,1.25f); const int cycle=int(t/1.25f);
@@ -1205,7 +1276,30 @@ void cCoopNetwork::RunHammerQA(float dt) {
         auto angles=AimAngles(player->GetCamera()->GetPosition(),cVector3f(partner.x/1000.0f,(partner.y+partner.eyeHeight)/1000.0f,partner.z/1000.0f));
         player->GetCamera()->SetYaw(angles.y); player->GetCamera()->SetPitch(angles.x); player->GetCharacterBody()->SetYaw(angles.y);
     }
-    if(hammerTime>(IsHost()?56:52)) {
+    // Partner overlap (52-54.5 s): the client walks straight into the host,
+    // who stands still. Players share character group 1, so both machines must
+    // let them pass through each other without corrections.
+    if(hammerTime>51.5f && qaStage<7) {
+        if(IsHost()) {
+            const auto feet=player->GetCharacterBody()->GetFeetPosition();
+            remotePlayer->GetCharacterBody()->SetFeetPosition(feet+cVector3f(0,0,1.3f));
+            remotePlayer->GetCamera()->SetYaw(0); remotePlayer->GetCamera()->SetPitch(0); remotePlayer->GetCharacterBody()->SetYaw(0);
+            player->GetCamera()->SetYaw(0);
+        }
+        qaStage=7; partnerClosest=1000; partnerCorrectionMax=0;
+    }
+    if(hammerTime>52 && hammerTime<54.5f) {
+        const auto& partner=latest.players[IsHost()?1:0];
+        const auto own=IsHost()?player->GetCharacterBody()->GetFeetPosition():init->mpPlayer->GetCharacterBody()->GetFeetPosition();
+        const float dx=own.x-partner.x/1000.0f, dz=own.z-partner.z/1000.0f;
+        partnerClosest=std::min(partnerClosest,std::sqrt(dx*dx+dz*dz));
+        if(IsClient()) { player->GetCamera()->SetYaw(0); player->GetCamera()->SetPitch(0); partnerCorrectionMax=std::max(partnerCorrectionMax,prediction.CorrectionDistance()); }
+    }
+    if(hammerTime>54.5f && qaStage==7) {
+        Log("[COOP/QA] Partner overlap role=%s closest_xz=%.3f correction_max=%.3f\n",IsHost()?"host":"client",partnerClosest,partnerCorrectionMax);
+        qaStage=8;
+    }
+    if(hammerTime>(IsHost()?60:56)) {
         if(IsClient()) Log("[COOP/QA] Movement intervals average_ms=%.2f max_ms=%.2f samples=%u correction_max_m=%.4f max_horizontal_step_m=%.4f path_m=%.3f hard_corrections=%u\n",intervalCount?intervalSum*1000/intervalCount:0,intervalMax*1000,intervalCount,correctionMax,stepMax,movementDistance,hardCorrections);
         const bool smooth=IsHost() || (movementDistance>.5f && stepMax<.2f && hardCorrections==0 && intervalMax<.2f);
         const bool ok=hammerShared && hammerEquipped && clientBroke && hostBroke && lightsSeen && smooth && (IsClient() || heldCrateReleased);
@@ -1287,7 +1381,8 @@ void cCoopNetwork::OnPostSceneDraw() {
         if(hammerTime>2.5f) save(8,"_pickup");
         if(hammerTime>10.5f) save(1,"_hammer");
         if(hammerTime>25) save(2,"_client_crate");
-        if(hammerTime>41) save(4,"_both_crates");
+        // Before the 40-48 s walk: saving a BMP stalls the game for about a second.
+        if(hammerTime>38) save(4,"_both_crates");
         if(hammerTime>50) save(16,"_pair");
         return;
     }

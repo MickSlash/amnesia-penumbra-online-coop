@@ -15,7 +15,10 @@ struct _ENetPeer;
 namespace online {
 // 4: batched movement commands (InputBatch) consumed one per host tick;
 // snapshots acknowledge the command already integrated by physics.
-constexpr uint16_t ProtocolVersion = 4;
+// 5: snapshots and entity poses carry the host logic tick (hostTick) for
+// client-side interpolation on the host timeline (Interpolation.h).
+constexpr uint16_t ProtocolVersion = 5;
+constexpr size_t SnapshotBytes = 127;
 constexpr uint32_t VoluntaryDisconnectReason = 0x504f0001;
 constexpr uint16_t DefaultPort = 27120;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
@@ -60,6 +63,7 @@ struct PlayerState {
 };
 struct Snapshot {
     uint32_t epoch = 0, sequence = 0, acknowledgedInput = 0;
+    uint32_t hostTick = 0; // host logic tick the poses were captured on
     PlayerState players[2]; // stable network IDs 1 (host), 2 (client)
 };
 struct MapState { uint32_t epoch = 0; uint64_t fingerprint = 0; std::string file; };
@@ -90,6 +94,7 @@ struct Animation { uint16_t index = 0, weight = 0; uint32_t time = 0; bool loop 
 struct EntityState {
     uint32_t epoch = 0, id = 0;
     uint32_t sequence = 0; // shared serial across reliable lifecycle and live poses
+    uint32_t hostTick = 0; // host logic tick the pose was captured on
     bool liveMotion = false; // local receive metadata, excluded from the wire
     std::string name, file;
     uint8_t type = 0, flags = 0; // active, interaction disabled, destroyed, lit, locked, closed, effects
@@ -139,6 +144,7 @@ public:
     bool ReadInput(PlayerInput& input) const; // newest received; expires after 250 ms
     // Host: the command to simulate on this tick, one per call (see InputQueue).
     bool NextInput(PlayerInput& input, bool& repeated);
+    bool CatchUpInput(PlayerInput& input) { return ready_ && inputQueue_.CatchUp(input); }
     size_t InputQueueDepth() const { return inputQueue_.Depth(); }
     size_t InputQueueTarget() const { return inputQueue_.Target(); }
     InputQueue::Stats TakeInputStats() { return inputQueue_.TakeStats(); }

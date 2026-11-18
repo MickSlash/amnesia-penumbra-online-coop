@@ -239,16 +239,16 @@ std::vector<uint8_t> EncodeEntity(const EntityState& e) {
     for(const auto& a : e.animations) { U16(out, a.index); U16(out, a.weight); U32(out, a.time); out.push_back(a.loop?1:0); }
     U32(out,uint32_t(e.health)); out.push_back(e.enemyState); out.push_back(e.target);
     for(int32_t v:e.character) U32(out,uint32_t(v));
-    U32(out, e.sequence);
+    U32(out, e.sequence); U32(out, e.hostTick);
     return out;
 }
 bool DecodeEntity(const uint8_t* p, size_t n, EntityState& entity) {
-    if(!ValidHeader(p, n) || n < 141 || p[4] != uint8_t(Message::Entity)) return false;
+    if(!ValidHeader(p, n) || n < 145 || p[4] != uint8_t(Message::Entity)) return false;
     const unsigned names = R16(p + 17), files = R16(p + 19), bodies = p[21];
     const size_t animationsOffset = 82 + names + files + bodies * 48;
     if(names > 128 || files > 240 || bodies > 32 || n <= animationsOffset) return false;
     const unsigned animations = p[animationsOffset];
-    if(animations > 32 || n != animationsOffset + 59 + animations * 9) return false;
+    if(animations > 32 || n != animationsOffset + 63 + animations * 9) return false;
     EntityState e; e.epoch = R32(p + 5); e.id = R32(p + 9); e.type = p[13]; e.flags = p[14]; e.subtype = R16(p + 15);
     for(unsigned i = 0; i < 3; ++i) e.scale[i] = Signed32(p + 22 + i * 4);
     for(unsigned i = 0; i < 12; ++i) e.transform[i] = Signed32(p + 34 + i * 4);
@@ -263,16 +263,16 @@ bool DecodeEntity(const uint8_t* p, size_t n, EntityState& entity) {
         e.animations[i].index = R16(a); e.animations[i].weight = R16(a + 2); e.animations[i].time = R32(a + 4);
         if(a[8]>1) return false; e.animations[i].loop=a[8]!=0;
     }
-    const uint8_t* extra=p+n-58;
+    const uint8_t* extra=p+n-62;
     e.health=Signed32(extra); e.enemyState=extra[4]; e.target=extra[5];
     for(unsigned i=0;i<12;++i) e.character[i]=Signed32(extra+6+i*4);
-    e.sequence = R32(p + n - 4);
+    e.sequence = R32(p + n - 8); e.hostTick = R32(p + n - 4);
     if(!ValidEntity(e)) return false;
     entity = std::move(e); return true;
 }
 std::vector<uint8_t> EncodeSnapshot(const Snapshot& s) {
     if (!s.epoch || !ValidPlayer(s.players[0]) || !ValidPlayer(s.players[1])) return {};
-    auto out = Header(Message::Snapshot); U32(out, s.epoch); U32(out, s.sequence); U32(out, s.acknowledgedInput);
+    auto out = Header(Message::Snapshot); U32(out, s.epoch); U32(out, s.sequence); U32(out, s.acknowledgedInput); U32(out, s.hostTick);
     for (const auto& p : s.players) {
         U32(out, uint32_t(p.x)); U32(out, uint32_t(p.y)); U32(out, uint32_t(p.z));
         U16(out, uint16_t(p.yaw)); U16(out, uint16_t(p.pitch));
@@ -286,11 +286,11 @@ std::vector<uint8_t> EncodeSnapshot(const Snapshot& s) {
     return out;
 }
 bool DecodeSnapshot(const uint8_t* p, size_t n, Snapshot& s) {
-    if (!ValidHeader(p, n) || n != 123 || p[4] != uint8_t(Message::Snapshot)) return false;
-    Snapshot value; value.epoch = R32(p + 5); value.sequence = R32(p + 9); value.acknowledgedInput = R32(p + 13);
+    if (!ValidHeader(p, n) || n != SnapshotBytes || p[4] != uint8_t(Message::Snapshot)) return false;
+    Snapshot value; value.epoch = R32(p + 5); value.sequence = R32(p + 9); value.acknowledgedInput = R32(p + 13); value.hostTick = R32(p + 17);
     if (!value.epoch) return false;
     for (unsigned i = 0; i < 2; ++i) {
-        const uint8_t* b = p + 17 + i * 53; auto& player = value.players[i];
+        const uint8_t* b = p + 21 + i * 53; auto& player = value.players[i];
         player.x = Signed32(b); player.y = Signed32(b + 4); player.z = Signed32(b + 8);
         player.yaw = Signed16(b + 12); player.pitch = Signed16(b + 14);
         player.health = R16(b + 16); player.sanity = R16(b + 18); player.oil = R16(b + 20);
@@ -310,7 +310,7 @@ std::vector<uint8_t> EncodeLife(const Snapshot& s) {
     return bytes;
 }
 bool DecodeLife(const uint8_t* p, size_t n, Snapshot& s) {
-    if(!ValidHeader(p, n) || n != 123 || p[4] != uint8_t(Message::Life)) return false;
+    if(!ValidHeader(p, n) || n != SnapshotBytes || p[4] != uint8_t(Message::Life)) return false;
     auto bytes = std::vector<uint8_t>(p, p + n);
     bytes[4] = uint8_t(Message::Snapshot);
     return DecodeSnapshot(bytes.data(), bytes.size(), s);

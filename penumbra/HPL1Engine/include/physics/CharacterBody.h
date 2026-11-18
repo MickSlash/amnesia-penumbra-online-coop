@@ -215,6 +215,10 @@ namespace hpl {
 		tPredictionState GetPredictionState();
 		void SetPredictionState(const tPredictionState& aState);
 		void SetPredicting(bool abX){ mbPredicting = abX; }
+
+		// See iPhysicsBody::SetCharacterGroup; applied to every size body.
+		void SetCharacterGroup(int alX);
+		int GetCharacterGroup(){ return mlCharacterGroup; }
 		bool IsPredicting(){ return mbPredicting; }
 		cVector3f GetFeetPosition();
 
@@ -427,6 +431,7 @@ namespace hpl {
 
 		bool mbEnableNearbyBodies;
 		bool mbPredicting;
+		int mlCharacterGroup;
 
 		iPhysicsBody* mpBody;
 		iPhysicsWorld *mpWorld;

@@ -51,6 +51,7 @@ namespace hpl {
 		mpWorld = apWorld;
 		mpShape = apShape;
 		mpNode = NULL;
+		mlCharacterGroup = 0;
 
 		//Increment user count for the shape
 		apShape->IncUserCount();

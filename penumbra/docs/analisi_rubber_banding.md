@@ -286,3 +286,44 @@ Costo: il replay nativo fa più collisioni per comando. Con RTT 150 ms costa fin
 - **Nemici senza collisione sul client.**
 - **Arretrati dopo blocchi lunghi.** Dopo un blocco di circa 1 s del client, l'host scarta i comandi oltre il buffer. Il client li aveva già mostrati e viene riportato indietro. Meglio recuperarli con 1–2 passi del corpo in più per tick.
 - **Prova in campo libero**, per isolare l'errore residuo.
+
+## 9. Aggiornamento 18 novembre — collisioni fra personaggi, recupero degli arretrati, protocollo 5
+
+### Collisioni fra personaggi (VERIFICATO NEL CODICE + MISURATO)
+
+La co-op chiamava `SetCollideCharacter(false)` su entrambi i giocatori a ogni cambio mappa (`AfterMapLoad`). Lo scopo era non far bloccare i giocatori a vicenda, ma quel flag fa ignorare **tutti** i personaggi: i giocatori passavano attraverso i nemici e i nemici attraverso i giocatori. Nel gioco originale il giocatore urta i nemici.
+
+- **Motore:** nuovo gruppo di collisione per i corpi personaggio (`iPhysicsBody/iCharacterBody::SetCharacterGroup`). In `CheckShapeWorldCollision` due corpi personaggio dello stesso gruppo diverso da zero si ignorano.
+- **Co-op:** i due giocatori sono nel gruppo 1, sia sull'host sia sul client. Si attraversano fra loro e urtano i nemici come nell'originale.
+- **Client:** collider statici a forma di personaggio nella posizione replicata dei nemici, perché i corpi dei nemici replicati sono inattivi. Non c'è un collider per il partner, perché sull'host i giocatori non si urtano.
+- **Misura della fase "partner contro partner"** della prova hammer (il client cammina contro l'host fermo): distanza minima 0,005 m sull'host e 0,008 m sul client, correzioni circa 0. Un collider del partner provato prima e scartato fermava il client a 0,69 m mentre l'host passava, con una correzione oltre 2 m.
+- **Prove funzionali:** full, intro, campagna (nemici veri, danni a entrambi, morte e respawn) e campagna con ritardo passano con i giocatori che urtano i nemici.
+
+### Recupero degli arretrati
+
+`InputQueue::CatchUp`: con più di Target()+2 comandi in coda, l'host simula un comando in più per tick. Il comando più vecchio viene integrato subito con `iCharacterBody::Update`, il successivo dal passo fisico. Solo oltre Target()+30 (mezzo secondo) i comandi vengono scartati, unendo i delta. Nelle prove con frame lenti sul client: `queue_caught_up` 1, `queue_dropped` 0 (prima venivano scartati 2–9 comandi per finestra).
+
+### Errore residuo nel ritorno verso il muro
+
+Il registro delle posizioni mostra il corpo dell'host che vibra contro il muro (z 9,07 ↔ 9,09) mentre spinge all'indietro. La "strada" dell'host risulta 6 m in 5 s con il corpo quasi fermo, e il client mostra meno vibrazione. Le correzioni di circa 2 cm di quella finestra vengono da questa vibrazione, non dalla rete (IPOTESI forte, coerente con il registro).
+
+### Protocollo 5: riproduzione sulla linea temporale dell'host
+
+- Snapshot (127 byte) e pose delle entità portano `hostTick`, il tick logico dell'host.
+- Il client (`network/Interpolation.h`):
+  - un orologio di riproduzione avanza di un tick per tick e resta indietro rispetto all'ultima posa di un ritardo adattivo, pari alla dispersione di (tick client − tick host) negli ultimi 2 s più 2 tick, fra 3 e 15 tick;
+  - partner, oggetti fisici e mesh dei nemici vengono interpolati fra le due pose che racchiudono quell'istante, senza estrapolazione;
+  - il filtro esponenziale sulla posizione del partner è stato rimosso.
+- Diagnostica: `playback_delay_ticks_*`, `playback_held`, `partner_jerk_cm_*` (variazione della velocità del partner da un tick all'altro, cioè gli scatti).
+- Per i confronti: `PENUMBRA_COOP_INTERPOLATION=legacy`.
+
+Misure A/B (prova hammer, l'host si sposta di lato durante la camminata del client; una prova per caso; `legacy` = posa più recente con il filtro esponenziale precedente):
+
+| Scenario | Misura | Riproduzione | Legacy |
+| --- | --- | --- | --- |
+| D (35 ms + jitter 40 ms) | scatti del partner, media / max | **0,21 / 0,91 cm per tick** | 0,53 / 2,43 cm per tick |
+| D | ritardo di riproduzione | 5,0–5,4 tick (max 7,7) | — |
+| A (locale) | scatti del partner, media / max | 0,13 / 0,51 cm per tick | 0,08 / 0,24 cm per tick |
+| A | ritardo di riproduzione | 3,1–3,4 tick | — |
+
+Con jitter la riproduzione riduce gli scatti del partner di circa il 60 %. In locale il filtro precedente risulta un po' più morbido perché arrotonda anche i cambi di direzione reali dell'host; la riproduzione li mostra come sono. Nella prova A uno stallo di 500 ms ha portato il ritardo a 28 tick per pochi istanti (`playback_held` 26), poi è rientrato.

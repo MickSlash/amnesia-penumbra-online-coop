@@ -40,6 +40,23 @@ struct TickClock {
 struct ClientNetDiagnostics {
     TickClock clock;
     WindowStat snapshotInterval, correction, pending, ackLag;
+    // Playback delay behind the newest pose (ticks) and ticks held on the
+    // newest pose because nothing newer had arrived.
+    WindowStat playbackDelay;
+    unsigned playbackHeld = 0;
+    // Shown partner: change of per-tick velocity (cm/tick), i.e. stop-and-go.
+    WindowStat partnerJerk;
+    bool hasPartner = false, hasPartnerStep = false;
+    float partnerX = 0, partnerZ = 0, partnerStepX = 0, partnerStepZ = 0;
+    void PartnerShown(float x, float z) {
+        if(hasPartner) {
+            const float sx = x - partnerX, sz = z - partnerZ;
+            if(hasPartnerStep && std::fabs(sx) + std::fabs(sz) < 1.0f)
+                partnerJerk.Add(std::sqrt((sx-partnerStepX)*(sx-partnerStepX) + (sz-partnerStepZ)*(sz-partnerStepZ)));
+            partnerStepX = sx; partnerStepZ = sz; hasPartnerStep = true;
+        }
+        partnerX = x; partnerZ = z; hasPartner = true;
+    }
     unsigned snapshots = 0;
     unsigned over2cm = 0, over10cm = 0, reset25cm = 0, hard2m = 0;
     unsigned unpredictedTicks = 0, replayTruncated = 0;
@@ -76,13 +93,15 @@ struct ClientNetDiagnostics {
         ClientNetDiagnostics next; next.lastArrival = lastArrival; next.clock.last = clock.last;
         next.hasHost = hasHost; next.hostX = hostX; next.hostZ = hostZ;
         next.hasShown = hasShown; next.shownX = shownX; next.shownZ = shownZ;
+        next.hasPartner = hasPartner; next.partnerX = partnerX; next.partnerZ = partnerZ;
+        next.hasPartnerStep = hasPartnerStep; next.partnerStepX = partnerStepX; next.partnerStepZ = partnerStepZ;
         *this = next;
     }
 };
 struct HostNetDiagnostics {
     TickClock clock;
     WindowStat inputInterval, queueDepth;
-    unsigned newInputs = 0, reusedTicks = 0, idleTicks = 0, queueTarget = 0;
+    unsigned newInputs = 0, reusedTicks = 0, idleTicks = 0, queueTarget = 0, caughtUp = 0;
     uint64_t skippedInputs = 0;     // client commands overwritten before a host tick read them
     int64_t commandDrift = 0;       // client commands acknowledged minus host ticks that simulated input
     int64_t totalCommandDrift = 0;

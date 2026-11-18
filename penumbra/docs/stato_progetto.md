@@ -24,7 +24,7 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
 | Elenco giocatori e stato connessione | ❌ | |
 | Riconnessione automatica | ✅ | |
 | Migrazione dell'host | ❌ | |
-| Versioni diverse rifiutate | ✅ | protocollo 4 |
+| Versioni diverse rifiutate | ✅ | protocollo 5 |
 
 ### Movimento e rete
 
@@ -35,8 +35,8 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
 | Previsione con le regole native del movimento (diagonale, intensità, corsa, accovacciato, salto) | ✅ | test unitari; misure in `analisi_rubber_banding.md` |
 | Diagnostica `[COOP/NETDIAG]` | ✅ | RTT, jitter, correzioni, deriva, percorsi |
 | Previsione durante il trascinamento di oggetti, porte e leve | ❌ | il client segue l'host con un RTT di ritardo |
-| Buffer di interpolazione temporale per partner, oggetti e nemici | ❌ | |
-| Collisioni coerenti fra host e client | 🟡 | replay con il corpo nativo (ostacoli, muri, gradini); mancano il corpo del partner e dei nemici sul client |
+| Buffer di interpolazione temporale per partner, oggetti e nemici | ✅ | protocollo 5 |
+| Collisioni coerenti fra host e client | ✅ | replay con il corpo nativo; gruppo di collisione dei giocatori; collider dei nemici sul client |
 
 ### Personaggi
 
@@ -117,9 +117,8 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
 
 ## Bug noti (Overture)
 
-- **Collisioni diverse fra host e client.** Il client può essere corretto vicino a oggetti fisici e nemici, perché sul suo PC gli oggetti sono statici e i nemici non hanno collisione.
+- **Spingere oggetti leggeri camminando.** Sull'host il personaggio del client spinge gli oggetti dinamici, sul client gli oggetti replicati sono statici: il client si ferma e viene corretto finché l'oggetto replicato non si sposta.
 - **Trascinamento in ritardo.** Mentre il client trascina oggetti, porte o leve, segue l'host con un RTT di ritardo.
-- **Partner, oggetti e nemici a scatti** sul client quando gli snapshot arrivano in modo irregolare (nessun buffer temporale).
 - **Neve dell'esterno visibile solo sull'host.**
 - **La prova `hammer` teletrasporta il giocatore a 39,5 s:** produce una correzione da 157 cm che è un artefatto del test.
 
@@ -129,8 +128,9 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
    - ✅ coda di input;
    - ✅ previsione con le regole native;
    - ✅ coerenza delle collisioni, prima parte: replay con il corpo nativo del motore (§8 del rapporto);
-   - prossimo: corpo del partner sul client, recupero degli arretrati dopo blocchi lunghi, prova in campo libero;
-   - poi buffer di interpolazione temporale;
+   - ✅ collisioni fra personaggi come nell'originale (i giocatori si attraversano, urtano i nemici) e collider dei nemici sul client;
+   - ✅ recupero degli arretrati dopo blocchi lunghi;
+   - ✅ buffer di interpolazione temporale (protocollo 5);
    - poi previsione durante il trascinamento.
 2. **Prova reale su due PC** via Radmin, raccogliendo `[COOP/NETDIAG]` da entrambi.
 3. **Inventari separati e oggetti unici tracciati**, prima di passare a 4 giocatori: cambiano salvataggi e protocollo.

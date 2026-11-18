@@ -4,6 +4,7 @@
 #include "network/NetSession.h"
 #include "network/Prediction.h"
 #include "network/NetDiagnostics.h"
+#include "network/Interpolation.h"
 #include "scene/SoundEntity.h"
 #include "CoopSteam.h"
 #include <map>
@@ -67,6 +68,7 @@ private:
     void PublishJournal();
     void RunCampaignQA(float dt);
     void ReportDiagnostics();
+    hpl::iPhysicsBody* CreateCollider(const std::string& name,const hpl::cVector3f& size);
     void InjectQAHitch();
     cInit* init;
     online::Session session;
@@ -75,6 +77,11 @@ private:
     cPlayer* remotePlayer = nullptr;
     cPlayerHands* remoteHands = nullptr;
     hpl::cMeshEntity* avatar[6] = {};
+    // Client only: static character-shaped colliders at the enemies' replicated
+    // positions (the replica enemies' own bodies are inactive). On the host the
+    // players collide with enemies, so the client's movement and prediction
+    // must too. Players never collide with each other (character group 1).
+    std::map<std::string, hpl::iPhysicsBody*> enemyColliders;
     hpl::cLight3DSpot* remoteLight = nullptr;
     hpl::cMeshEntity* remoteTool = nullptr;
     hpl::cMeshEntity* remoteFlashlight = nullptr;
@@ -85,7 +92,7 @@ private:
     online::ClientNetDiagnostics clientDiag;
     online::HostNetDiagnostics hostDiag;
     uint64_t diagReportAt = 0;
-    float hitchClock = 0;
+    float hitchClock = 0, partnerClosest = 1000, partnerCorrectionMax = 0;
     online::Snapshot latest;
     uint32_t generation = 0, sequence = 0, inputSequence = 0, actionSequence = 0, lastInput = 0, lastSnapshot = 0;
     uint8_t remoteButtons = 0;
@@ -93,8 +100,18 @@ private:
     float sendTime = 0, backupTime = 0, worldTime = 0, qaTime = 0;
     hpl::cVector3f avatarPosition;
     std::map<std::string, online::EntityState> published;
-    struct Motion { online::EntityState state; std::vector<hpl::cMatrixf> from; hpl::cMatrixf meshFrom; bool meshMotion = false; float age = 0; };
+    // Replicated prop and enemy poses on the host timeline, played back by
+    // `playback` (protocol 5, Interpolation.h).
+    struct Pose { std::vector<hpl::cMatrixf> bodies; hpl::cMatrixf mesh; bool meshMotion = false; };
+    struct Motion { online::PoseHistory<Pose,16> history; };
     std::map<std::string, Motion> motion;
+    online::PoseHistory<online::PlayerState,32> partnerHistory;
+    online::PlaybackClock playback;
+    online::JitterDelay jitterDelay;
+    uint32_t hostTick = 0, clientTick = 0, newestHostTick = 0;
+    bool hasHostTick = false;
+    void NoteHostTick(uint32_t tick) { if(!hasHostTick || int32_t(tick-newestHostTick)>0) newestHostTick=tick; hasHostTick=true; }
+    void ResetPlayback() { motion.clear(); partnerHistory.Clear(); playback.Reset(); jitterDelay.Reset(); hasHostTick=false; }
     std::vector<online::Presentation> pendingPresentation;
     online::InventoryState inventory;
     std::vector<uint8_t> inventoryBytes;

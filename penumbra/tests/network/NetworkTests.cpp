@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../game/network/NetSession.h"
 #include "../../game/network/Prediction.h"
+#include "../../game/network/Interpolation.h"
 #include "../../game/network/ScriptPreloads.h"
 #include <chrono>
 #include <iostream>
@@ -666,9 +667,15 @@ static void InputQueueTest() {
     auto stats = queue.TakeStats();
     Check(stats.lost == 2 && stats.starvations == 1 && stats.repeated == 2 && stats.consumed == 4, "queue statistics");
     for(uint32_t s = 9; s <= 20; ++s) { command.sequence = s; command.lookYaw = 1; command.buttons = s == 10 ? 1 : 0; queue.Offer(command); }
-    Check(queue.Next(out, repeated) && !repeated && out.sequence == 17 && out.lookYaw == 9 && (out.buttons & 1), "backlog trimmed to bound latency, merging look deltas and jumps");
-    Check(queue.TakeStats().dropped == 10 && queue.Depth() == 3, "trim keeps target plus two commands");
-    for(unsigned i = 0; i < InputQueue::QuietTicksToShrink + 4; ++i) { command.sequence = 21 + i; queue.Offer(command); queue.Next(out, repeated); }
+    Check(queue.Next(out, repeated) && !repeated && out.sequence == 5, "a moderate backlog is kept, not dropped");
+    Check(queue.CatchUp(out) && out.sequence == 8 && queue.TakeStats().caughtUp == 1, "backlog caught up with one extra command per tick");
+    command.buttons = 0;
+    for(uint32_t s = 21; s <= 60; ++s) { command.sequence = s; queue.Offer(command); }
+    Check(queue.Next(out, repeated) && !repeated && out.sequence == 29 && out.lookYaw == 21 && (out.buttons & 1), "a backlog beyond half a second is trimmed, merging look deltas and jumps");
+    Check(queue.TakeStats().dropped == 20 && queue.Depth() == 31, "trim keeps target plus the maximum backlog");
+    while(queue.CatchUp(out)) {}
+    Check(queue.Depth() == 4, "catch-up stops at target plus two");
+    for(unsigned i = 0; i < InputQueue::QuietTicksToShrink + 4; ++i) { command.sequence = 61 + i; queue.Offer(command); queue.Next(out, repeated); }
     Check(queue.Target() == 1, "quiet ticks shrink the jitter buffer");
     command.sequence = 500; Check(!queue.Offer(command), "past sequence rejected");
     queue.Clear(); Check(!queue.Next(out, repeated) && queue.Target() == 1, "clear resets queue");
@@ -695,6 +702,31 @@ static void NativeMovementPredictionTest() {
     Check(!crouched.LastReplayTruncated() && p.z < -0.012f, "a jump does not stop the horizontal replay");
     std::cout << "PASS: prediction replays native character movement\n";
 }
+static void InterpolationTest() {
+    JitterDelay delay; Check(delay.Delay() == JitterDelay::MinDelay, "no arrivals: minimum delay");
+    for(uint32_t t = 0; t < 60; ++t) delay.Arrival(1000 + t, t);
+    Check(delay.Delay() == JitterDelay::MinDelay, "steady arrival keeps the minimum delay");
+    delay.Arrival(1066, 60); delay.Arrival(1066, 61); delay.Arrival(1066, 62);
+    Check(std::fabs(delay.Delay() - (6 + JitterDelay::Margin)) < 0.001, "a burst raises the delay to the measured spread");
+    for(uint32_t t = 63; t < 300; ++t) delay.Arrival(1004 + t, t);
+    Check(delay.Delay() == JitterDelay::MinDelay, "the delay shrinks once the burst leaves the window");
+    PlaybackClock clock; Check(!clock.Valid(), "clock starts invalid");
+    Check(clock.Advance(100, 4) == 96, "first advance snaps behind the newest pose");
+    Check(std::fabs(clock.Advance(101, 4) - 97) < 0.001, "one host tick per client tick");
+    for(int i = 0; i < 10; ++i) clock.Advance(101, 4);
+    Check(clock.Tick() <= 101.0, "the clock never passes the newest pose");
+    Check(clock.Advance(500, 4) == 496, "a large jump snaps");
+    PoseHistory<float, 4> history; const float *from = nullptr, *to = nullptr; float alpha = 0;
+    Check(!history.Sample(0, from, to, alpha), "empty history has no sample");
+    history.Add(10, 1.0f); history.Add(12, 3.0f); Check(!history.Add(11, 9.0f) && !history.Add(12, 9.0f), "older or duplicate ticks ignored");
+    Check(history.Sample(11, from, to, alpha) && *from == 1.0f && *to == 3.0f && std::fabs(alpha - 0.5f) < 0.001f, "interpolate between the samples around the tick");
+    Check(history.Sample(5, from, to, alpha) && *from == 1.0f && *to == 1.0f, "before the oldest sample holds it");
+    Check(history.Sample(20, from, to, alpha) && *from == 3.0f && *to == 3.0f && alpha == 1, "after the newest sample holds it: no extrapolation");
+    for(uint32_t t = 13; t < 20; ++t) history.Add(t, float(t));
+    Check(history.NewestTick() == 19 && history.Sample(11, from, to, alpha) && *from == 16.0f, "history keeps the newest samples only");
+    Check(std::fabs(LerpAngle(3.0f, -3.0f, 0.5f) - 3.1416f) < 0.01f || std::fabs(LerpAngle(3.0f, -3.0f, 0.5f) + 3.1416f) < 0.01f, "angles blend across the wrap");
+    std::cout << "PASS: host-timeline playback clock, adaptive delay and pose history\n";
+}
 static void BunchedInputTransportTest() {
     Session host(Log), client(Log);
     Check(host.StartHost(27058) && client.StartClient("127.0.0.1", 27058), "bunched input startup");
@@ -718,6 +750,7 @@ int main(int argc, char** argv) {
     MediaCodecTest();
     InputBatchCodecTest();
     InputQueueTest();
+    InterpolationTest();
     NativeMovementPredictionTest();
     PlayerInput input; input.sequence = 0x12345678; input.tick = 42;
     input.forward = -1000; input.strafe = 500; input.yaw = -3141; input.pitch = 1570; input.buttons = 15;
@@ -734,7 +767,8 @@ int main(int argc, char** argv) {
     input.lookYaw = 31421; Check(EncodeInput(input).empty(), "raw look bounded"); input.lookYaw = 0;
     Snapshot snapshot; snapshot.epoch = 1; snapshot.sequence = 17; snapshot.players[0].x = -54321;
     auto stateBytes = EncodeSnapshot(snapshot); Snapshot stateRead;
-    Check(stateBytes.size() == 123 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
+    snapshot.hostTick = 0xfedcba98u; stateBytes = EncodeSnapshot(snapshot);
+    Check(stateBytes.size() == SnapshotBytes && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) && stateRead.hostTick == 0xfedcba98u &&
         stateRead.players[0].x == -54321 && stateRead.sequence == 17, "signed snapshot roundtrip");
     for(size_t n = 0; n < stateBytes.size(); ++n) Check(!DecodeSnapshot(stateBytes.data(), n, stateRead), "truncated snapshot");
     stateBytes.push_back(0); Check(!DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead), "snapshot trailing byte");

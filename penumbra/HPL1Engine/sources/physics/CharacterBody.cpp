@@ -51,6 +51,7 @@ namespace hpl {
 		mbCollideCharacter = true;
 
 		mbPredicting = false;
+		mlCharacterGroup = 0;
 
 		mbTestCollision = true;
 
@@ -354,6 +355,13 @@ namespace hpl {
 
 	//-----------------------------------------------------------------------
 
+	void iCharacterBody::SetCharacterGroup(int alX)
+	{
+		mlCharacterGroup = alX;
+		for(size_t i=0; i < mvExtraBodies.size(); ++i)
+			if(mvExtraBodies[i]) mvExtraBodies[i]->SetCharacterGroup(alX);
+	}
+
 	void iCharacterBody::SetCollideCharacter(bool abX)
 	{
 		if(abX == mbCollideCharacter) return;
@@ -390,6 +398,7 @@ namespace hpl {
 		pBody->SetIsCharacter(true);
 		pBody->SetActive(false);
 		pBody->SetCharacterBody(this);
+		pBody->SetCharacterGroup(mlCharacterGroup);
 
 		mvExtraBodies.push_back(pBody);
 

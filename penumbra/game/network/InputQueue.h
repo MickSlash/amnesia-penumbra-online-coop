@@ -12,8 +12,12 @@
 // A small adaptive buffer absorbs arrival jitter: after the queue runs dry the
 // host repeats the previous command until `Target()` commands are waiting,
 // and each such starvation raises the target (at most MaxTarget). Ten quiet
-// seconds lower it again. A backlog beyond Target()+2 is trimmed, merging the
-// look deltas and jump presses of the dropped commands into the next one.
+// seconds lower it again. A backlog beyond Target()+2 (for example after the
+// client stalled and sent a second of commands at once) is caught up with
+// one extra command per tick (CatchUp), so movement the client already showed
+// is still simulated. Only a backlog beyond Target()+MaxBacklog is trimmed,
+// merging the look deltas and jump presses of the dropped commands into the
+// next one.
 #include "PlayerInput.h"
 #include <algorithm>
 #include <cstdint>
@@ -21,9 +25,9 @@
 namespace online {
 class InputQueue {
 public:
-    static constexpr size_t MaxTarget = 4, Capacity = 64;
+    static constexpr size_t MaxTarget = 4, MaxBacklog = 30, Capacity = 64;
     static constexpr unsigned QuietTicksToShrink = 600;
-    struct Stats { unsigned consumed = 0, repeated = 0, starvations = 0, dropped = 0, lost = 0; };
+    struct Stats { unsigned consumed = 0, repeated = 0, starvations = 0, dropped = 0, lost = 0, caughtUp = 0; };
     void Clear() { *this = InputQueue(); }
     // Queue a received command. Duplicates and commands older than the newest
     // one received are ignored; a gap the redundancy did not cover is counted.
@@ -46,7 +50,7 @@ public:
         if(!hasLast_ && queue_.empty()) return false; // nothing yet: not a starvation
         if(refilling_ && queue_.size() >= target_) refilling_ = false;
         if(!refilling_ && !queue_.empty()) {
-            while(queue_.size() > target_ + 2) DropFront();
+            while(queue_.size() > target_ + MaxBacklog) DropFront();
             last_ = queue_.front(); queue_.pop_front(); hasLast_ = true;
             out = last_; ++stats_.consumed;
             if(++quietTicks_ >= QuietTicksToShrink) { quietTicks_ = 0; if(target_ > 1) --target_; }
@@ -58,6 +62,14 @@ public:
         }
         if(!hasLast_) return false;
         out = last_; out.lookYaw = out.lookPitch = 0; repeated = true; ++stats_.repeated;
+        return true;
+    }
+    // An extra command for this tick while the backlog exceeds Target()+2.
+    // Call after Next() returned a queued (not repeated) command.
+    bool CatchUp(PlayerInput& out) {
+        if(refilling_ || queue_.size() <= target_ + 2) return false;
+        last_ = queue_.front(); queue_.pop_front(); out = last_;
+        ++stats_.consumed; ++stats_.caughtUp;
         return true;
     }
     size_t Depth() const { return queue_.size(); }
