@@ -81,7 +81,10 @@ struct Snapshot {
 };
 struct MapState { uint32_t epoch = 0; uint64_t fingerprint = 0; std::string file; };
 enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, Jump = 7 };
-struct ActionRequest { uint32_t epoch = 0, sequence = 0; PlayerAction action = PlayerAction::Interact; bool pressed = false; std::string item, secondItem; };
+// inputSequence: il comando di movimento del client nel cui tick l'azione è
+// avvenuta. L'host la applica dopo aver simulato quel comando, così la mira
+// del giocatore 2 è quella che il client aveva al clic (protocollo 17).
+struct ActionRequest { uint32_t epoch = 0, sequence = 0, inputSequence = 0; PlayerAction action = PlayerAction::Interact; bool pressed = false; std::string item, secondItem; };
 struct InventoryItem {
     std::string name, subtype, image, value, extraValue, nameEntry, descriptionEntry;
     uint8_t type = 0;

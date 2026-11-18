@@ -56,6 +56,8 @@ namespace hpl {
 
 	void cCharacterBodyCollideGravity::OnCollision(iPhysicsBody *apBody, cCollideData *apCollideData)
 	{
+		//Prediction replays movement only: no attachment, game callback or force.
+		if(mpCharBody->IsPredicting()) return;
 		mpCharBody->mpGravityCollideMaterial = apBody->GetMaterial();
 
 		/////////////////////////////////////
@@ -128,6 +130,8 @@ namespace hpl {
 
 	void cCharacterBodyCollidePush::OnCollision(iPhysicsBody *apBody, cCollideData *apCollideData)
 	{
+		//Prediction must not push anything in the real world.
+		if(mpCharBody->IsPredicting()) return;
 		///////////////////////////////////
 		//Check what bodies not to push.
 		if(apBody->GetMass()==0 && apBody->IsCharacter()==false) return;
@@ -292,6 +296,7 @@ namespace hpl {
 		//Set up properties
 		
 		mbActive = true;
+		mbPredicting = false;
 		mbCollideCharacter = true;
 		mpIgnoreBody = NULL;
 		mbTestCollision = true;
@@ -959,7 +964,7 @@ namespace hpl {
 
 		//////////////////////////
 		//Init
-		PreUpdateConnection(afTimeStep);
+		if(!mbPredicting) PreUpdateConnection(afTimeStep);
 		ClearGravityAttachment();
 
 		//////////////////////////
@@ -1008,6 +1013,9 @@ namespace hpl {
 
 		UpdateFriction(afTimeStep);
 		
+		//While predicting only the body's own state moves (see tPredictionState).
+		if(mbPredicting) return;
+
 		//////////////////////////////
 		//Final updates
 		UpdateGravityAttachment();
@@ -1025,6 +1033,50 @@ namespace hpl {
 		UpdateEntity();
 
 		PostUpdateConnection(afTimeStep);
+	}
+
+	//-----------------------------------------------------------------------
+
+	iCharacterBody::tPredictionState iCharacterBody::GetPredictionState() const
+	{
+		tPredictionState s;
+		s.mvPosition = mvPosition; s.mvLastPosition = mvLastPosition; s.mvLastMovePosAdd = mvLastMovePosAdd;
+		s.mvForce = mvForce; s.mvVelocity = mvVelocity; s.mvLastGroundNormal = mvLastGroundNormal;
+		for(int i=0; i<2; ++i)
+		{
+			s.mfMaxPosMoveSpeed[i] = mfMaxPosMoveSpeed[i]; s.mfMaxNegMoveSpeed[i] = mfMaxNegMoveSpeed[i];
+			s.mfCurrentMoveAcc[i] = mfCurrentMoveAcc[i]; s.mfMoveAcc[i] = mfMoveAcc[i]; s.mfMoveDeacc[i] = mfMoveDeacc[i];
+			s.mfMoveSpeed[i] = mfMoveSpeed[i]; s.mbMoving[i] = mbMoving[i];
+		}
+		s.mbMovedLastUpdate = mbMovedLastUpdate; s.mbClimbing = mbClimbing;
+		s.mfYaw = mfYaw; s.mfPitch = mfPitch; s.mfCheckStepClimbCount = mfCheckStepClimbCount; s.mfMoveDelayCount = mfMoveDelayCount;
+		s.mlOnGroundCount = mlOnGroundCount;
+		s.m_mtxMove = m_mtxMove; s.mvForward = mvForward; s.mvRight = mvRight; s.mvUp = mvUp;
+		s.mpGravityCollideMaterial = mpGravityCollideMaterial;
+		s.mpGravityAttachedBody = mpGravityAttachedBody; s.mpGravityLastAttachedBody = mpGravityLastAttachedBody;
+		s.m_mtxGravityAttachedPrevMatrix = m_mtxGravityAttachedPrevMatrix; s.mlGravityAttachmentContacts = mlGravityAttachmentContacts;
+		s.mvGravityAttachmentBodyVelocity = mvGravityAttachmentBodyVelocity; s.mvGravityAttachmentVelocity = mvGravityAttachmentVelocity;
+		return s;
+	}
+
+	void iCharacterBody::SetPredictionState(const tPredictionState& s)
+	{
+		mvPosition = s.mvPosition; mvLastPosition = s.mvLastPosition; mvLastMovePosAdd = s.mvLastMovePosAdd;
+		mvForce = s.mvForce; mvVelocity = s.mvVelocity; mvLastGroundNormal = s.mvLastGroundNormal;
+		for(int i=0; i<2; ++i)
+		{
+			mfMaxPosMoveSpeed[i] = s.mfMaxPosMoveSpeed[i]; mfMaxNegMoveSpeed[i] = s.mfMaxNegMoveSpeed[i];
+			mfCurrentMoveAcc[i] = s.mfCurrentMoveAcc[i]; mfMoveAcc[i] = s.mfMoveAcc[i]; mfMoveDeacc[i] = s.mfMoveDeacc[i];
+			mfMoveSpeed[i] = s.mfMoveSpeed[i]; mbMoving[i] = s.mbMoving[i];
+		}
+		mbMovedLastUpdate = s.mbMovedLastUpdate; mbClimbing = s.mbClimbing;
+		mfYaw = s.mfYaw; mfPitch = s.mfPitch; mfCheckStepClimbCount = s.mfCheckStepClimbCount; mfMoveDelayCount = s.mfMoveDelayCount;
+		mlOnGroundCount = s.mlOnGroundCount;
+		m_mtxMove = s.m_mtxMove; mvForward = s.mvForward; mvRight = s.mvRight; mvUp = s.mvUp;
+		mpGravityCollideMaterial = s.mpGravityCollideMaterial;
+		mpGravityAttachedBody = s.mpGravityAttachedBody; mpGravityLastAttachedBody = s.mpGravityLastAttachedBody;
+		m_mtxGravityAttachedPrevMatrix = s.m_mtxGravityAttachedPrevMatrix; mlGravityAttachmentContacts = s.mlGravityAttachmentContacts;
+		mvGravityAttachmentBodyVelocity = s.mvGravityAttachmentBodyVelocity; mvGravityAttachmentVelocity = s.mvGravityAttachmentVelocity;
 	}
 	
 	//-----------------------------------------------------------------------
@@ -1829,7 +1881,7 @@ namespace hpl {
 			// Check if there was any collision
 			if(bCollide && cMath::Vector3Abs(vPushBack) != cVector3f(0))
 			{
-				if(mpCallback) mpCallback->OnHitGround(this, mvVelocity);
+				if(mpCallback && !mbPredicting) mpCallback->OnHitGround(this, mvVelocity);
 
 				//Set groundnormal, and make sure it is not too steep!
 				mvLastGroundNormal = cMath::Vector3Normalize(vPushBack);

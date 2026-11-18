@@ -121,6 +121,34 @@ namespace hpl {
 		void Update(float afTimeStep);
 
 		///////////////////////////////////////
+		//Network prediction (co-op online).
+		//The client replays its unacknowledged movement commands with this very
+		//body. While predicting, Update moves only the body's own state: no camera,
+		//entity, connection, platform attachment, physics body placement, pushed
+		//objects or game callbacks. The caller saves the state first and restores
+		//it afterwards, so the real body is left exactly as it was.
+		struct tPredictionState
+		{
+			cVector3f mvPosition, mvLastPosition, mvLastMovePosAdd, mvForce, mvVelocity, mvLastGroundNormal;
+			float mfMaxPosMoveSpeed[2], mfMaxNegMoveSpeed[2], mfCurrentMoveAcc[2], mfMoveAcc[2], mfMoveDeacc[2], mfMoveSpeed[2];
+			bool mbMoving[2];
+			bool mbMovedLastUpdate, mbClimbing;
+			float mfYaw, mfPitch, mfCheckStepClimbCount, mfMoveDelayCount;
+			int mlOnGroundCount;
+			cMatrixf m_mtxMove;
+			cVector3f mvForward, mvRight, mvUp;
+			iPhysicsMaterial *mpGravityCollideMaterial;
+			iPhysicsBody *mpGravityAttachedBody, *mpGravityLastAttachedBody;
+			cMatrixf m_mtxGravityAttachedPrevMatrix;
+			int mlGravityAttachmentContacts;
+			cVector3f mvGravityAttachmentBodyVelocity, mvGravityAttachmentVelocity;
+		};
+		tPredictionState GetPredictionState() const;
+		void SetPredictionState(const tPredictionState& aState);
+		void SetPredicting(bool abX){ mbPredicting = abX; }
+		bool IsPredicting() const { return mbPredicting; }
+
+		///////////////////////////////////////
 		//Helpers
 
 		bool CheckCharacterFits(const cVector3f &avPosition, bool abFeetPosition=false, int alSizeIdx = -1, cVector3f *apPushBackVec=NULL, float afEpsilon = 0.0f);
@@ -539,6 +567,8 @@ namespace hpl {
 		iCharacterBodyCallback *mpCallback;
 
 		iPhysicsWorld *mpWorld;
+
+		bool mbPredicting;
 
 		cCharacterBodyCollideGravity *mpCollideGravityCallback;
 		cCharacterBodyCollidePush *mpCollidePushCallback;

@@ -579,11 +579,11 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         if(hasMap_ && R32(p + 5) == map_.epoch) worldReadyEpoch_ = map_.epoch;
         return;
     }
-    if(ready_ && role_ == Role::Host && channel == 0 && n >= 19 && p[4] == uint8_t(Message::Action)) {
+    if(ready_ && role_ == Role::Host && channel == 0 && n >= 23 && p[4] == uint8_t(Message::Action)) {
         if(p[13] < 1 || p[13] > 7 || p[14] > 1) { Reject("invalid player action"); return; }
         ActionRequest action; action.epoch = R32(p + 5); action.sequence = R32(p + 9);
-        action.action = PlayerAction(p[13]); action.pressed = p[14] != 0;
-        size_t cursor = 15;
+        action.action = PlayerAction(p[13]); action.pressed = p[14] != 0; action.inputSequence = R32(p + 15);
+        size_t cursor = 19;
         if(!ReadString(p, n, cursor, action.item, 128) || !ReadString(p, n, cursor, action.secondItem, 128) || cursor != n) { Reject("invalid inventory action fields"); return; }
         if(!IsMapReady(action.epoch)) return;
         uint32_t delta = action.sequence - lastAction_;
@@ -906,7 +906,7 @@ bool Session::ReadEntity(EntityState& e) {
 bool Session::SendAction(const ActionRequest& a) {
     if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 7 || a.item.size() > 128 || a.secondItem.size() > 128) return false;
     auto out = Header(Message::Action); U32(out, a.epoch); U32(out, a.sequence); out.push_back(uint8_t(a.action)); out.push_back(a.pressed ? 1 : 0);
-    String(out, a.item); String(out, a.secondItem);
+    U32(out, a.inputSequence); String(out, a.item); String(out, a.secondItem);
     return Send(out, 0, true);
 }
 bool Session::ReadAction(ActionRequest& a) { if(actions_.empty()) return false; a = actions_.front(); actions_.pop_front(); return true; }

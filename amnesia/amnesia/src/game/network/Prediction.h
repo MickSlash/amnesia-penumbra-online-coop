@@ -91,15 +91,46 @@ public:
         }
         return p;
     }
+    // Same replay as Reconcile, but each command is integrated by `stepper`:
+    // Begin(state) places it on the authoritative pose, Step(input,dt) moves it
+    // by one command and returns the new position, End() restores it. The
+    // client uses the engine's own character body here (NativeStepper in
+    // LuxNetwork.cpp), so slopes, steps, friction and collisions match the
+    // host's simulation of the same commands.
+    template<class Stepper>
+    PredictedPosition ReplayWith(const PlayerState& state, uint32_t acknowledged, Stepper& stepper) {
+        while(!commands_.empty() && uint32_t(acknowledged - commands_.front().input.sequence) < 0x80000000u) commands_.pop_front();
+        PredictedPosition p = {state.x/1000.0f,state.z/1000.0f};
+        if(!(state.flags & 4) || (state.flags & (1|8|16|32))) { Clear(); return p; }
+        float age = 0; bool begun = false;
+        for(const auto& command : commands_) {
+            const float dt = std::min(command.dt,0.5f-age);
+            if(dt <= 0) break;
+            age += dt;
+            if(command.input.buttons & 2) break; // crouch changes the collision shape
+            if(!begun) { stepper.Begin(state); begun = true; }
+            p = stepper.Step(command.input, dt);
+        }
+        if(begun) stepper.End();
+        return p;
+    }
     template<class Collision>
     PredictedPosition ReconcileSmoothed(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, Collision collide) {
+        return Smoothed(state,acknowledged,poseSequence,dt,collide,[&](const PlayerState& s, uint32_t ack) { return Reconcile(s,ack,collide); });
+    }
+    template<class Stepper, class Collision>
+    PredictedPosition ReconcileSmoothedWith(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, Stepper& stepper, Collision collide) {
+        return Smoothed(state,acknowledged,poseSequence,dt,collide,[&](const PlayerState& s, uint32_t ack) { return ReplayWith(s,ack,stepper); });
+    }
+    template<class Collision, class Replay>
+    PredictedPosition Smoothed(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, Collision collide, Replay replay) {
         if(!std::isfinite(dt) || dt <= 0 || !(state.flags & 4) || (state.flags & (1|8|16|32))) {
-            hasPrevious_ = false; correction_ = {}; return Reconcile(state,acknowledged,collide);
+            hasPrevious_ = false; correction_ = {}; return replay(state,acknowledged);
         }
         const bool newPose = hasPrevious_ && poseSequence != previousSequence_;
         PredictedPosition before;
-        if(newPose) before = Reconcile(previousState_,previousAcknowledged_,collide);
-        PredictedPosition raw = Reconcile(state,acknowledged,collide);
+        if(newPose) before = replay(previousState_,previousAcknowledged_);
+        PredictedPosition raw = replay(state,acknowledged);
         if(newPose) {
             const float dx = before.x - raw.x, dz = before.z - raw.z;
             // Diagnostica: quanto la nuova posa autorevole sposta la previsione.

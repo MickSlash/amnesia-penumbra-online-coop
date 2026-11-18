@@ -150,7 +150,9 @@ void cLuxPlayerState_InteractSlide::Update(float afTimeStep)
 		mfSlideSpeed += afTimeStep * fSlowDownSpeed;
 		if(mfSlideSpeed > 0) mfSlideSpeed = 0;
 	}
-	if(mvMouseAdd == 0)
+	//Without mouse motion the object stops at once. A remote player's tick that
+	//only repeats the last command (network delay) is not a stop.
+	if(mvMouseAdd == 0 && !mpPlayer->GetNetworkLookGap())
 	{
 		mfSlideSpeed = 0;
 	}

@@ -69,14 +69,83 @@ Quelle oltre 10 cm non cambiano. Vengono dal modello di previsione, che approssi
 
 ### Prove esistenti che erano rimaste indietro
 
-Entrambi i difetti erano già presenti nella 0.5.1. Li ho verificati con la stessa prova in modalità 0.5.1: falliva allo stesso modo.
+Il primo difetto era già presente nella 0.5.1: con la stessa prova in modalità 0.5.1 falliva allo stesso modo.
 
 - **`RunHostPlayerTest.ps1`:**
   - Il client sintetico (`NetworkTests move-client`) non confermava mai di aver applicato il mondo, quindi l'host non simulava il suo input. Ora lo conferma e svuota le code come un client vero.
   - La prova si aspettava la rimozione del giocatore 2 alla disconnessione. Da quando esiste il recupero della connessione, l'host lo conserva per il rientro del compagno; ora la prova verifica la pausa per il recupero.
-- **`RunCampaignStartTest.ps1`:** fallisce ("Original campaign intro never released controls") anche con l'eseguibile della 0.5.1. Resta aperto, da indagare a parte.
+- **`RunCampaignStartTest.ps1`:** il fallimento ("Original campaign intro never released controls") era causato da questo stesso lavoro, non dalla 0.5.1. La prova riusa il relay di `RunImpairedNetworkTest.ps1`; aggiungendo il jitter la firma di `Run` era cambiata e il suo relay non partiva più. Per questo falliva anche con l'eseguibile della 0.5.1, e la prima conclusione di questo resoconto ("difetto già presente") era sbagliata. Il relay ora conserva anche la firma precedente.
 
 ## Limiti
 
 - Nessuna prova su due PC reali con questa build.
 - Il jitter della prova è uniforme, da 0 a 30 ms; reti reali possono avere picchi più lunghi.
+
+## Previsione con il corpo del motore
+
+### Modifiche
+
+- **HPL2, `iCharacterBody`:**
+  - stato del corpo salvabile e ripristinabile (`GetPredictionState`/`SetPredictionState`) e modalità di previsione (`SetPredicting`);
+  - durante la previsione `Update` muove solo lo stato del corpo: niente telecamera, entità, connessioni, aggancio alle piattaforme e posizionamento del corpo fisico;
+  - i callback di collisione non spingono oggetti e non chiamano il gioco (`OnGravityCollide`, `OnHitGround`).
+- **Client:** i comandi non ancora confermati vengono rieseguiti con il proprio corpo del personaggio (`NativeStepper`), partendo dalla posa autorevole e con le velocità e i limiti dell'host presi dallo snapshot. Prima il modello cinematico ricostruiva solo accelerazione e decelerazione. La previsione verticale (salti, gradini) resta quella di prima.
+- **Confronto:** `AMNESIA_NET_PREDICTION=kinematic` ripristina il modello cinematico nella stessa build.
+
+### Misure A/B
+
+Coda dei comandi attiva in entrambi i casi; due esecuzioni per caso, come sopra.
+
+| Rete | Previsione | Oltre 2 cm | Oltre 10 cm | Correzione media |
+| --- | --- | --- | --- | --- |
+| 50 ms, 5 % di perdita | cinematica | 7,9–8,3 % | 0,2–1,1 % | 0,43–0,62 cm |
+| | **nativa** | **2,5–2,6 %** | **0,2–0,3 %** | **0,21–0,23 cm** |
+| 40 ms, jitter 0–30 ms, 2 % di perdita | cinematica | 8,7–10,6 % | 0,6–1,4 % | 0,60–0,82 cm |
+| | **nativa** | **2,7–3,8 %** | **0,3 %** | **0,31–0,32 cm** |
+
+Rispetto alla 0.5.1, le pose corrette di oltre 2 cm passano da circa la metà a circa il 3 %. La correzione media passa da 2–2,6 cm a 0,2–0,3 cm.
+
+Un massimo di 142 cm in un'esecuzione nativa cade nell'intervallo in cui la prova fa morire il giocatore e lo fa rinascere al checkpoint: è il teletrasporto della rinascita, non un errore di previsione. Nessuna ripetizione ha richiesto 5 ms o più (`[NET/PERF] Replica prediction` assente nei registri).
+
+## Leve e ruote dal client
+
+Segnalazione dei giocatori: con la 0.5.1, sul client tirare una leva o girare una ruota richiedeva spesso più tentativi.
+
+### Cause (VERIFICATE NEL CODICE E MISURATE)
+
+1. **Frenata a ogni tick senza mouse.** `InteractRotateBase::Update` (leve e ruote) e `InteractSlide::Update` (cassetti) azzerano la velocità quando in un tick il mouse non si è mosso. In locale il mouse produce un movimento a ogni frame. In rete, con la 0.5.1, arrivava solo un tick su due (input a 30 Hz con i delta accumulati): l'oggetto veniva frenato a tick alterni. La coda dei comandi del protocollo 17 rimuove quasi tutti i tick vuoti. Quelli rimasti, che ripetono l'ultimo comando quando la rete ritarda, ora non frenano più: `cLuxPlayer::SetNetworkLookGap`.
+2. **Clic d'interazione fuori tempo.** L'azione viaggia sul canale affidabile, separata dai comandi di movimento. L'host la applicava appena arrivata, con il giocatore 2 orientato secondo un comando più vecchio, rimasto nella coda: la mira dell'host non era quella del client e il clic poteva mancare l'oggetto. Ora `ActionRequest` porta il comando del client in cui è avvenuta (`inputSequence`), e l'host la applica dopo averlo simulato, al più 0,5 s dopo l'arrivo.
+
+### Prova
+
+Prova nuova, `RunGameSmoke.ps1 -Levers`, anche attraverso `RunImpairedNetworkTest.ps1`.
+
+- **Allestimento:** l'host crea una leva (`lever_simple01`, girata di 180° come in `07_archives_cellar`) e una ruota (`valve_iron`) originali, e ci mette davanti il giocatore 2.
+- **Il client:** mira, preme interagisci e muove il mouse di 0,02 rad per tick. Sulla leva: 3,2 s verso il basso, poi verso l'alto; sulla ruota: cerchi. Comandi e azione passano per la rete come quelli di un giocatore.
+- **Misure:**
+  - l'host misura lo stato della leva (−1/+1 a fine corsa, il valore che fa partire gli script della mappa) e l'angolo della ruota;
+  - il client misura quanto ruotano le proprie copie, cioè quello che vede.
+- **Riferimento senza rete:** con `AMNESIA_QA_LEVERS_LOCAL=1` la stessa sequenza la esegue il giocatore dell'host in locale.
+
+| Caso | Leva: fine corsa raggiunte | Ruota (host) | Il client vede |
+| --- | --- | --- | --- |
+| Riferimento locale, senza rete | 2, a 0,38 s e 3,78 s | 188,6° | — |
+| Client, protocollo 17, rete locale | 2, a 0,37 s e 3,77 s | 188,6° | leva 47°, ruota ≥ 180° |
+| Client, protocollo 17, 40 ms + jitter 0–30 ms + 2 % di perdita (2 esecuzioni) | 2, a 0,37 s e 3,77 s | 188,6° | leva 47°, ruota ≥ 180° |
+| Client, modalità 0.5.1, stessa rete | 1, a 1,1 s | 57° | ruota 56° |
+| Client, modalità 0.5.1, rete locale (versione precedente della prova) | — | **0°** in 2 esecuzioni su 2 | — |
+
+Con il protocollo 17 il client tira la leva e gira la ruota come il giocatore locale. Il valore lato client si ferma a 180° perché la misura arriva al massimo a mezzo giro.
+
+Difetti della prova corretti durante il lavoro, non del gioco:
+- un muro finto dietro la leva veniva attraversato dalla maniglia, che si incastrava anche per il giocatore locale;
+- la mira puntava all'origine del corpo, che sta sul perno, invece del centro della maniglia;
+- la rotazione della ruota era misurata sul supporto fisso invece che sul volante.
+
+## Ancora aperto
+
+**Host fermo durante il salvataggio automatico dopo un cambio di mappa:** 1 esecuzione su 42 con il passaggio a `01_old_archives` dal 27 ottobre, nella prova con rete degradata.
+- Il registro dell'host si interrompe dentro il salvataggio automatico di `01_old_archives`, anche se il file di salvataggio risulta scritto per intero.
+- Dopo non compare più nessuna riga, nemmeno le statistiche di rete che escono ogni 5 s; Windows non ha registrato crash.
+- Le ultime righe potrebbero essere andate perse, rimaste nel buffer quando il processo è stato chiuso a fine prova.
+- Non riprodotto in 3 ripetizioni immediate. Il codice coinvolto, salvataggio e cattura del checkpoint in parallelo, non è stato toccato in questo lavoro.

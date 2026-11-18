@@ -68,6 +68,9 @@ private:
     // Host: diagnostica della coda dei comandi (ReportInputQueue).
     void ReportInputQueue(bool hasInput, bool repeated);
     static bool LegacyInput();
+    struct DeferredAction { online::ActionRequest request; std::chrono::steady_clock::time_point received; };
+    std::deque<DeferredAction> mDeferredActions;
+    static bool KinematicPrediction();
     void ReportPrediction(float error);
     unsigned mCorrectionPoses = 0, mCorrectionsOver2cm = 0, mCorrectionsOver10cm = 0;
     float mCorrectionSum = 0, mCorrectionMax = 0;
@@ -268,6 +271,22 @@ private:
     std::chrono::steady_clock::time_point mLevelDoorTestAt;
     // AMNESIA_NET_TEST_GATE: both-players latch on the 07_archives_cellar lever gate.
     void UpdateGateTest(cLuxMap* map);
+    // AMNESIA_NET_TEST_LEVERS: il client tira una leva e gira una ruota in rete.
+    void UpdateLeverTest(cLuxMap* map);
+    bool UpdateLeverDrive(float timeStep);
+    void DriveLeverLocally(cLuxMap* map, cLuxPlayer* player, unsigned target, float timeStep);
+    unsigned mLeverTestStage = 0;
+    std::chrono::steady_clock::time_point mLeverTestAt;
+    float mLeverMaxAngle = 0, mWheelMaxAngle = 0, mLeverLimitSeconds = -1, mLeverGrabSeconds = -1, mWheelGrabSeconds = -1, mWheelStartAngle = 0;
+    bool mLeverHasStart = false;
+    float mLeverLastLog = 0;
+    unsigned mLeverStatesSeen = 0;
+    cVector3f mLeverStartUp, mLeverStartForward;
+    int mLeverDriveTarget = 0;
+    float mLeverDriveTime = 0;
+    bool mLeverDriveHeld = false, mLeverDriveDone = false, mLeverSeenStartValid = false;
+    float mLeverSeenMax = 0;
+    std::vector<cMatrixf> mLeverSeenStarts;
     unsigned mGateTestStage = 0;
     std::chrono::steady_clock::time_point mGateTestAt;
     cVector3f mGateTestHostStart;

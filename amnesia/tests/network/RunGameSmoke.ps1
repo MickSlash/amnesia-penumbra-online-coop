@@ -13,6 +13,7 @@ param(
     [switch]$Effects,
     [switch]$Stairs,
     [switch]$Gate,
+    [switch]$Levers,
     [switch]$Flashback,
     [switch]$LevelDoor,
     [switch]$Spawn,
@@ -31,7 +32,7 @@ if ($Media) { $Campaign = $true }
 if ($Campaign) { $Replication = $true }
 if ($Enemy) { $MapOnly = $true }
 if ($OnlineMenu) { $MapOnly = $true }
-if ($VisibilityProps -or $Effects -or $Stairs -or $Gate -or $Flashback -or $LevelDoor -or $Spawn -or $Fairness -or $InputGap -or $Lean -or $Door -or $ItemPath) { $MapOnly = $true }
+if ($VisibilityProps -or $Effects -or $Stairs -or $Gate -or $Levers -or $Flashback -or $LevelDoor -or $Spawn -or $Fairness -or $InputGap -or $Lean -or $Door -or $ItemPath) { $MapOnly = $true }
 $gamePath = (Resolve-Path -LiteralPath $GameDirectory).Path
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $repoPath = (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path
@@ -73,6 +74,8 @@ try {
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_EFFECTS', $(if ($Effects) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_STAIRS', $(if ($Stairs) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_GATE', $(if ($Gate -and $role -eq 'host') { '1' } else { $null }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_LEVERS', $(if ($Levers) { '1' } else { $null }))
+        [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_LEVERS_LOCAL', $(if ($Levers -and $env:AMNESIA_QA_LEVERS_LOCAL -eq '1' -and $role -eq 'host') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_FLASHBACK', $(if ($Flashback) { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_LEVEL_DOOR', $(if ($LevelDoor -and $role -eq 'host') { '1' } else { $null }))
         [Environment]::SetEnvironmentVariable('AMNESIA_NET_TEST_SPAWN', $(if ($Spawn -and $role -eq 'host') { '1' } else { $null }))
@@ -181,6 +184,15 @@ try {
             if($role -eq 'host' -and (!($log -match 'skipped \d+ draw of destroyed') -or !($log -match 'skipped \d+ render of destroyed'))) {throw 'Destroyed GUI elements were not skipped at draw and render'}
             if($log.Contains('FAILED held item')) {throw 'Held item regression failed'}
             Write-Output "PASS: $role flashback effects and GUI lifetime regressions"
+        }
+        if($Levers -and $role -eq 'client') {
+            foreach($marker in @('PASS client sees the lever move','PASS client sees the wheel move')) { if(!$log.Contains($marker)) {throw "Missing client lever/wheel view proof: $marker"} }
+            Write-Output 'PASS: client sees the lever and the wheel move'
+        }
+        if($Levers -and $role -eq 'host') {
+            foreach($marker in @('PASS client pulled the lever','PASS client turned the wheel')) { if(!$log.Contains($marker)) {throw "Missing lever/wheel proof: $marker"} }
+            if($log.Contains('FAILED lever') -or $log.Contains('FAILED client')) {throw 'Client lever/wheel interaction failed'}
+            Write-Output 'PASS: client pulls a lever and turns a wheel through the network'
         }
         if($Gate -and $role -eq 'host') {
             foreach($marker in @('PASS gate stays open while one player is past it','PASS gate closes once both players passed')) { if(!$log.Contains($marker)) {throw "Missing lever gate proof: $marker"} }

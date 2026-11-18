@@ -245,7 +245,9 @@ void iLuxPlayerState_InteractRotateBase::Update(float afTimeStep)
 		if(mfRotSpeed > 0) mfRotSpeed = 0;
 	}
 	
-	if(mvMouseAdd == 0)
+	//Without mouse motion the object stops at once. A remote player's tick that
+	//only repeats the last command (network delay) is not a stop.
+	if(mvMouseAdd == 0 && !mpPlayer->GetNetworkLookGap())
 	{
 		mfRotSpeed = 0;
 	}

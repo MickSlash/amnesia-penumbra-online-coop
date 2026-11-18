@@ -167,6 +167,11 @@ public:
 	void AddYaw(float afAmount);
     void ApplyNetworkLookAngles(float yaw, float pitch, float rawYaw, float rawPitch);
     bool NetworkObjectControlsLook() const;
+    // Host, giocatore remoto: questo tick ripete l'ultimo comando perché il
+    // successivo è in ritardo. Leve, ruote e cassetti non azzerano la velocità.
+    void SetNetworkLookGap(bool abX) { mbNetworkLookGap = abX; }
+    bool GetNetworkLookGap() const { return mbNetworkLookGap; }
+    bool mbNetworkLookGap = false;
 	void AddPitch(float afAmount);
 	void SetLean(float afMul);
 	void AddLean(float afAdd);

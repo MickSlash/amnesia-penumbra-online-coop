@@ -17,6 +17,8 @@
 #include "LuxProp_EmotionStone.h"
 #include "LuxMoveState_Normal.h"
 #include "LuxProp_SwingDoor.h"
+#include "LuxProp_Lever.h"
+#include "LuxProp_Wheel.h"
 #include "LuxEnemy.h"
 #include "LuxInventory.h"
 #include "LuxProp_Item.h"
@@ -328,6 +330,7 @@ void cLuxNetwork::Update(float timeStep) {
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_EFFECTS")) UpdateEffectsTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_STAIRS")) UpdateStairsTest(gpBase->mpMapHandler->GetCurrentMap(),timeStep);
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_GATE")) UpdateGateTest(gpBase->mpMapHandler->GetCurrentMap());
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_LEVERS")) UpdateLeverTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_FLASHBACK")) UpdateFlashbackTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_FAIRNESS")) UpdateFairnessTest(gpBase->mpMapHandler->GetCurrentMap());
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_DOOR")) UpdateDoorTest(gpBase->mpMapHandler->GetCurrentMap());
@@ -567,6 +570,7 @@ void cLuxNetwork::UpdateCampaignStartTest() {
     }
 }
 bool cLuxNetwork::UpdateQADrive(float timeStep) {
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_LEVERS") && IsClientReplica()) return UpdateLeverDrive(timeStep);
     if(mSmokeSeconds && (TestFlag("AMNESIA_NET_TEST_EFFECTS") || TestFlag("AMNESIA_NET_TEST_STAIRS"))) return true;
     if(mQADriveFile.empty() || !mSmokeSeconds) return false;
     cLuxPlayer* player = gpBase->mpPlayer;
@@ -693,6 +697,41 @@ bool cLuxNetwork::PlaceRemotePlayer2() {
     place(hostFeet);
     return true;
 }
+// Esegue i comandi non ancora confermati con il corpo del personaggio del
+// client in modalità di previsione (iCharacterBody::SetPredicting): stessa
+// accelerazione, attrito, gradini, pendenze e collisioni dell'host, senza
+// toccare telecamera, entità, oggetti spinti o callback. Lo stato del corpo
+// viene salvato prima e ripristinato dopo.
+struct NativeStepper {
+    iCharacterBody* body;
+    iCharacterBody::tPredictionState saved;
+    explicit NativeStepper(iCharacterBody* b) : body(b) {}
+    void Begin(const online::PlayerState& s) {
+        saved = body->GetPredictionState();
+        auto start = saved;
+        start.mvPosition = start.mvLastPosition = cVector3f(s.x/1000.0f, s.y/1000.0f, s.z/1000.0f) + cVector3f(0, body->GetSize().y/2, 0);
+        start.mvVelocity = start.mvForce = cVector3f(0);
+        // Velocità e limiti di movimento dell'host per questo giocatore.
+        start.mfMoveSpeed[eCharDir_Forward] = s.forwardSpeed/1000.0f; start.mfMoveSpeed[eCharDir_Right] = s.sideSpeed/1000.0f;
+        start.mfMaxPosMoveSpeed[eCharDir_Forward] = s.forwardMax/1000.0f; start.mfMaxNegMoveSpeed[eCharDir_Forward] = -s.backwardMax/1000.0f;
+        start.mfMaxPosMoveSpeed[eCharDir_Right] = s.sideMax/1000.0f; start.mfMaxNegMoveSpeed[eCharDir_Right] = -s.sideMax/1000.0f;
+        for(int i = 0; i < 2; ++i) { start.mfMoveAcc[i] = s.acceleration/1000.0f; start.mfMoveDeacc[i] = s.deceleration/1000.0f; start.mbMoving[i] = false; }
+        start.mfCheckStepClimbCount = 0; start.mbClimbing = false; start.mlOnGroundCount = s.grounded ? std::max(1, saved.mlOnGroundCount) : 0;
+        start.mfMoveDelayCount = 0;
+        start.mpGravityAttachedBody = start.mpGravityLastAttachedBody = NULL; start.mlGravityAttachmentContacts = 0;
+        body->SetPredictionState(start); body->SetPredicting(true);
+    }
+    online::PredictedPosition Step(const online::PlayerInput& input, float dt) {
+        body->SetYaw(input.yaw/1000.0f);
+        // Come sull'host: un asse fermo non riceve Move (Move(0) toglie l'attrito).
+        if(input.forward) body->Move(eCharDir_Forward, input.forward/1000.0f);
+        if(input.strafe) body->Move(eCharDir_Right, input.strafe/1000.0f);
+        body->Update(dt);
+        const cVector3f position = body->GetPosition();
+        return {position.x, position.z};
+    }
+    void End() { body->SetPredicting(false); body->SetPredictionState(saved); }
+};
 void cLuxNetwork::Reset() {
     mRemotePlayer2 = NULL; mPreviousButtons = 0;
     mInputAccumulator = 0;
@@ -700,7 +739,7 @@ void cLuxNetwork::Reset() {
     mHasLastLocalFeet = false;
     mClientObjectLook = mClientScriptLook = mRemoteRotate = mClientSharedIntro = false;
     mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0; mLastSnapshotAt = {};
-    mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0;
+    mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0; mDeferredActions.clear();
     mEntityBytes.clear(); mEntityStates.clear(); mReplicaIDs.clear(); mLoggedWorldReplica = false;
     mEntityMotionAt.clear(); mEntityMotionSettled.clear(); mEntitySentAt.clear(); mPropMotion.clear(); mEnemyMotion.clear();
     mFillRemoteStartingOil = false;
@@ -813,6 +852,9 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
     const bool hasInput = !WaitingForMap() && !SharedIntroView() && (LegacyInput() ? mSession.ReadInput(input) : mSession.NextInput(input, repeated));
     const bool active = hasInput && player->IsActive() && !player->IsDead();
     ReportInputQueue(hasInput, repeated);
+    // Tick senza il comando del client (rete in ritardo): il mouse non si è
+    // fermato, quindi leve, ruote e cassetti non vanno frenati.
+    player->SetNetworkLookGap(hasInput && repeated);
     if (mSmokeSeconds && hasInput && !mLoggedRemoteInput) {
         mLoggedRemoteInput = true;
         NetLog(std::string("[NET/TEST] Applying received input; player active=") + (active ? "yes" : "no"));
@@ -855,8 +897,18 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
     if ((buttons ^ mPreviousButtons) & 1) player->Jump((buttons & 1) != 0);
     if ((buttons ^ mPreviousButtons) & 2) player->Crouch((buttons & 2) != 0);
     player->Run((buttons & 4) != 0);
+    // Le azioni aspettano il comando di movimento in cui sono avvenute (vedi
+    // ActionRequest::inputSequence), al più 0,5 s; nell'invio della 0.5.1
+    // si applicano subito.
+    { online::ActionRequest received; while(mSession.ReadAction(received)) mDeferredActions.push_back({received, std::chrono::steady_clock::now()}); }
+    const auto actionNow = std::chrono::steady_clock::now();
     online::ActionRequest action;
-    while(mSession.ReadAction(action)) {
+    while(!mDeferredActions.empty()) {
+        const auto& pending = mDeferredActions.front();
+        const bool reached = LegacyInput() || !pending.request.inputSequence || !mHasLookSequence ||
+            uint32_t(mAppliedLookSequence - pending.request.inputSequence) < 0x80000000u;
+        if(!reached && actionNow - pending.received < std::chrono::milliseconds(500)) break;
+        action = pending.request; mDeferredActions.pop_front();
         if(player->IsDead() || WaitingForMap() || SharedIntroView() || action.epoch != mEpoch) continue;
         // Inactive during a vision is intentional: accept only its page advance,
         // never ordinary interactions with the world while controls are locked.
@@ -884,6 +936,11 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
             NetLog("[NET/TEST] Pickup ray=" + std::to_string(ray.x) + "," + std::to_string(ray.y) + "," + std::to_string(ray.z) +
                 " focus=" + (player->GetEntityInFocus() ? player->GetEntityInFocus()->GetName() : "none"));
         }
+        if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_LEVERS") && action.action == online::PlayerAction::Interact)
+            NetLog("[NET/TEST] Host applies client interact pressed=" + std::to_string(action.pressed ? 1 : 0) +
+                " focus=" + (player->GetEntityInFocus() ? player->GetEntityInFocus()->GetName() : "none") +
+                " input=" + std::to_string(action.inputSequence) + " applied=" + std::to_string(mAppliedLookSequence) +
+                " yaw=" + std::to_string(player->GetCamera()->GetYaw()) + " pitch=" + std::to_string(player->GetCamera()->GetPitch()));
         eLuxPlayerAction type = action.action == online::PlayerAction::Interact ? eLuxPlayerAction_Interact :
             action.action == online::PlayerAction::Lantern ? eLuxPlayerAction_Lantern :
             action.action == online::PlayerAction::Ignite ? eLuxPlayerAction_Ignite : eLuxPlayerAction_Attack;
@@ -897,6 +954,10 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
     if(!active && mRemoteInteractHeld) { player->DoAction(eLuxPlayerAction_Interact, false); mRemoteInteractHeld = false; }
     mPreviousButtons = buttons;
     return true;
+}
+bool cLuxNetwork::KinematicPrediction() {
+    static const bool kinematic = [] { const char* v = std::getenv("AMNESIA_NET_PREDICTION"); return v && std::string(v) == "kinematic"; }();
+    return kinematic;
 }
 // AMNESIA_NET_LEGACY_INPUT=1 (su entrambi i PC): invio e consumo dei comandi
 // come nella 0.5.1, solo per confronti A/B nella stessa build.
@@ -912,7 +973,7 @@ void cLuxNetwork::ReportPrediction(float error) {
     const auto now = std::chrono::steady_clock::now();
     if(!mCorrectionReportAt.time_since_epoch().count()) mCorrectionReportAt = now;
     if(now - mCorrectionReportAt < std::chrono::seconds(5)) return;
-    NetLog(std::string("[NET/PREDICTION] input=") + (LegacyInput() ? "legacy" : "queue") + " poses=" + std::to_string(mCorrectionPoses) +
+    NetLog(std::string("[NET/PREDICTION] input=") + (LegacyInput() ? "legacy" : "queue") + " model=" + (KinematicPrediction() ? "kinematic" : "native") + " poses=" + std::to_string(mCorrectionPoses) +
         " over_2cm=" + std::to_string(mCorrectionsOver2cm) + " over_10cm=" + std::to_string(mCorrectionsOver10cm) +
         " mean_cm=" + std::to_string(mCorrectionPoses ? 100.0f * mCorrectionSum / mCorrectionPoses : 0.0f) +
         " max_cm=" + std::to_string(100.0f * mCorrectionMax) + " rtt_ms=" + std::to_string(mSession.Ping()));
@@ -937,12 +998,14 @@ void cLuxNetwork::SendLocalAction(online::PlayerAction action, bool pressed) {
     if(!IsClientReplica() || !mReceivedSnapshot || !mEpoch || !mBaselineApplied || mClientSharedIntro) return;
     if(mClientDead && pressed) return;
     online::ActionRequest request; request.epoch = mEpoch; request.sequence = ++mActionSequence;
+    request.inputSequence = mInputSequence + 1; // il comando di questo tick (o il successivo)
     request.action = action; request.pressed = pressed; mSession.SendAction(request);
 }
 void cLuxNetwork::SendInventoryAction(online::PlayerAction action, const std::string& item, const std::string& secondItem) {
     if(!IsClientReplica() || !mReceivedSnapshot || !mBaselineApplied || mClientSharedIntro) return;
     if(mClientDead) return;
     online::ActionRequest request; request.epoch = mEpoch; request.sequence = ++mActionSequence;
+    request.inputSequence = mInputSequence + 1;
     request.action = action; request.pressed = true; request.item = item; request.secondItem = secondItem; mSession.SendAction(request);
 }
 void cLuxNetwork::OnGameStart() {
@@ -1308,7 +1371,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         if(body && mBaselineApplied && !mClientSharedIntro) {
             const auto predictionStart = std::chrono::steady_clock::now();
             online::PredictionCollisionCache collisionCache;
-            auto predicted = mPrediction.ReconcileSmoothed(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,[&](online::PredictedPosition from, online::PredictedPosition to) {
+            auto collide = [&](online::PredictedPosition from, online::PredictedPosition to) {
                 auto query = [&](float x,float z) {
                     return online::StepBlocked(local.y/1000.0f,body->GetMaxStepSize(),local.grounded && !mVerticalPrediction.Pending(),[&](float feet) {
                         cVector3f push;
@@ -1321,7 +1384,13 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                 if(to.x != from.x && !collisionCache.Blocked(to.x,from.z,query)) result.x = to.x;
                 if(to.z != from.z && !collisionCache.Blocked(result.x,to.z,query)) result.z = to.z;
                 return result;
-            });
+            };
+            // Previsione con il corpo del motore (come sull'host); il modello
+            // cinematico resta per i confronti (AMNESIA_NET_PREDICTION=kinematic).
+            NativeStepper stepper(body);
+            const auto predicted = KinematicPrediction() ?
+                mPrediction.ReconcileSmoothed(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,collide) :
+                mPrediction.ReconcileSmoothedWith(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,stepper,collide);
             { float error = 0; if(mPrediction.TakePoseCorrection(error)) ReportPrediction(error); }
             const auto predictionUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-predictionStart).count();
             if(predictionUs >= 5000) NetLog("[NET/PERF] Replica prediction item_us=" + std::to_string(predictionUs) +
@@ -2402,6 +2471,217 @@ void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& ev
 // 07_archives_cellar: reaching PastFirstGate slams the lever gate and locks the
 // lever. The host moves one player through, back out, then the partner; the
 // original callback (which also wakes waterlurker_2) must wait for both.
+// AMNESIA_NET_TEST_LEVERS: il client afferra una leva e una ruota originali e
+// le muove con il mouse, attraverso la rete (comandi e azione d'interazione
+// come un giocatore vero). L'host misura lo stato reale della leva e l'angolo
+// reale della ruota. Zona isolata, come la prova di comparsa.
+namespace {
+const cVector3f kLeverTestOrigin(100, 30, 100);
+const cVector3f kLeverSpot = kLeverTestOrigin + cVector3f(0, .01f, 0);
+const cVector3f kWheelSpot = kLeverTestOrigin + cVector3f(3, .01f, 0);
+}
+void cLuxNetwork::UpdateLeverTest(cLuxMap* map) {
+    if(!map || IsClientReplica() || !mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || !gpBase->mpPlayer2 || mLeverTestStage >= 4) return;
+    const auto now = std::chrono::steady_clock::now();
+    if(!mLeverTestAt.time_since_epoch().count()) { mLeverTestAt = now; return; }
+    const float elapsed = std::chrono::duration<float>(now - mLeverTestAt).count();
+    // AMNESIA_NET_TEST_LEVERS_LOCAL: riferimento senza rete, la stessa sequenza
+    // eseguita dal giocatore dell'host in locale sulla stessa leva e ruota.
+    const bool local = TestFlag("AMNESIA_NET_TEST_LEVERS_LOCAL");
+    cLuxPlayer* partner = local ? gpBase->mpPlayer : gpBase->mpPlayer2;
+    cLuxPlayer* bystander = local ? gpBase->mpPlayer2 : gpBase->mpPlayer;
+    auto place = [&](cLuxPlayer* player, const cVector3f& feet) {
+        player->GetCharacterBody()->SetFeetPosition(feet); player->GetCharacterBody()->SetForceVelocity(cVector3f(0,0,0));
+    };
+    if(mLeverTestStage == 0) {
+        if(elapsed < 2) return;
+        auto* world = map->GetPhysicsWorld();
+        world->SetWorldSize(cVector3f(-200,-100,-200), cVector3f(200,100,200));
+        auto* floor = world->CreateBody("online_qa_lever_floor", world->CreateBoxShape(cVector3f(10, .3f, 6), NULL));
+        floor->SetMass(0); floor->SetPosition(kLeverTestOrigin + cVector3f(1.5f, -.15f, -1)); floor->SetCollideCharacter(true);
+        // Come in 07_archives_cellar (lever_simple01_1): girata di 180° verso
+        // il giocatore. Niente muro finto dietro: la maniglia lo attraversava
+        // e la leva si incastrava anche per il giocatore locale.
+        cMatrixf leverMatrix = cMath::MatrixRotateY(kPif); leverMatrix.SetTranslation(kLeverSpot + cVector3f(0, 1.1f, -.75f));
+        map->CreateEntity("online_qa_lever", "entities/gameplay/lever_simple01/lever_simple01.ent", leverMatrix, cVector3f(1));
+        map->CreateEntity("online_qa_wheel", "entities/gameplay/valve_iron/valve_iron.ent", cMath::MatrixTranslate(kWheelSpot + cVector3f(0, 1.1f, -.6f)), cVector3f(1));
+        place(bystander, kLeverTestOrigin + cVector3f(-3, .01f, 3));
+        place(partner, kLeverSpot);
+        mLeverTestStage = 1; mLeverTestAt = now; mLeverMaxAngle = mWheelMaxAngle = 0; mLeverLimitSeconds = mLeverGrabSeconds = -1;
+        NetLog("[NET/TEST] Lever fixture ready; partner placed at the lever");
+        return;
+    }
+    auto* lever = static_cast<cLuxProp_Lever*>(map->GetEntityByName("online_qa_lever", eLuxEntityType_Prop));
+    auto* wheel = static_cast<cLuxProp_Wheel*>(map->GetEntityByName("online_qa_wheel", eLuxEntityType_Prop));
+    if(!lever || !wheel || !lever->GetBodyNum() || !wheel->GetBodyNum()) { NetLog("[NET/TEST] FAILED lever fixture missing"); mLeverTestStage = 4; return; }
+    if(local && (mLeverTestStage == 1 || mLeverTestStage == 2)) DriveLeverLocally(map, partner, mLeverTestStage, gpBase->mpEngine->GetStepSize());
+    if(mLeverTestStage == 1) {
+        // Angolo percorso dalla leva: rotazione della maniglia (il corpo con
+        // massa; il primo è la base fissa) rispetto all'inizio.
+        iPhysicsBody* handle = lever->GetBody(0);
+        for(int i = 0; i < lever->GetBodyNum(); ++i) if(lever->GetBody(i)->GetMass() > 0) { handle = lever->GetBody(i); break; }
+        const cMatrixf current = handle->GetLocalMatrix();
+        // Dalla presa in poi: appena creata la leva si assesta da sola.
+        if(!mLeverHasStart && mLeverGrabSeconds >= 0) { mLeverStartUp = current.GetUp(); mLeverStartForward = current.GetForward(); mLeverHasStart = true; }
+        if(!mLeverHasStart) { mLeverStartUp = current.GetUp(); mLeverStartForward = current.GetForward(); }
+        const float dotUp = std::max(-1.0f, std::min(1.0f, cMath::Vector3Dot(mLeverStartUp, current.GetUp())));
+        const float dotForward = std::max(-1.0f, std::min(1.0f, cMath::Vector3Dot(mLeverStartForward, current.GetForward())));
+        mLeverMaxAngle = std::max(mLeverMaxAngle, cMath::ToDeg(std::max(std::acos(dotUp), std::acos(dotForward))));
+        if(partner->GetCurrentState() == eLuxPlayerState_InteractLever && mLeverGrabSeconds < 0) {
+            mLeverGrabSeconds = elapsed;
+            NetLog("[NET/TEST] Partner grabbed the lever body=" + std::string(partner->GetBodyInFocus() ? partner->GetBodyInFocus()->GetName() : "none") +
+                " mass=" + std::to_string(partner->GetBodyInFocus() ? partner->GetBodyInFocus()->GetMass() : -1.0f) + " stuck=" + std::to_string(lever->GetStuckState()));
+        }
+        if(int(elapsed * 2) != int(mLeverLastLog * 2)) {
+            mLeverLastLog = elapsed;
+            NetLog("[NET/TEST] Lever t=" + std::to_string(elapsed) + " state=" + std::to_string(lever->GetLeverState()) + " angle_deg=" + std::to_string(mLeverMaxAngle) +
+                " handle_enabled=" + std::to_string(handle->GetEnabled() ? 1 : 0) + " partner_state=" + std::to_string(int(partner->GetCurrentState())) +
+                " partner_look_mul=" + std::to_string(partner->GetLookSpeedMul()));
+        }
+        if(lever->GetLeverState() != 0 && mLeverGrabSeconds >= 0 && !(mLeverStatesSeen & (lever->GetLeverState() > 0 ? 2 : 1))) {
+            mLeverStatesSeen |= lever->GetLeverState() > 0 ? 2 : 1;
+            NetLog("[NET/TEST] Lever end reached state=" + std::to_string(lever->GetLeverState()) + " seconds_after_grab=" + std::to_string(elapsed - mLeverGrabSeconds));
+        }
+        if(lever->GetLeverState() != 0 && mLeverLimitSeconds < 0 && mLeverGrabSeconds >= 0) {
+            mLeverLimitSeconds = elapsed - mLeverGrabSeconds;
+            NetLog("[NET/TEST] Lever reached its limit state=" + std::to_string(lever->GetLeverState()) + " seconds_after_grab=" + std::to_string(mLeverLimitSeconds));
+        }
+        if(elapsed > 10) {
+            const bool ok = mLeverGrabSeconds >= 0 && mLeverLimitSeconds >= 0;
+            NetLog(std::string("[NET/TEST] ") + (ok ? "PASS" : "FAILED") + " client pulled the lever ends_reached=" + std::to_string((mLeverStatesSeen & 1) + ((mLeverStatesSeen >> 1) & 1)) + " grabbed=" + (mLeverGrabSeconds >= 0 ? "1" : "0") +
+                " limit_seconds=" + std::to_string(mLeverLimitSeconds) + " max_angle_deg=" + std::to_string(mLeverMaxAngle));
+            place(partner, kWheelSpot); mLeverTestStage = 2; mLeverTestAt = now; mWheelStartAngle = wheel->GetAngle(); mWheelGrabSeconds = -1;
+            NetLog("[NET/TEST] Partner placed at the wheel");
+        }
+        return;
+    }
+    if(mLeverTestStage == 2) {
+        mWheelMaxAngle = std::max(mWheelMaxAngle, std::fabs(cMath::ToDeg(wheel->GetAngle() - mWheelStartAngle)));
+        if(partner->GetCurrentState() == eLuxPlayerState_InteractWheel && mWheelGrabSeconds < 0) {
+            mWheelGrabSeconds = elapsed; NetLog("[NET/TEST] Partner grabbed the wheel");
+        }
+        if(elapsed > 10) {
+            const bool ok = mWheelGrabSeconds >= 0 && mWheelMaxAngle >= 45;
+            NetLog(std::string("[NET/TEST] ") + (ok ? "PASS" : "FAILED") + " client turned the wheel grabbed=" + (mWheelGrabSeconds >= 0 ? "1" : "0") +
+                " max_angle_deg=" + std::to_string(mWheelMaxAngle));
+            mLeverTestStage = 4;
+        }
+    }
+}
+// Host, riferimento locale: la stessa sequenza del client (mira, presa,
+// movimento del mouse, rilascio) applicata direttamente al giocatore.
+void cLuxNetwork::DriveLeverLocally(cLuxMap* map, cLuxPlayer* player, unsigned target, float timeStep) {
+    if(target != unsigned(mLeverDriveTarget)) { mLeverDriveTarget = int(target); mLeverDriveTime = 0; mLeverDriveHeld = false; mLeverDriveDone = false; }
+    if(mLeverDriveDone) return;
+    auto* camera = player->GetCamera();
+    iLuxEntity* entity = map->GetEntityByName(target == 1 ? "online_qa_lever" : "online_qa_wheel");
+    auto* prop = entity && entity->GetEntityType() == eLuxEntityType_Prop ? static_cast<iLuxProp*>(entity) : NULL;
+    if(!prop || !prop->GetBodyNum()) return;
+    if(!mLeverDriveHeld) {
+        iPhysicsBody* handle = prop->GetBody(prop->GetBodyNum()-1);
+        const cVector3f aim = cMath::MatrixMul(handle->GetLocalMatrix(), handle->GetMassCentre()) - camera->GetPosition();
+        camera->SetYaw(std::atan2(-aim.x, -aim.z)); camera->SetPitch(std::atan2(aim.y, std::sqrt(aim.x*aim.x + aim.z*aim.z)));
+        player->GetCharacterBody()->SetYaw(camera->GetYaw());
+        mLeverDriveTime += timeStep;
+        if(mLeverDriveTime >= .5f) {
+            if(player->GetCurrentState() == eLuxPlayerState_Normal) player->GetCurrentStateData()->Update(0);
+            player->DoAction(eLuxPlayerAction_Interact, true); mLeverDriveHeld = true; mLeverDriveTime = 0;
+            NetLog(std::string("[NET/TEST] Host (local reference) grabbing the ") + (target == 1 ? "lever" : "wheel") +
+                " focus=" + (player->GetEntityInFocus() ? player->GetEntityInFocus()->GetName() : "none") +
+                " body=" + (player->GetBodyInFocus() ? player->GetBodyInFocus()->GetName() : "none") +
+                " camera_y=" + std::to_string(camera->GetPosition().y) + " pitch=" + std::to_string(camera->GetPitch()) + " state=" + std::to_string(int(player->GetCurrentState())));
+        }
+    } else if(mLeverDriveTime < 6.4f) {
+        mLeverDriveTime += timeStep;
+        const float t = mLeverDriveTime, amount = .02f;
+        float dx = 0, dy = 0;
+        if(target == 1) dy = t < 3.2f ? -amount : amount;
+        else { dx = amount * std::cos(t * 4); dy = amount * std::sin(t * 4); }
+        player->AddYaw(dx); player->AddPitch(dy);
+    } else {
+        player->DoAction(eLuxPlayerAction_Interact, false); mLeverDriveHeld = false; mLeverDriveDone = true;
+    }
+}
+// Client: mira, afferra e muove il mouse come un giocatore, in base al punto
+// in cui l'host lo ha messo (leva o ruota). Sostituisce l'input reale.
+bool cLuxNetwork::UpdateLeverDrive(float timeStep) {
+    cLuxPlayer* player = gpBase->mpPlayer;
+    cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
+    if(!map || !player || !player->GetCharacterBody()) return true;
+    const cVector3f feet = player->GetCharacterBody()->GetFeetPosition();
+    auto near = [&](const cVector3f& spot) { cVector3f d = feet - spot; d.y = 0; return d.Length() < .5f; };
+    const int target = near(kLeverSpot) ? 1 : near(kWheelSpot) ? 2 : 0;
+    if(target != mLeverDriveTarget) {
+        if(mLeverDriveHeld) { SendLocalAction(online::PlayerAction::Interact, false); mLeverDriveHeld = false; }
+        mLeverDriveTarget = target; mLeverDriveTime = 0; mLeverDriveDone = false;
+    }
+    online::PlayerInput input; auto* camera = player->GetCamera();
+    if(target && !mLeverDriveDone) {
+        iLuxEntity* entity = map->GetEntityByName(target == 1 ? "online_qa_lever" : "online_qa_wheel");
+        auto* prop = entity && entity->GetEntityType() == eLuxEntityType_Prop ? static_cast<iLuxProp*>(entity) : NULL;
+        if(!mLeverDriveHeld) {
+            // Mira alla maniglia (l'ultimo corpo) finché l'oggetto non è
+            // arrivato e la mira è rimasta stabile per mezzo secondo.
+            // Come un giocatore fermo davanti all'oggetto: dopo il
+            // teletrasporto il corpo deve essere arrivato anche in altezza.
+            const cVector3f spot = target == 1 ? kLeverSpot : kWheelSpot;
+            if(!prop || !prop->GetBodyNum() || (feet - spot).Length() > .1f) { mLeverDriveTime = 0; }
+            else {
+                // Al centro della maniglia (l'ultimo corpo): l'origine del corpo
+                // è sul perno, vicino alla base fissa.
+                // Centro di massa dalla matrice del corpo: la posa che si vede a
+                // schermo (il volume di una copia mossa dalla rete può essere vecchio).
+                iPhysicsBody* handle = prop->GetBody(prop->GetBodyNum()-1);
+                const cVector3f aim = cMath::MatrixMul(handle->GetLocalMatrix(), handle->GetMassCentre()) - camera->GetPosition();
+                camera->SetYaw(std::atan2(-aim.x, -aim.z)); camera->SetPitch(std::atan2(aim.y, std::sqrt(aim.x*aim.x + aim.z*aim.z)));
+                mLeverDriveTime += timeStep;
+                if(mLeverDriveTime >= .5f) {
+                    SendLocalAction(online::PlayerAction::Interact, true); mLeverDriveHeld = true; mLeverDriveTime = 0;
+                    NetLog(std::string("[NET/TEST] Client grabbing the ") + (target == 1 ? "lever" : "wheel") + " camera_y=" + std::to_string(camera->GetPosition().y) +
+                        " pitch=" + std::to_string(camera->GetPitch()));
+                }
+            }
+        } else if(mLeverDriveTime < 6.4f) {
+            // Quello che il giocatore vede: rotazione della copia locale.
+            // La rotazione massima fra tutti i corpi della copia (la parte
+            // mobile non è sempre l'ultimo corpo: nella ruota c'è il supporto).
+            if(prop && prop->GetBodyNum()) {
+                if(!mLeverSeenStartValid) {
+                    mLeverSeenStarts.clear();
+                    for(int i = 0; i < prop->GetBodyNum(); ++i) mLeverSeenStarts.push_back(prop->GetBody(i)->GetLocalMatrix());
+                    mLeverSeenStartValid = true; mLeverSeenMax = 0;
+                }
+                for(int i = 0; i < prop->GetBodyNum() && size_t(i) < mLeverSeenStarts.size(); ++i) {
+                    const cMatrixf seen = prop->GetBody(i)->GetLocalMatrix();
+                    const float up = std::max(-1.0f, std::min(1.0f, cMath::Vector3Dot(mLeverSeenStarts[i].GetUp(), seen.GetUp())));
+                    const float right = std::max(-1.0f, std::min(1.0f, cMath::Vector3Dot(mLeverSeenStarts[i].GetRight(), seen.GetRight())));
+                    mLeverSeenMax = std::max(mLeverSeenMax, cMath::ToDeg(std::max(std::acos(up), std::acos(right))));
+                }
+            }
+            // Movimento del mouse di un giocatore: 0,02 rad per tick (circa
+            // 1,2 rad/s). Leva: giù per 3,2 s, poi su; ruota: cerchi.
+            mLeverDriveTime += timeStep;
+            const float t = mLeverDriveTime, amount = .02f;
+            float dx = 0, dy = 0;
+            if(target == 1) dy = t < 3.2f ? -amount : amount; // tira giù fino in fondo, poi su
+            else { dx = amount * std::cos(t * 4); dy = amount * std::sin(t * 4); }
+            input.lookYaw = int16_t(dx * 10000); input.lookPitch = int16_t(dy * 10000);
+        } else {
+            SendLocalAction(online::PlayerAction::Interact, false); mLeverDriveHeld = false; mLeverDriveDone = true;
+            NetLog(std::string("[NET/TEST] Client released the ") + (target == 1 ? "lever" : "wheel"));
+            // Leva: almeno 20° visti sul client; ruota: almeno 45°.
+            const bool seenOk = mLeverSeenMax >= (target == 1 ? 20.0f : 45.0f);
+            NetLog(std::string("[NET/TEST] ") + (seenOk ? "PASS" : "FAILED") + " client sees the " + (target == 1 ? "lever" : "wheel") +
+                " move max_angle_deg=" + std::to_string(mLeverSeenMax));
+            mLeverSeenStartValid = false;
+        }
+    }
+    const float yaw = camera->GetYaw();
+    input.yaw = int16_t(std::atan2(std::sin(yaw), std::cos(yaw)) * 1000);
+    input.pitch = int16_t(std::max(-1.571f, std::min(1.571f, camera->GetPitch())) * 1000);
+    SendLocalInput(input, timeStep);
+    return true;
+}
 void cLuxNetwork::UpdateGateTest(cLuxMap* map) {
     if(!map || IsClientReplica() || !mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || !gpBase->mpPlayer2 || mGateTestStage >= 4) return;
     auto* area = static_cast<iLuxArea*>(map->GetEntityByName("PastFirstGate", eLuxEntityType_Area));

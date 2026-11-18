@@ -15,6 +15,7 @@ param(
     [switch]$Effects,
     [switch]$Stairs,
     [switch]$Gate,
+    [switch]$Levers,
     [switch]$Flashback,
     [switch]$LevelDoor,
     [switch]$Spawn,
@@ -26,7 +27,7 @@ param(
     [string]$Executable = "$PSScriptRoot/../../amnesia/src/game/x64/Release/Lux.exe"
 )
 $ErrorActionPreference = 'Stop'
-if($OnlineMenu -or $Effects -or $Stairs -or $Gate -or $Flashback -or $LevelDoor -or $Spawn -or $Fairness -or $InputGap) { $MapOnly = $true }
+if($OnlineMenu -or $Effects -or $Stairs -or $Gate -or $Levers -or $Flashback -or $LevelDoor -or $Spawn -or $Fairness -or $InputGap) { $MapOnly = $true }
 $run = Join-Path (Resolve-Path -LiteralPath "$PSScriptRoot/../..").Path 'build/impaired-network'
 $gameLogs = Join-Path "$PSScriptRoot/../../build" $(if($OnlineMenu) { 'online-menu' } elseif($MapOnly -or $VisibilityProps) { "visual-qa/$($StartMap.Replace('.map',''))" } else { 'player-replication' })
 New-Item -ItemType Directory -Force -Path $run | Out-Null
@@ -39,6 +40,8 @@ using System.Net.Sockets;
 using System.Threading;
 public static class CoopUdpRelay {
     class Pending { public byte[] Data; public EndPoint Target; public Socket Socket; public long Due; }
+    // Firma senza jitter, usata da RunCampaignStartTest e RunLevelNetworkProbe.
+    public static string Run(int port, int delay, int dropEvery, int seconds, int ceiling) { return Run(port, delay, 0, dropEvery, seconds, ceiling); }
     public static string Run(int port, int delay, int jitter, int dropEvery, int seconds, int ceiling) {
         using(var front = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
         using(var back = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)) {
@@ -106,7 +109,7 @@ $null = $relay.Handle
 try {
     Start-Sleep -Seconds 2
     if($relay.HasExited) { throw 'UDP relay failed to start; inspect build/impaired-network/relay.err' }
-    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Executable $Executable -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly -and !$VisibilityProps) -Media:$Media -Prediction:$Prediction -SnapshotBlackout:$SnapshotBlackout -OnlineMenu:$OnlineMenu -VisibilityProps:$VisibilityProps -Effects:$Effects -Stairs:$Stairs -Gate:$Gate -Flashback:$Flashback -LevelDoor:$LevelDoor -Spawn:$Spawn -Fairness:$Fairness -InputGap:$InputGap -StartMap $StartMap -MapOnly:($MapOnly -or $VisibilityProps)
+    & "$PSScriptRoot/RunGameSmoke.ps1" -GameDirectory $GameDirectory -Executable $Executable -Port ($Port+1) -ClientPort $Port -Campaign:(!$MapOnly -and !$VisibilityProps) -Media:$Media -Prediction:$Prediction -SnapshotBlackout:$SnapshotBlackout -OnlineMenu:$OnlineMenu -VisibilityProps:$VisibilityProps -Effects:$Effects -Stairs:$Stairs -Gate:$Gate -Levers:$Levers -Flashback:$Flashback -LevelDoor:$LevelDoor -Spawn:$Spawn -Fairness:$Fairness -InputGap:$InputGap -StartMap $StartMap -MapOnly:($MapOnly -or $VisibilityProps)
     if (!$relay.WaitForExit(15000)) { throw 'UDP relay did not exit on its timer' }
     $relay.Refresh()
     if($relay.ExitCode -ne 0) { throw 'UDP relay failed; inspect relay.err' }
