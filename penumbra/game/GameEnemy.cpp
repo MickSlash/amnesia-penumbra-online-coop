@@ -1375,7 +1375,11 @@ void iGameEnemy::UpdateCheckForPlayer(float afTimeStep)
 void iGameEnemy::SelectNetworkTarget(const std::vector<cPlayer*>& players,float dt)
 {
     networkCheck-=dt;
-    if(networkCheck>0 && networkTarget && !networkTarget->IsDead()) return;
+    // Un bersaglio uscito dalla partita (ospite disconnesso, corpo tolto dal
+    // mondo) va sostituito subito: gli stati del nemico leggono il suo corpo.
+    bool targetPresent=false;
+    for(auto* p:players) if(p && p==networkTarget && p->GetCharacterBody()) targetPresent=true;
+    if(networkCheck>0 && targetPresent && !networkTarget->IsDead()) return;
     networkCheck=mfCheckForPlayerRate;
     const int count=int(std::min<size_t>(players.size(),4));
     cPlayer* selected=nullptr; float best=1e30f; float selectedChance=0; int selectedId=0;

@@ -296,6 +296,20 @@ cVector3f cCoopNetwork::FreeSpot(iCharacterBody* body,const cVector3f& center,co
     Log("[COOP/MAP] No free spawn spot near the host; using the default offset\n");
     return center+cVector3f(0.6f,0,0);
 }
+// Toglie dal mondo il corpo di un ospite disconnesso, conservandone lo stato
+// per il suo rientro nella stessa mappa (stessa identità).
+void cCoopNetwork::ExitWorld(Guest& guest) {
+    auto* player=guest.player;
+    PlayerScope scope(init,player,guest.hands);
+    guest.pendingSave=std::make_shared<cPlayer_GlobalSave>();
+    player->SaveToGlobal(guest.pendingSave.get());
+    guest.pendingSave->mState=ePlayerState_Normal; guest.pendingSave->mbActive=true;
+    guest.pendingWeapon=guest.hands->GetCurrentModel(1)?guest.hands->GetCurrentModel(1)->msName:"";
+    guest.pendingIdentity=guest.session.ExpectedIdentity();
+    player->ChangeState(ePlayerState_Normal); player->SetPushBody(nullptr);
+    player->OnWorldExit(); guest.hands->OnWorldExit();
+    Log("[COOP/MAP] Player %u left; body removed from the world\n",unsigned(guest.session.GuestPlayerId()));
+}
 // Crea il corpo dell'ospite nel mondo, in un punto libero vicino a `center`.
 void cCoopNetwork::EnterWorld(Guest& guest,const cVector3f& center,std::vector<cVector3f>& taken) {
     auto* player=guest.player;
@@ -305,13 +319,16 @@ void cCoopNetwork::EnterWorld(Guest& guest,const cVector3f& center,std::vector<c
     // game, still collide with enemies. Disabling character collision
     // altogether let players and enemies walk through each other.
     player->GetCharacterBody()->SetCharacterGroup(1);
+    // Lo stato conservato all'uscita vale solo per lo stesso ospite.
+    if(guest.pendingSave && guest.pendingIdentity && guest.pendingIdentity!=guest.session.ExpectedIdentity()) { guest.pendingSave.reset(); guest.pendingWeapon.clear(); }
+    guest.pendingIdentity=0;
     if(guest.pendingSave) {
         // Stato e posizione dall'ultimo checkpoint caricato.
         PlayerScope scope(init,player,guest.hands);
         player->ChangeState(ePlayerState_Normal); player->LoadFromGlobal(guest.pendingSave.get()); RestoreWeapon(guest.pendingWeapon);
         guest.pendingSave.reset(); guest.pendingWeapon.clear();
         taken.push_back(player->GetCharacterBody()->GetFeetPosition());
-        Log("[COOP/SAVE] Player %u joined with its checkpoint state health=%.2f\n",unsigned(guest.session.GuestPlayerId()),player->GetHealth());
+        Log("[COOP/SAVE] Player %u joined with its saved state health=%.2f\n",unsigned(guest.session.GuestPlayerId()),player->GetHealth());
         return;
     }
     const cVector3f feet=FreeSpot(player->GetCharacterBody(),center,taken);
@@ -472,7 +489,7 @@ void cCoopNetwork::LoadPartner(cSavedGame* save) {
             guest.player->ChangeState(ePlayerState_Normal); guest.player->LoadFromGlobal(const_cast<cPlayer_GlobalSave*>(&data)); RestoreWeapon(weapon);
             Log("[COOP/SAVE] Restored player=%u health=%.2f power=%.2f pos=%s\n",unsigned(guest.session.GuestPlayerId()),guest.player->GetHealth(),guest.player->GetPower(),guest.player->GetCharacterBody()->GetPosition().ToString().c_str());
         } else {
-            guest.pendingSave=std::make_shared<cPlayer_GlobalSave>(data); guest.pendingWeapon=weapon;
+            guest.pendingSave=std::make_shared<cPlayer_GlobalSave>(data); guest.pendingWeapon=weapon; guest.pendingIdentity=0;
             Log("[COOP/SAVE] Player %u not in the world; checkpoint state kept until it joins\n",unsigned(guest.session.GuestPlayerId()));
         }
     }
@@ -638,6 +655,9 @@ void cCoopNetwork::Update(float dt) {
             if(hadConnection && !guest.session.AttemptActive() && guest.session.RetryAllowed()) guest.session.StartClient(guest.session.RemoteAddress(),guest.session.RemotePort(),true);
         }
         if(IsHost()) DestroyAvatar(guest.session.GuestPlayerId());
+        // Ospiti 3-4: il corpo esce dal mondo (il primo resta, come nella
+        // partita a due); posizione e stato tornano se rientra in questa mappa.
+        if(IsHost() && &guest!=guests[0].get() && guest.player && guest.player->GetCharacterBody()) { ExitWorld(guest); continue; }
         if(guest.player && guest.player->GetCharacterBody()) { PlayerScope scope(init,guest.player,guest.hands); guest.player->SetActive(false); guest.player->GetCharacterBody()->SetMoveSpeed(eCharDir_Forward,0); guest.player->GetCharacterBody()->SetMoveSpeed(eCharDir_Right,0); }
     }
     if(!anyConnected) return;
@@ -1654,7 +1674,7 @@ void cCoopNetwork::RunPartyQA(float dt) {
         if(qaPartyDone && qaPartyVictim) {
             auto* dog=static_cast<iGameEnemy*>(init->mpMapHandler->GetGameEntity("CoopQA_PartyDog",false));
             if(dog && dog->GetNetworkTarget()==qaPartyVictim->player) qaPartyTargeted=true;
-            if(dog && int(qaPartyTime*2)!=int((qaPartyTime-dt)*2)) {
+            if(dog && qaPartyVictim->player->GetCharacterBody() && int(qaPartyTime*2)!=int((qaPartyTime-dt)*2)) {
                 const auto p=dog->GetMover()->GetCharBody()->GetFeetPosition(), v=qaPartyVictim->player->GetCharacterBody()->GetFeetPosition();
                 Log("[COOP/QA] Party dog t=%.1f active=%d state=%d health=%.0f target=%s pos=%.2f/%.2f/%.2f victim=%.2f/%.2f/%.2f victim_active=%d\n",qaPartyTime,dog->IsActive()?1:0,dog->GetCurrentStateId(),dog->GetHealth(),
                     !dog->GetNetworkTarget()?"none":dog->GetNetworkTarget()==hostPlayer?"host":"guest",p.x,p.y,p.z,v.x,v.y,v.z,qaPartyVictim->player->IsActive()?1:0);
@@ -1682,10 +1702,26 @@ void cCoopNetwork::RunPartyQA(float dt) {
                 auto delta=victim->GetCharacterBody()->GetFeetPosition()-qaPartySavedFeet; delta.y=0;
                 const bool ok=std::fabs(victim->GetHealth()-50)<5 && delta.Length()<0.5f;
                 Log("[COOP/QA] Party checkpoint restored player=%u health=%.1f position_error_m=%.3f ok=%d\n",unsigned(qaPartyVictim->session.GuestPlayerId()),victim->GetHealth(),delta.Length(),ok?1:0);
-                Log("[COOP/QA] %s party of %u players role=host\n",ok?"PASS":"FAIL",expected);
-                init->mpGame->Exit(); return;
+                if(!ok) { Log("[COOP/QA] FAIL party of %u players role=host\n",expected); init->mpGame->Exit(); return; }
+                // Fase della riconnessione: l'host fa cadere la connessione
+                // dell'ultimo ospite, che si ricollega da solo. Un ospite 3-4
+                // deve uscire dal mondo e rientrare dov'era, con la sua salute.
+                qaPartySavedFeet=victim->GetCharacterBody()->GetFeetPosition(); qaPartySavedHealth=victim->GetHealth();
+                qaPartyVictim->session.RecoverConnection("QA: disconnessione forzata dell'ultimo ospite");
+                qaPartyStage=3; qaPartyStageTime=qaPartyTime; return;
             }
-            if(qaPartyStage==9 || (qaPartyStage==2 && qaPartyTime-qaPartyStageTime>60)) {
+            if(qaPartyStage==3) {
+                const bool first=qaPartyVictim==guests[0].get();
+                if(!qaPartyVictim->session.Connected() && !first && !victim->GetCharacterBody()) qaPartyBodyRemoved=true;
+                if(qaPartyVictim->session.Connected() && qaPartyVictim->session.IsWorldApplied(qaPartyVictim->map.epoch) && victim->GetCharacterBody() && qaPartyTime-qaPartyStageTime>4) {
+                    auto delta=victim->GetCharacterBody()->GetFeetPosition()-qaPartySavedFeet; delta.y=0;
+                    const bool ok=(first || qaPartyBodyRemoved) && delta.Length()<0.5f && std::fabs(victim->GetHealth()-qaPartySavedHealth)<3;
+                    Log("[COOP/QA] Party reconnect player=%u body_removed=%d position_error_m=%.3f health=%.1f/%.1f ok=%d\n",unsigned(qaPartyVictim->session.GuestPlayerId()),qaPartyBodyRemoved?1:0,delta.Length(),victim->GetHealth(),qaPartySavedHealth,ok?1:0);
+                    Log("[COOP/QA] %s party of %u players role=host\n",ok?"PASS":"FAIL",expected);
+                    init->mpGame->Exit(); return;
+                }
+            }
+            if(qaPartyStage==9 || (qaPartyStage>=2 && qaPartyTime-qaPartyStageTime>60)) {
                 Log("[COOP/QA] FAIL party of %u players role=host checkpoint_stage=%d\n",expected,qaPartyStage); init->mpGame->Exit(); return;
             }
         }
@@ -1701,7 +1737,8 @@ void cCoopNetwork::RunPartyQA(float dt) {
     qaPartyWalking=qaPartyStarted && qaPartyTime>3 && qaPartyTime<5.5f;
     // Dopo l'esito il client resta connesso: l'host controlla tutti insieme e
     // chiude per primo.
-    if(qaPartyDone) { if(!g->session.Connected() || qaPartyTime>120) init->mpGame->Exit(); return; }
+    // (una caduta breve, come quella forzata dall'host, è seguita dal rientro).
+    if(qaPartyDone) { qaPartyOffline=g->session.Connected()?0:qaPartyOffline+dt; if(qaPartyOffline>12 || qaPartyTime>150) init->mpGame->Exit(); return; }
     if(qaPartyStarted && qaPartyTime>8) {
         qaPartyDone=true;
         auto delta=init->mpPlayer->GetCharacterBody()->GetFeetPosition()-qaPartyStart[0]; delta.y=0;

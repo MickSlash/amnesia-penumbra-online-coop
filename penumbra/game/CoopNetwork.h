@@ -95,6 +95,7 @@ public:
         // quando entra (EnterWorld), scartato al prossimo cambio di mappa.
         std::shared_ptr<cPlayer_GlobalSave> pendingSave;
         std::string pendingWeapon;
+        uint64_t pendingIdentity = 0; // identità di chi è uscito (0 = checkpoint)
         hpl::cVector3f sentFeet;
         bool hasSentFeet = false;
         uint8_t teleportCount = 0;
@@ -121,6 +122,7 @@ private:
     void ResetGuestMap(Guest& guest);
     hpl::cVector3f FreeSpot(hpl::iCharacterBody* body,const hpl::cVector3f& center,const std::vector<hpl::cVector3f>& taken);
     void EnterWorld(Guest& guest,const hpl::cVector3f& center,std::vector<hpl::cVector3f>& taken);
+    void ExitWorld(Guest& guest);
     void Present(const online::Presentation& event);
     std::vector<std::unique_ptr<Guest>> guests;
     Guest* g = nullptr;
@@ -160,6 +162,8 @@ private:
     int qaPartyStage = 0;
     float qaPartyStageTime = 0;
     hpl::cVector3f qaPartySavedFeet;
+    float qaPartySavedHealth = 0, qaPartyOffline = 0;
+    bool qaPartyBodyRemoved = false;
     float qaPartyTime = 0;
     std::map<uint8_t, hpl::cVector3f> qaPartyStart;
     // QA "maps": tutte le mappe della campagna caricate in sequenza.
@@ -266,5 +270,5 @@ private:
     float campaignTime = 0;
     int campaignStage = 0;
     bool qaHostAttacked = false, qaClientAttacked = false, qaEnemySeen = false;
-    bool qaRespawned = false, qaSaved = false, qaLoaded = false;
+    bool qaRespawned = false, qaSaved = false, qaLoaded = false, qaSpiderHit = false;
 };

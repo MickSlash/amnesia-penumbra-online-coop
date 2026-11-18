@@ -127,9 +127,13 @@ void cCoopNetwork::RunCampaignQA(float dt) {
         remotePlayer->GetCharacterBody()->SetFeetPosition(cVector3f(0,.3f,2.3f));
         spawnEnemy("CoopQA_Spider","character_spider.ent"); campaignStage=5;
     }
+    // Il morso si registra durante l'attacco, come per i cani: se il ragno
+    // uccide il client prima della fine della fase passa giustamente
+    // all'host, e un controllo solo finale lo darebbe per mancato.
+    if(campaignStage==5) { auto* spider=enemy("CoopQA_Spider"); qaSpiderHit=qaSpiderHit || (spider && spider->GetNetworkTarget()==remotePlayer && remotePlayer->GetHealth()<99); }
     if(campaignStage==5 && campaignTime>43) {
         auto* spider=enemy("CoopQA_Spider");
-        const bool hit=spider && spider->GetNetworkTarget()==remotePlayer && remotePlayer->GetHealth()<99;
+        const bool hit=qaSpiderHit;
         qaClientAttacked=qaClientAttacked && hit;
         Log("[COOP/QA] Native spider attacked client=%d health=%.2f\n",hit,remotePlayer->GetHealth());
         if(spider) spider->SetActive(false);

@@ -6,7 +6,6 @@ Ogni voce indica se è misurata, verificata nel codice o solo ipotizzata. Le voc
 
 - **3-4 giocatori, cose ancora da fare** (VERIFICATO NEL CODICE):
   - l'inventario è ancora quello comune a tutti;
-  - un ospite 3 o 4 che si disconnette lascia il corpo, inattivo, fino al cambio di mappa;
   - il menu nel gioco non esiste ancora: il numero di giocatori si sceglie nel launcher dell'host.
 - **Prove a 3-4 giocatori solo sullo stesso PC** (`-Mode party`): tutti i processi sono sullo stesso PC, senza rete reale né rete degradata. Il relay di prova serve solo il primo client.
 - **Scatto intermittente del client con frame lenti** (prova hammer con `-Hitch client`): in 1 esecuzione su 3, un passo del client 0,30 m oltre il passo dell'host durante la camminata contro i frammenti. Probabile combinazione fra recupero dei tick dopo il blocco e salita sui frammenti. Da indagare con il registro `Large client step`.

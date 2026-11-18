@@ -48,11 +48,16 @@ Niente push senza autorizzazione esplicita.
 
 ## Compito corrente
 
-Fase 4, da 2 a 4 giocatori, secondo il progetto in `COOP_ARCHITECTURE.md` ("Da 2 a 4 giocatori"). Fatti i passi 1-7.
+Fase 4 (da 2 a 4 giocatori): fatti i passi 1-7 di `COOP_ARCHITECTURE.md`. Restano da provare la rete degradata con 3-4 giocatori e una partita reale su più PC.
 
-Prossimi passi:
-- corpo di un ospite 3-4 disconnesso tolto dal mondo;
-- poi la Fase 3 per più giocatori: inventari separati, consumabili per giocatore, oggetti unici tracciati.
+Prossimo: Fase 3 per più giocatori, con il progetto già indicato:
+- inventari separati;
+- consumabili per giocatore (batterie, bende);
+- oggetti unici della storia tracciati, da passare o lasciare;
+- diario personale;
+- spettatore per chi è a terra.
+
+Il primo passo è progettare l'inventario per giocatore (protocollo, salvataggi, script che controllano gli oggetti) in `COOP_ARCHITECTURE.md`, poi implementarlo.
 
 ### Rimandato, con motivo
 
@@ -73,5 +78,6 @@ Prossimi passi:
 
   La prova `party` passa con 3 e 4 istanze.
 - Da 2 a 4 giocatori, passi 5-6: nemici, attacchi ad area e checkpoint per tutti i giocatori, ingresso in corsa degli ospiti 3-4. Prova `party` estesa con nemico e checkpoint.
+- Ospite 3-4 disconnesso: corpo tolto dal mondo, rientro nella stessa posizione e con lo stesso stato. Corretto un crash: un nemico poteva tenere come bersaglio un giocatore uscito dal mondo.
 - Protocollo 6: oggetti tenuti, porte, oggetti leggeri, teletrasporti, correzioni smorzate fino a 1 m.
 - Prova hammer resa significativa e passante da 0 a 120 ms di RTT.

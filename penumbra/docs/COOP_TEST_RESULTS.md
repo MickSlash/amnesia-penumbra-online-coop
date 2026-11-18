@@ -538,3 +538,28 @@ Due giocatori, stessa build:
 | maps | PASS, 25/25 |
 
 Limiti: come in §12, nessuna prova a 3-4 giocatori con rete degradata né su più PC. L'inventario è ancora comune.
+
+## 14. Aggiornamento 18 novembre — uscita e rientro degli ospiti 3-4, numero di giocatori nel launcher
+
+### Modifiche
+
+- **Launcher:** campo "Giocatori (host)", da 2 a 4.
+- **Uscita di un ospite 3-4:**
+  - un ospite 3-4 disconnesso esce dal mondo;
+  - posizione, salute e arma restano conservate;
+  - se rientra con la stessa identità nella stessa mappa, riparte da lì;
+  - un ospite diverso nello stesso slot entra invece in un punto libero.
+- **Crash corretto (MISURATO):** un nemico teneva come bersaglio un giocatore uscito dal mondo fino al controllo successivo, e i suoi stati leggevano il corpo distrutto. L'eccezione 0xc0000005 cadeva in `iCharacterBody::GetFeetPosition`, risolta con il file `.map`. Ora il nemico sceglie subito un altro bersaglio. La prova ha trovato il problema attraverso il proprio registro, che leggeva lo stesso corpo.
+- **Prova `party`, fase di rientro:** l'host fa cadere la connessione dell'ultimo ospite, che si ricollega da solo. Verifica che il corpo esca dal mondo e che l'ospite rientri con la stessa posizione e la stessa salute.
+
+### Misure
+
+Prova `party` completa (camminata, nemico, checkpoint, riconnessione):
+
+| Giocatori | Esito | Corpo tolto | Errore di posizione al rientro | Salute prima/dopo |
+| --- | --- | --- | --- | --- |
+| 2 | PASS | no (il primo ospite resta, come nella partita a due) | 0,000 m | 51,6 / 53,2 |
+| 3 | PASS 2/2 | sì | 0,000 m | 51,6 / 53,2 |
+| 4 | PASS 2/2 | sì | 0,000 m | 51,6 / 53,2 |
+
+La salute dopo il rientro cresce di 1,6 per la rigenerazione naturale.
