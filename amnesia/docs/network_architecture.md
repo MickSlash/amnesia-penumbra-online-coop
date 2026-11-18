@@ -71,7 +71,20 @@ non esegue una seconda copia di AngelScript. Gli eventi di presentazione coprono
 solo i tipi elencati: questo non implica che ogni funzione script della campagna
 abbia già una replica. Una disconnessione conserva il mondo e P2, mette la campagna in pausa e avvia il recupero. Il client riprova lo stesso endpoint con identità persistente. Un checkpoint completo e validato consente di trasferire autorità e invertire i giocatori; il nuovo host aspetta il partner.
 
-## Protocollo versione 7
+## Protocollo (versione 17)
+
+Questa sezione è nata con il protocollo 7; dove il codice è cambiato fa fede
+`amnesia/src/game/network/NetSession.h`, che documenta ogni versione. Le ultime:
+
+| Versione | Cambiamento |
+| --- | --- |
+| 12 | I nemici inviano il movimento non affidabile come gli oggetti fisici. |
+| 13 | Pulsanti dell'inclinazione nell'input del client; scale specchiate delle entità. |
+| 14 | Flag 128 delle entità: porta a battente rotta. |
+| 15 | Nessun cambio sul filo; rifiuta host con il difetto dei percorsi delle immagini degli oggetti. |
+| 16 | Nessun cambio sul filo; rifiuta host che inviano percorsi assoluti degli autori originali. |
+| 17 | Un comando di movimento per tick logico; ogni pacchetto (`InputBatch`) ripete gli ultimi 6 comandi e l'host ne simula uno per tick (`InputQueue`), con un buffer adattivo contro il jitter e il recupero degli arretrati. |
+
 
 ENet 1.3.18 incluso da sorgenti, licenza MIT conservata; mod GPLv3. Header AO,
 versione uint16 big-endian e tipo uint8; interi espliciti, nessuna struttura C++
@@ -80,15 +93,15 @@ trasmessa in memoria. Quattro canali:
 | Canale | Affidabilità | Contenuto |
 | --- | --- | --- |
 | 0 | Affidabile e ordinato | Hello/Welcome, Map/MapReady, Action, Peer lobby, CheckpointAck, Snapshot di riserva a 10 Hz e al cambio lanterna |
-| 1 | Ordinato, non affidabile | PlayerInput a 30 Hz (30 byte), Snapshot a 60 Hz (123 byte) |
-| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (123 byte), Media (115–627 byte), Journal |
+| 1 | Ordinato, non affidabile | InputBatch a ogni tick logico, 60 Hz (gli ultimi 1–6 comandi, 10 + 21 byte per comando), Snapshot a 60 Hz (137 byte) |
+| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (137 byte), Media (115–627 byte), Journal |
 | 3 | Affidabile e ordinato | Checkpoint compresso, frammenti da 1 KiB, massimo un invio per tick a 60 Hz |
 
 Ogni stato gameplay include un'epoch di mappa. Sequenze obsolete o duplicate
 sono ignorate con aritmetica che supporta il wraparound. MapReady abilita snapshot
 e intenti; WorldReady e applicazione della baseline abilitano l'input client.
 
-Gli snapshot di riserva hanno lo stesso codec da 123 byte e lo stesso spazio di
+Gli snapshot di riserva hanno lo stesso codec da 137 byte e lo stesso spazio di
 sequenza degli snapshot ordinari. Il client accetta solo lo stato più recente,
 indipendentemente dal canale: un backup ritardato non sovrascrive una posa nuova.
 Il canale 0 li separa dalle code affidabili di entità/media sul canale 2. Entità,

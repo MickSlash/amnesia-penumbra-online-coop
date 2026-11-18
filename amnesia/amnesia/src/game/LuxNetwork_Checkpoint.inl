@@ -146,7 +146,11 @@ bool CheckpointClass(TiXmlElement* node, const tString& expected, unsigned depth
             int type = 0; unsigned elements = 0;
             if(tag != (f.mMainType == eSerializeMainType_Array ? "array" : "container") || child->QueryIntAttribute("type",&type) != TIXML_SUCCESS || type != f.mType) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
             if(f.mMainType == eSerializeMainType_Container && type == eSerializeType_Class &&
-                (!child->Attribute("class_type") || f.msClassName != child->Attribute("class_type"))) return false;
+                (!child->Attribute("class_type") || f.msClassName != child->Attribute("class_type"))) {
+                CheckpointLog(types,"[NET/RECOVERY] Save container class mismatch: " + name + "." + fieldName + " expected=" + f.msClassName +
+                    " found=" + (child->Attribute("class_type") ? child->Attribute("class_type") : "none"));
+                return false;
+            }
             for(auto* entry = child->FirstChildElement(); entry; entry = entry->NextSiblingElement()) {
                 if(++elements > 20000 || ++count > 300000) { CheckpointLog(types,"[NET/RECOVERY] Save schema rejected at line " + std::to_string(__LINE__)); return false; }
                 if(type == eSerializeType_Class || type == eSerializeType_ClassPointer) {
@@ -434,7 +438,8 @@ void cLuxNetwork::UpdateCheckpoint(float timeStep) {
                     NetLog("[NET/RECOVERY] Complete campaign checkpoint received bytes=" + std::to_string(mRecoveryCheckpoint.bytes.size()));
                 }
             }
-        } catch(const std::exception&) {
+        } catch(const std::exception& error) {
+            NetLog(std::string("[NET/RECOVERY] Checkpoint validation exception: ") + error.what());
             finished = true; valid = false;
         }
         job.mainMaxUs = std::max(job.mainMaxUs,int64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-mainStart).count()));
@@ -442,7 +447,8 @@ void cLuxNetwork::UpdateCheckpoint(float timeStep) {
             if(!current) NetLog("[NET/RECOVERY] Obsolete checkpoint worker result discarded");
             else if(!valid) {
                 if(!job.work->types.error.empty()) NetLog(job.work->types.error);
-                NetLog("[NET/RECOVERY] Invalid native save schema; checkpoint discarded");
+                // Fase 0: decompressione e analisi; 1: metadati dei tipi; 2: schema.
+                NetLog("[NET/RECOVERY] Invalid native save schema; checkpoint discarded stage=" + std::to_string(job.stage));
             }
             NetLog("[NET/PERF] Client checkpoint worker_parse_ms=" + std::to_string(job.work->parseMs) +
                 " worker_validation_ms=" + std::to_string(job.work->validateMs) + " main_max_us=" + std::to_string(job.mainMaxUs));

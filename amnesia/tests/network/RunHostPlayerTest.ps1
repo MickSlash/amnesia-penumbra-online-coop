@@ -51,10 +51,12 @@ try {
     if ($p.ExitCode -ne 0) { throw "Game exit $($p.ExitCode)" }
     $log = [IO.File]::ReadAllText($logPath)
     [IO.File]::WriteAllText((Join-Path $run 'host.log'),$log)
-    foreach ($marker in @('Created authoritative Player 2','Remote Player 2 moved under network input','Removed remote Player 2','Smoke test finished')) {
+    # Dal recupero della connessione l'host resta in ascolto e conserva il giocatore 2
+    # per il rientro del compagno: la disconnessione mette in pausa, non lo rimuove.
+    foreach ($marker in @('Created authoritative Player 2','Remote Player 2 moved under network input','Peer disconnected or timed out','Connection lost; campaign paused for recovery','Smoke test finished')) {
         if (!$log.Contains($marker)) { throw "Missing runtime proof: $marker ($logPath)" }
     }
-    Write-Output "PASS: authoritative P2 spawn, network movement, disconnect cleanup and clean exit ($logPath)"
+    Write-Output "PASS: authoritative P2 spawn, network movement, disconnect into recovery and clean exit ($logPath)"
 } finally {
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name,$saved[$name]) }
     if ($p -and !$p.HasExited) { Stop-Process -Id $p.Id }

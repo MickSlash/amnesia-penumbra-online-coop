@@ -65,6 +65,15 @@ private:
     cLuxPlayer* mRemotePlayer2 = NULL; // observer; MapHandler owns player lifetime
     uint32_t mInputSequence = 0, mInputTick = 0;
     float mInputAccumulator = 0;
+    // Host: diagnostica della coda dei comandi (ReportInputQueue).
+    void ReportInputQueue(bool hasInput, bool repeated);
+    static bool LegacyInput();
+    void ReportPrediction(float error);
+    unsigned mCorrectionPoses = 0, mCorrectionsOver2cm = 0, mCorrectionsOver10cm = 0;
+    float mCorrectionSum = 0, mCorrectionMax = 0;
+    std::chrono::steady_clock::time_point mCorrectionReportAt;
+    unsigned mInputNewTicks = 0, mInputReusedTicks = 0, mInputIdleTicks = 0, mInputCaughtUp = 0;
+    std::chrono::steady_clock::time_point mInputQueueReportAt;
     int mPendingLookYaw = 0, mPendingLookPitch = 0;
     uint32_t mAppliedLookSequence = 0;
     bool mHasLookSequence = false, mClientObjectLook = false, mClientScriptLook = false;
@@ -111,6 +120,17 @@ private:
     };
     std::map<uint32_t, PropMotion> mPropMotion;
     void UpdatePropMotion(cLuxMap* map, float timeStep);
+    // Client: nemici interpolati fra due pose dell'host (corpo e mesh), come
+    // gli oggetti fisici; prima la posa arrivata a 20 Hz veniva applicata di
+    // colpo e i nemici avanzavano a scatti anche con una rete buona.
+    struct EnemyMotion {
+        cVector3f fromPosition, toPosition;
+        cMatrixf fromMesh, toMesh;
+        float elapsed = 0;
+    };
+    std::map<uint32_t, EnemyMotion> mEnemyMotion;
+    void UpdateEnemyMotion(cLuxMap* map, float timeStep);
+    bool mTestEnemyInterpolated = false;
     bool mFillRemoteStartingOil = false;
     bool mTestDarknessStarted = false, mTestDarknessObserved = false;
     bool mTestDarknessDiagnostic = false;

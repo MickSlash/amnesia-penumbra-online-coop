@@ -702,7 +702,7 @@ void cLuxNetwork::Reset() {
     mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0; mLastSnapshotAt = {};
     mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0;
     mEntityBytes.clear(); mEntityStates.clear(); mReplicaIDs.clear(); mLoggedWorldReplica = false;
-    mEntityMotionAt.clear(); mEntityMotionSettled.clear(); mEntitySentAt.clear(); mPropMotion.clear();
+    mEntityMotionAt.clear(); mEntityMotionSettled.clear(); mEntitySentAt.clear(); mPropMotion.clear(); mEnemyMotion.clear();
     mFillRemoteStartingOil = false;
     mBaselineApplied = false; mBaselineSent = false; mClientMoved = false;
     mAppliedInventory = false; mInventoryBytes.clear();
@@ -750,15 +750,23 @@ void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
     }
     mLocalInputButtons=input.buttons;
     ++mInputTick;
-    mInputAccumulator += timeStep;
-    mPendingLookYaw = std::max(-31420, std::min(31420, mPendingLookYaw + int(input.lookYaw)));
-    mPendingLookPitch = std::max(-31420, std::min(31420, mPendingLookPitch + int(input.lookPitch)));
-    // 30 Hz divides the engine's default 60 Hz logic rate; render FPS is irrelevant.
-    if (!jumpEdge && mInputAccumulator < 1.0f / 30.0f) return;
-    mInputAccumulator = std::fmod(mInputAccumulator, 1.0f / 30.0f);
+    if(LegacyInput()) {
+        // Confronti A/B: invio della 0.5.1, un pacchetto ogni due tick con
+        // l'ultimo input e i delta del mouse accumulati.
+        mInputAccumulator += timeStep;
+        mPendingLookYaw = std::max(-31420, std::min(31420, mPendingLookYaw + int(input.lookYaw)));
+        mPendingLookPitch = std::max(-31420, std::min(31420, mPendingLookPitch + int(input.lookPitch)));
+        if (!jumpEdge && mInputAccumulator < 1.0f / 30.0f) return;
+        mInputAccumulator = std::fmod(mInputAccumulator, 1.0f / 30.0f);
+        input.lookYaw = int16_t(mPendingLookYaw); input.lookPitch = int16_t(mPendingLookPitch);
+        mPendingLookYaw = mPendingLookPitch = 0;
+    }
+    // Protocollo 17: un comando per tick logico, con i propri delta del mouse,
+    // inviato subito; ogni pacchetto ripete gli ultimi comandi (InputBatch) e
+    // l'host ne simula uno per tick. Prima un pacchetto ogni due tick portava
+    // solo l'ultimo input, che l'host applicava finché non ne arrivava un
+    // altro: con il jitter durava 1 o 3 tick invece dei 2 previsti qui.
     input.sequence = ++mInputSequence; input.tick = mInputTick;
-    input.lookYaw = int16_t(mPendingLookYaw); input.lookPitch = int16_t(mPendingLookPitch);
-    mPendingLookYaw = mPendingLookPitch = 0;
     input.epoch = mEpoch;
     if (mTestMovement) {
         if(mAppliedInventory && !mTestPotionRequested && gpBase->mpInventory->GetItem("online_test_potion")) {
@@ -779,12 +787,12 @@ void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
                 input.pitch = int16_t(std::atan2(aim.y, std::sqrt(aim.x*aim.x + aim.z*aim.z)) * 1000);
                 gpBase->mpPlayer->GetCamera()->SetYaw(input.yaw / 1000.0f);
                 gpBase->mpPlayer->GetCamera()->SetPitch(input.pitch / 1000.0f);
-                mTestActionTimer += 1.0f / 30.0f;
+                mTestActionTimer += timeStep;
                 if(mTestActionTimer > 0.5f) { SendLocalAction(online::PlayerAction::Interact, true); SendLocalAction(online::PlayerAction::Interact, false); mTestActionTimer = 0; }
             }
         }
     }
-    if(IsClientReplica() && mTestMovement && TestFlag("AMNESIA_NET_TEST_PREDICTION")) mPrediction.Push(input,1.0f/30);
+    if(IsClientReplica() && mTestMovement && TestFlag("AMNESIA_NET_TEST_PREDICTION")) mPrediction.Push(input,timeStep);
     mSession.SendInput(input);
 }
 void cLuxNetwork::OnExit() {
@@ -799,9 +807,12 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
     // Host networking owns the P2 input slot, including before/after connection.
     cLuxPlayer* player = gpBase->mpPlayer2;
     if (!player || !player->GetCharacterBody()) { mPreviousButtons = 0; return true; }
-    online::PlayerInput input;
-    const bool hasInput = !WaitingForMap() && !SharedIntroView() && mSession.ReadInput(input);
+    // Un comando in coda per tick (protocollo 17); `repeated` ripete il
+    // precedente mentre il buffer contro il jitter si riempie.
+    online::PlayerInput input; bool repeated = false;
+    const bool hasInput = !WaitingForMap() && !SharedIntroView() && (LegacyInput() ? mSession.ReadInput(input) : mSession.NextInput(input, repeated));
     const bool active = hasInput && player->IsActive() && !player->IsDead();
+    ReportInputQueue(hasInput, repeated);
     if (mSmokeSeconds && hasInput && !mLoggedRemoteInput) {
         mLoggedRemoteInput = true;
         NetLog(std::string("[NET/TEST] Applying received input; player active=") + (active ? "yes" : "no"));
@@ -815,18 +826,31 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
             mObservedRemoteMovement = true;
             NetLog("[NET/TEST] Remote Player 2 moved under network input");
         }
-        // Move(0) still marks the HPL body as moving and suppresses friction.
-        // An idle axis must receive no Move call, as in the local input path.
-        if(input.forward) player->Move(eCharDir_Forward, input.forward / 1000.0f);
-        if(input.strafe) player->Move(eCharDir_Right, input.strafe / 1000.0f);
-        const bool freshLook = !mHasLookSequence || input.sequence != mAppliedLookSequence;
-        player->ApplyNetworkLookAngles(input.yaw / 1000.0f, input.pitch / 1000.0f,
-            freshLook ? input.lookYaw / 10000.0f : 0, freshLook ? input.lookPitch / 10000.0f : 0);
-        mAppliedLookSequence = input.sequence; mHasLookSequence = true;
-        // Held keys, renewed every frame as in the local path. The lean's roll
-        // and head offset reach the client's camera through the snapshot.
-        if(buttons & 32) player->SetLean(1);
-        if(buttons & 16) player->SetLean(-1);
+        auto apply = [&](const online::PlayerInput& command) {
+            // Move(0) still marks the HPL body as moving and suppresses friction.
+            // An idle axis must receive no Move call, as in the local input path.
+            if(command.forward) player->Move(eCharDir_Forward, command.forward / 1000.0f);
+            if(command.strafe) player->Move(eCharDir_Right, command.strafe / 1000.0f);
+            const bool freshLook = !mHasLookSequence || command.sequence != mAppliedLookSequence;
+            player->ApplyNetworkLookAngles(command.yaw / 1000.0f, command.pitch / 1000.0f,
+                freshLook ? command.lookYaw / 10000.0f : 0, freshLook ? command.lookPitch / 10000.0f : 0);
+            mAppliedLookSequence = command.sequence; mHasLookSequence = true;
+            // Held keys, renewed every frame as in the local path. The lean's roll
+            // and head offset reach the client's camera through the snapshot.
+            if(command.buttons & 32) player->SetLean(1);
+            if(command.buttons & 16) player->SetLean(-1);
+        };
+        // Dopo un blocco del client gli arretrati si recuperano: il comando più
+        // vecchio viene integrato ora e il successivo dal passo fisico in
+        // arrivo, così entrambi sono simulati e lo snapshot conferma il più
+        // recente (come in Penumbra).
+        online::PlayerInput extra;
+        if(!LegacyInput() && !repeated && mSession.CatchUpInput(extra)) {
+            apply(input);
+            player->GetCharacterBody()->Update(gpBase->mpEngine->GetStepSize());
+            input = extra; buttons = input.buttons; ++mInputCaughtUp;
+        }
+        apply(input);
     }
     if ((buttons ^ mPreviousButtons) & 1) player->Jump((buttons & 1) != 0);
     if ((buttons ^ mPreviousButtons) & 2) player->Crouch((buttons & 2) != 0);
@@ -873,6 +897,41 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
     if(!active && mRemoteInteractHeld) { player->DoAction(eLuxPlayerAction_Interact, false); mRemoteInteractHeld = false; }
     mPreviousButtons = buttons;
     return true;
+}
+// AMNESIA_NET_LEGACY_INPUT=1 (su entrambi i PC): invio e consumo dei comandi
+// come nella 0.5.1, solo per confronti A/B nella stessa build.
+bool cLuxNetwork::LegacyInput() {
+    static const bool legacy = [] { const char* v = std::getenv("AMNESIA_NET_LEGACY_INPUT"); return v && std::string(v) == "1"; }();
+    return legacy;
+}
+// Client: correzioni della previsione per ogni nuova posa, ogni 5 s.
+void cLuxNetwork::ReportPrediction(float error) {
+    ++mCorrectionPoses; mCorrectionSum += error; mCorrectionMax = std::max(mCorrectionMax, error);
+    if(error > 0.02f) ++mCorrectionsOver2cm;
+    if(error > 0.10f) ++mCorrectionsOver10cm;
+    const auto now = std::chrono::steady_clock::now();
+    if(!mCorrectionReportAt.time_since_epoch().count()) mCorrectionReportAt = now;
+    if(now - mCorrectionReportAt < std::chrono::seconds(5)) return;
+    NetLog(std::string("[NET/PREDICTION] input=") + (LegacyInput() ? "legacy" : "queue") + " poses=" + std::to_string(mCorrectionPoses) +
+        " over_2cm=" + std::to_string(mCorrectionsOver2cm) + " over_10cm=" + std::to_string(mCorrectionsOver10cm) +
+        " mean_cm=" + std::to_string(mCorrectionPoses ? 100.0f * mCorrectionSum / mCorrectionPoses : 0.0f) +
+        " max_cm=" + std::to_string(100.0f * mCorrectionMax) + " rtt_ms=" + std::to_string(mSession.Ping()));
+    mCorrectionPoses = mCorrectionsOver2cm = mCorrectionsOver10cm = 0; mCorrectionSum = mCorrectionMax = 0; mCorrectionReportAt = now;
+}
+// Host: statistiche della coda dei comandi del client ogni 5 s.
+void cLuxNetwork::ReportInputQueue(bool hasInput, bool repeated) {
+    if(hasInput && !repeated) ++mInputNewTicks; else if(hasInput) ++mInputReusedTicks; else ++mInputIdleTicks;
+    const auto now = std::chrono::steady_clock::now();
+    if(!mInputQueueReportAt.time_since_epoch().count()) mInputQueueReportAt = now;
+    if(now - mInputQueueReportAt < std::chrono::seconds(5)) return;
+    const auto stats = mSession.TakeInputStats();
+    if(mInputNewTicks || mInputReusedTicks)
+        NetLog("[NET/INPUT] new_ticks=" + std::to_string(mInputNewTicks) + " reused_ticks=" + std::to_string(mInputReusedTicks) +
+            " idle_ticks=" + std::to_string(mInputIdleTicks) + " starvations=" + std::to_string(stats.starvations) +
+            " dropped=" + std::to_string(stats.dropped) + " lost=" + std::to_string(stats.lost) + " caught_up=" + std::to_string(mInputCaughtUp) +
+            " queue_target=" + std::to_string(mSession.InputQueueTarget()) + " queue_depth=" + std::to_string(mSession.InputQueueDepth()) +
+            " rtt_ms=" + std::to_string(mSession.Ping()));
+    mInputNewTicks = mInputReusedTicks = mInputIdleTicks = mInputCaughtUp = 0; mInputQueueReportAt = now;
 }
 void cLuxNetwork::SendLocalAction(online::PlayerAction action, bool pressed) {
     if(!IsClientReplica() || !mReceivedSnapshot || !mEpoch || !mBaselineApplied || mClientSharedIntro) return;
@@ -983,7 +1042,7 @@ std::string cLuxNetwork::ConnectionStatus() const {
     return "Entrambi pronti. L'host puo avviare la campagna. Ping: " + std::to_string(mSession.Ping()) + " ms";
 }
 void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
-    mPropMotion.clear(); mHasLastLocalFeet = false;
+    mPropMotion.clear(); mEnemyMotion.clear(); mHasLastLocalFeet = false;
     if(MapFingerprint(state.file) != state.fingerprint) {
         NetLog("[NET/MAP] Map/script content mismatch; both PCs need identical game files");
         mSession.Stop(); return;
@@ -1139,6 +1198,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         }
         if(!mSession.Connected()) return;
         UpdatePropMotion(map,timeStep);
+        UpdateEnemyMotion(map,timeStep);
         if(!mBaselineApplied && mSession.IsWorldReady(mEpoch)) {
             // Remove map-authored audio/particles absent from the host's roster.
             cWorld* world = map->GetWorld();
@@ -1262,6 +1322,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                 if(to.z != from.z && !collisionCache.Blocked(result.x,to.z,query)) result.z = to.z;
                 return result;
             });
+            { float error = 0; if(mPrediction.TakePoseCorrection(error)) ReportPrediction(error); }
             const auto predictionUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-predictionStart).count();
             if(predictionUs >= 5000) NetLog("[NET/PERF] Replica prediction item_us=" + std::to_string(predictionUs) +
                 " collision_queries=" + std::to_string(collisionCache.Queries()) + " reused=" + std::to_string(collisionCache.Hits()));
@@ -1755,7 +1816,7 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
     if(!entity || entity->GetName() != state.name || uint8_t(entity->GetEntityType()) != state.type)
         entity = map->GetEntityByName(state.name, eLuxEntityType(state.type));
     if(state.flags & 4) {
-        mPropMotion.erase(state.id);
+        mPropMotion.erase(state.id); mEnemyMotion.erase(state.id);
         if(entity) map->DestroyEntity(entity); mReplicaIDs.erase(state.id);
         if(mSmokeSeconds && state.name == "online_test_tinderbox") NetLog("[NET/TEST] Host pickup destruction replicated to client");
         return;
@@ -1771,6 +1832,8 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
         mSession.Stop(); return;
     }
     const bool knownProp = mReplicaIDs.count(state.id) && state.type == eLuxEntityType_Prop && mBaselineApplied;
+    bool interpolatedEnemy = false;
+    const bool knownEnemyReplica = mReplicaIDs.count(state.id) && state.type == eLuxEntityType_Enemy && mBaselineApplied;
     mReplicaIDs[state.id] = entity->GetID();
     entity->SetActive((state.flags & 1) != 0); entity->SetInteractionDisabled((state.flags & 2) != 0);
     if(state.type == eLuxEntityType_Prop) {
@@ -1801,7 +1864,22 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
         }
     } else if(state.type == eLuxEntityType_Enemy && !state.bodies.empty()) {
         iLuxEnemy* enemy = static_cast<iLuxEnemy*>(entity);
-        if(enemy->GetCharacterBody()) enemy->GetCharacterBody()->SetPosition(UnpackTransform(state.bodies[0]).GetTranslation());
+        iCharacterBody* enemyBody = enemy->GetCharacterBody();
+        cMeshEntity* enemyMesh = enemy->GetMeshEntity();
+        const cVector3f to = UnpackTransform(state.bodies[0]).GetTranslation();
+        // Nemico già noto e attivo: dalla posa mostrata a quella nuova in 50 ms
+        // (l'intervallo di invio). Comparsa, baseline e salti di oltre 5 m
+        // vengono applicati subito.
+        const bool knownEnemy = knownEnemyReplica && (state.flags & 1);
+        if(knownEnemy && enemyBody && enemyMesh && (to - enemyBody->GetPosition()).Length() <= 5) {
+            EnemyMotion motion;
+            motion.fromPosition = enemyBody->GetPosition(); motion.toPosition = to;
+            motion.fromMesh = enemyMesh->GetWorldMatrix(); motion.toMesh = UnpackTransform(state.transform);
+            mEnemyMotion[state.id] = motion; interpolatedEnemy = true;
+        } else {
+            mEnemyMotion.erase(state.id);
+            if(enemyBody) enemyBody->SetPosition(to);
+        }
         if(mSmokeSeconds && state.name == "online_test_grunt") {
             cVector3f position = UnpackTransform(state.bodies[0]).GetTranslation();
             if(!mTestHasEnemyReplica) { mTestHasEnemyReplica = true; mTestReplicaEnemyInitialPosition = position; NetLog("[NET/TEST] Authoritative enemy created on client"); }
@@ -1811,7 +1889,7 @@ void cLuxNetwork::ApplyWorldEntity(cLuxMap* map, const online::EntityState& stat
     }
     cMeshEntity* mesh = entity->GetMeshEntity();
     if(mesh) {
-        if(state.type == eLuxEntityType_Enemy || state.bodies.empty()) mesh->SetMatrix(UnpackTransform(state.transform));
+        if((state.type == eLuxEntityType_Enemy && !interpolatedEnemy) || state.bodies.empty()) mesh->SetMatrix(UnpackTransform(state.transform));
         for(int i = 0; i < mesh->GetAnimationStateNum(); ++i) mesh->GetAnimationState(i)->SetActive(false);
         for(const auto& a : state.animations) if(a.index < mesh->GetAnimationStateNum()) {
             cAnimationState* animation = mesh->GetAnimationState(a.index);
@@ -1882,6 +1960,23 @@ void cLuxNetwork::UpdateVisibilityPropsTest(cLuxMap* map) {
             } else matrix.SetTranslation(matrix.GetTranslation()+cVector3f(std::sin(t)*0.5f,0,0));
             prop->GetBody(int(i))->SetMatrix(matrix);
         }
+    }
+}
+void cLuxNetwork::UpdateEnemyMotion(cLuxMap* map, float timeStep) {
+    for(auto it = mEnemyMotion.begin(); it != mEnemyMotion.end();) {
+        auto replica = mReplicaIDs.find(it->first);
+        iLuxEntity* entity = replica == mReplicaIDs.end() ? NULL : map->GetEntityByID(replica->second);
+        if(!entity || entity->GetDestroyMe() || entity->GetEntityType() != eLuxEntityType_Enemy) { it = mEnemyMotion.erase(it); continue; }
+        auto* enemy = static_cast<iLuxEnemy*>(entity); auto& motion = it->second;
+        motion.elapsed += std::max(0.0f,timeStep);
+        const float alpha = std::min(1.0f,motion.elapsed / 0.05f);
+        if(auto* body = enemy->GetCharacterBody()) body->SetPosition(motion.fromPosition + (motion.toPosition - motion.fromPosition) * alpha);
+        if(auto* mesh = enemy->GetMeshEntity()) mesh->SetMatrix(cMath::MatrixSlerp(alpha,motion.fromMesh,motion.toMesh,true));
+        if(mSmokeSeconds && !mTestEnemyInterpolated && alpha > 0 && alpha < 1 && entity->GetName() == "online_test_grunt" &&
+           (motion.toPosition - motion.fromPosition).Length() > 0.001f) {
+            mTestEnemyInterpolated = true; NetLog("[NET/TEST] Enemy rendered between authoritative poses");
+        }
+        if(alpha >= 1) it = mEnemyMotion.erase(it); else ++it;
     }
 }
 void cLuxNetwork::UpdatePropMotion(cLuxMap* map, float timeStep) {

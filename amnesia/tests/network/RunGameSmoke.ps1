@@ -274,7 +274,7 @@ try {
             if ($log.Contains('Rejected:') -or $log.Contains('closing session') -or $log.Contains('readiness timed out')) { throw "$role map synchronization failed" }
             Write-Output "PASS: $role baseline and player replication on $StartMap"
             if($Enemy) {
-                $enemyMarkers = if($role -eq 'host') { @('Spawned authoritative enemy fixture','Enemy occlusion and switching between both players verified','Host enemy moved under authoritative AI','Host enemy caused player damage') } else { @('Authoritative enemy created on client','Authoritative enemy movement applied on client','Host enemy damage applied on client') }
+                $enemyMarkers = if($role -eq 'host') { @('Spawned authoritative enemy fixture','Enemy occlusion and switching between both players verified','Host enemy moved under authoritative AI','Host enemy caused player damage') } else { @('Authoritative enemy created on client','Authoritative enemy movement applied on client','Enemy rendered between authoritative poses','Host enemy damage applied on client') }
                 foreach($marker in $enemyMarkers) { if(!$log.Contains($marker)) { throw "Missing $role enemy proof: $marker" } }
                 Write-Output "PASS: $role enemy motion and damage replication"
             }

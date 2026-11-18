@@ -4,6 +4,9 @@ param(
     [ValidateRange(1,65534)][int]$Port = 27036,
     [ValidateRange(0,500)][int]$OneWayDelayMs = 50,
     [ValidateRange(2,1000)][int]$DropEvery = 20,
+    # Ritardo casuale aggiuntivo per pacchetto (0..JitterMs): i pacchetti
+    # possono arrivare raggruppati o fuori ordine, come su una rete reale.
+    [ValidateRange(0,200)][int]$JitterMs = 0,
     [switch]$Media,
     [switch]$Prediction,
     [switch]$SnapshotBlackout,
@@ -36,13 +39,13 @@ using System.Net.Sockets;
 using System.Threading;
 public static class CoopUdpRelay {
     class Pending { public byte[] Data; public EndPoint Target; public Socket Socket; public long Due; }
-    public static string Run(int port, int delay, int dropEvery, int seconds, int ceiling) {
+    public static string Run(int port, int delay, int jitter, int dropEvery, int seconds, int ceiling) {
         using(var front = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
         using(var back = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)) {
             front.Bind(new IPEndPoint(IPAddress.Loopback, port));
             back.Bind(new IPEndPoint(IPAddress.Loopback, 0));
             EndPoint server = new IPEndPoint(IPAddress.Loopback, port+1), client = null;
-            var queue = new Queue<Pending>(); var clock = Stopwatch.StartNew();
+            var queue = new List<Pending>(); var clock = Stopwatch.StartNew(); var random = new Random(1234);
             var buffer = new byte[65536]; long received = 0, dropped = 0, forwarded = 0, bytes = 0;
             long oversized = 0; int largest = 0, largestForwarded = 0;
             while(clock.ElapsedMilliseconds < seconds*1000L) {
@@ -68,11 +71,12 @@ public static class CoopUdpRelay {
                         EndPoint target = side==0 ? server : client;
                         if(target==null) continue;
                         var data = new byte[n]; Array.Copy(buffer,data,n);
-                        queue.Enqueue(new Pending { Data=data, Target=target, Socket=side==0 ? back : front, Due=clock.ElapsedMilliseconds+delay });
+                        queue.Add(new Pending { Data=data, Target=target, Socket=side==0 ? back : front, Due=clock.ElapsedMilliseconds+delay+(jitter>0?random.Next(jitter+1):0) });
                     }
                 }
-                while(queue.Count>0 && queue.Peek().Due<=clock.ElapsedMilliseconds) {
-                    var packet=queue.Dequeue();
+                for(int index=0; index<queue.Count;) {
+                    if(queue[index].Due>clock.ElapsedMilliseconds) { ++index; continue; }
+                    var packet=queue[index]; queue.RemoveAt(index);
                     try { packet.Socket.SendTo(packet.Data,packet.Target); }
                     catch(SocketException error) { if(error.SocketErrorCode==SocketError.ConnectionReset) { dropped++; continue; } throw; }
                     forwarded++; bytes+=packet.Data.Length;
@@ -81,7 +85,7 @@ public static class CoopUdpRelay {
                 Thread.Sleep(1);
             }
             if(received==0 || dropped==0) throw new Exception("Relay did not exercise packet loss");
-            return "received="+received+" forwarded="+forwarded+" dropped="+dropped+" forwardedBytes="+bytes+" oneWayDelayMs="+delay+" oversizedDropped="+oversized+" largestDatagram="+largest+" largestForwarded="+largestForwarded+" ceiling="+ceiling;
+            return "received="+received+" forwarded="+forwarded+" dropped="+dropped+" forwardedBytes="+bytes+" oneWayDelayMs="+delay+" jitterMs="+jitter+" oversizedDropped="+oversized+" largestDatagram="+largest+" largestForwarded="+largestForwarded+" ceiling="+ceiling;
         }
     }
 }
@@ -90,13 +94,13 @@ $relayScript = Join-Path $run 'relay.ps1'
 $sourceFile = Join-Path $run 'relay.cs'
 $relaySource | Set-Content -LiteralPath $sourceFile -Encoding utf8
 @'
-param([string]$Source,[int]$Port,[int]$Delay,[int]$DropEvery,[int]$Ceiling,[int]$Duration=75)
+param([string]$Source,[int]$Port,[int]$Delay,[int]$Jitter=0,[int]$DropEvery,[int]$Ceiling,[int]$Duration=75)
 $ErrorActionPreference='Stop'
 Add-Type -Path $Source
-[CoopUdpRelay]::Run($Port,$Delay,$DropEvery,$Duration,$Ceiling)
+[CoopUdpRelay]::Run($Port,$Delay,$Jitter,$DropEvery,$Duration,$Ceiling)
 '@ | Set-Content -LiteralPath $relayScript -Encoding utf8
 $shellPath = (Get-Process -Id $PID).Path
-$relay = Start-Process -FilePath $shellPath -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-File',$relayScript,'-Source',$sourceFile,'-Port',$Port,'-Delay',$OneWayDelayMs,'-DropEvery',$DropEvery,'-Ceiling',$MaxDatagramBytes,'-Duration',$(if($Effects){85}else{75})) -RedirectStandardOutput "$run/relay.log" -RedirectStandardError "$run/relay.err"
+$relay = Start-Process -FilePath $shellPath -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-File',$relayScript,'-Source',$sourceFile,'-Port',$Port,'-Delay',$OneWayDelayMs,'-Jitter',$JitterMs,'-DropEvery',$DropEvery,'-Ceiling',$MaxDatagramBytes,'-Duration',$(if($Effects){85}else{75})) -RedirectStandardOutput "$run/relay.log" -RedirectStandardError "$run/relay.err"
 # Windows PowerShell reports a null ExitCode unless the handle was opened early.
 $null = $relay.Handle
 try {

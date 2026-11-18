@@ -5,6 +5,11 @@
 #include "../../amnesia/src/game/network/CrashDiagnostics.h"
 #include <chrono>
 #include <iostream>
+#ifdef _WIN32
+#include <windows.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
+#endif
 #include <thread>
 #include <cstdlib>
 #include <enet/enet.h>
@@ -670,7 +675,79 @@ static void PropMotionTransportTest() {
     Check(!client.ReadEntity(read) && !host.SendEntityMotion(box), "prop motion discarded across map transition");
     std::cout << "PASS: live prop coalescing, reliable backpressure bypass, stale pose rejection, removal, articulated fragments and sequence wrap\n";
 }
+// Protocollo 17: lotto ridondante degli ultimi comandi (con il tick).
+static void InputBatchCodecTest() {
+    PlayerInput a, b; a.epoch = b.epoch = 9; a.sequence = 41; b.sequence = 42; a.tick = 700; b.tick = 701;
+    a.forward = 1000; a.strafe = -1000; a.yaw = -3142; a.pitch = 1571; a.buttons = 37; a.lookYaw = -31420; a.lookPitch = 7;
+    b.forward = -250; b.lookYaw = 12;
+    auto bytes = EncodeInputBatch({a, b}); std::vector<PlayerInput> read;
+    Check(bytes.size() == 10 + 2*21 && DecodeInputBatch(bytes.data(), bytes.size(), read) && read.size() == 2 &&
+        read[0].sequence == 41 && read[0].tick == 700 && read[0].strafe == -1000 && read[0].yaw == -3142 && read[0].buttons == 37 && read[0].lookYaw == -31420 &&
+        read[1].sequence == 42 && read[1].tick == 701 && read[1].forward == -250 && read[1].lookYaw == 12 && read[1].epoch == 9, "input batch roundtrip");
+    for(size_t n = 0; n < bytes.size(); ++n) Check(!DecodeInputBatch(bytes.data(), n, read), "truncated input batch");
+    bytes.push_back(0); Check(!DecodeInputBatch(bytes.data(), bytes.size(), read), "input batch trailing byte"); bytes.pop_back();
+    bytes[9] = 0; Check(!DecodeInputBatch(bytes.data(), bytes.size(), read), "empty input batch"); bytes[9] = 2;
+    bytes[10 + 16] = 64; Check(!DecodeInputBatch(bytes.data(), bytes.size(), read), "input batch buttons bounded");
+    Check(EncodeInputBatch({}).empty() && EncodeInputBatch(std::vector<PlayerInput>(MaxInputBatch + 1, a)).empty(), "input batch size bounded");
+    b.epoch = 10; Check(EncodeInputBatch({a, b}).empty(), "input batch never mixes map epochs"); b.epoch = 9;
+    b.forward = 1001; Check(EncodeInputBatch({a, b}).empty(), "input batch axes bounded"); b.forward = -250;
+    StressCodec(std::vector<PlayerInput>{a, b}, EncodeInputBatch, DecodeInputBatch);
+    std::cout << "PASS: bounded redundant input batch codec\n";
+}
+static void InputQueueTest() {
+    InputQueue queue; PlayerInput command, out; bool repeated = false;
+    Check(!queue.Next(out, repeated), "no command before the first arrival");
+    for(uint32_t s = 1; s <= 3; ++s) { command.sequence = s; command.lookYaw = int16_t(10*s); Check(queue.Offer(command), "queue accepts newer command"); }
+    command.sequence = 2; Check(!queue.Offer(command), "queue ignores redundant copies");
+    for(uint32_t s = 1; s <= 3; ++s) Check(queue.Next(out, repeated) && !repeated && out.sequence == s && out.lookYaw == int16_t(10*s), "one command per tick, in order");
+    Check(queue.Next(out, repeated) && repeated && out.sequence == 3 && out.lookYaw == 0, "dry queue repeats without look delta");
+    Check(queue.Target() == 2, "starvation raises the jitter buffer");
+    command.sequence = 4; command.lookYaw = 0; queue.Offer(command);
+    Check(queue.Next(out, repeated) && repeated, "refilling waits for the target depth");
+    command.sequence = 5; queue.Offer(command);
+    Check(queue.Next(out, repeated) && !repeated && out.sequence == 4, "buffered commands resume in order");
+    command.sequence = 8; queue.Offer(command);
+    auto stats = queue.TakeStats();
+    Check(stats.lost == 2 && stats.starvations == 1 && stats.repeated == 2 && stats.consumed == 4, "queue statistics");
+    for(uint32_t s = 9; s <= 20; ++s) { command.sequence = s; command.lookYaw = 1; command.buttons = s == 10 ? 1 : 0; queue.Offer(command); }
+    Check(queue.Next(out, repeated) && !repeated && out.sequence == 5, "a moderate backlog is kept, not dropped");
+    Check(queue.CatchUp(out) && out.sequence == 8 && queue.TakeStats().caughtUp == 1, "backlog caught up with one extra command per tick");
+    command.buttons = 0;
+    for(uint32_t s = 21; s <= 60; ++s) { command.sequence = s; queue.Offer(command); }
+    Check(queue.Next(out, repeated) && !repeated && out.sequence == 29 && out.lookYaw == 21 && (out.buttons & 1), "a backlog beyond half a second is trimmed, merging look deltas and jumps");
+    Check(queue.TakeStats().dropped == 20 && queue.Depth() == 31, "trim keeps target plus the maximum backlog");
+    while(queue.CatchUp(out)) {}
+    Check(queue.Depth() == 4, "catch-up stops at target plus two");
+    for(unsigned i = 0; i < InputQueue::QuietTicksToShrink + 4; ++i) { command.sequence = 61 + i; queue.Offer(command); queue.Next(out, repeated); }
+    Check(queue.Target() == 1, "quiet ticks shrink the jitter buffer");
+    command.sequence = 500; Check(!queue.Offer(command), "past sequence rejected");
+    queue.Clear(); Check(!queue.Next(out, repeated) && queue.Target() == 1, "clear resets queue");
+    std::cout << "PASS: one command per tick input queue with adaptive jitter buffer\n";
+}
+static void BunchedInputTransportTest() {
+    Session host(Log), client(Log);
+    Check(host.StartHost(27060) && client.StartClient("127.0.0.1", 27060), "bunched input startup");
+    auto pump = [&](int ms) { for(int i = 0; i < ms; ++i) { host.Poll(); client.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    pump(100); Check(host.Connected() && client.Connected(), "bunched input handshake");
+    PlayerInput input; input.forward = 1000;
+    for(uint32_t s = 1; s <= 3; ++s) { input.sequence = s; input.lookYaw = int16_t(100*s); Check(client.SendInput(input), "send bunched command"); }
+    pump(20);
+    PlayerInput next; bool repeated = false;
+    for(uint32_t s = 1; s <= 3; ++s)
+        Check(host.NextInput(next, repeated) && !repeated && next.sequence == s && next.lookYaw == int16_t(100*s), "commands sent together are each simulated once, in order");
+    Check(host.NextInput(next, repeated) && repeated && next.sequence == 3, "host repeats the last command while waiting");
+    Check(host.ReadInput(next) && next.sequence == 3, "newest command still available for diagnostics");
+    pump(300); Check(!host.NextInput(next, repeated), "silent input still expires");
+    client.Stop(); host.Stop();
+    std::cout << "PASS: redundant input batches over UDP\n";
+}
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // ENet chiede il timer a 1 ms a ogni enet_initialize e lo rilascia a ogni
+    // enet_deinitialize: dopo molti avvii e arresti Windows può lasciare Sleep a
+    // 15,6 ms e i comandi scadono (250 ms) nelle prove con pause brevi.
+    timeBeginPeriod(1);
+#endif
     if(argc==2 && std::string(argv[1])=="--prediction-test") {RecoveryTests(); return 0;}
     if(argc==3 && std::string(argv[1])=="--crash-probe") {
 #ifdef _WIN32
@@ -682,6 +759,9 @@ int main(int argc, char** argv) {
         return 2;
     }
     if(argc == 1) PropMotionTransportTest();
+    if(argc == 1) BunchedInputTransportTest();
+    InputBatchCodecTest();
+    InputQueueTest();
     ScriptPreloadTest();
     MediaCodecTest();
     PlayerInput input; input.sequence = 0x12345678; input.tick = 42;
@@ -818,9 +898,9 @@ int main(int argc, char** argv) {
     Session session(Log);
     if(std::string(argv[1]) == "client-resume") Check(session.SetLocalIdentity(1), "restore persisted client identity");
     Check(host ? session.StartHost(port) : session.StartClient("127.0.0.1", port), "start transport");
-    bool connected = false, observed = false;
+    bool connected = false, observed = false, worldApplied = false;
     auto start = std::chrono::steady_clock::now();
-    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(8)) {
+    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(10)) {
         session.Poll();
         if (session.Connected()) {
             connected = true;
@@ -828,8 +908,12 @@ int main(int argc, char** argv) {
                 if (movementProbe) {
                     MapState activeMap;
                     if(session.ReadMap(activeMap) && input.epoch != activeMap.epoch) {
-                        input.epoch = activeMap.epoch; session.SendMapReady(activeMap.epoch);
+                        input.epoch = activeMap.epoch; session.SendMapReady(activeMap.epoch); worldApplied = false;
                     }
+                    // Come un client vero: l'host simula l'input solo dopo la
+                    // conferma che il mondo della mappa è stato applicato.
+                    if(input.epoch && !worldApplied && session.IsWorldReady(input.epoch)) worldApplied = session.SendWorldApplied(input.epoch);
+                    { EntityState e; while(session.ReadEntity(e)) {} MediaState m; while(session.ReadMedia(m)) {} Presentation pr; while(session.ReadPresentation(pr)) {} Snapshot l; while(session.ReadLife(l)) {} }
                     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
                     input.forward = 1000; input.strafe = 0; input.buttons = 0; input.pitch = 0;
                     input.lookYaw = input.lookPitch = 0;
@@ -841,11 +925,17 @@ int main(int argc, char** argv) {
                 Check(decoded.forward == -1000 && decoded.buttons == 63 && decoded.lookPitch == 31420, "received input"); observed = true;
             }
         }
-        if (!host && observed && std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) break;
+        if (!host && observed && std::chrono::steady_clock::now() - start > std::chrono::seconds(movementProbe ? 5 : 2)) break;
         if (host && observed && !session.Connected()) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     Check(connected && observed, "two-process handshake and input");
     if (host) Check(!session.ReadInput(decoded), "disconnect clears held input");
+    // Il client di movimento esce come un giocatore che chiude la sessione:
+    // l'host toglie subito il giocatore 2 invece di aspettarne il rientro.
+    if (!host && movementProbe) {
+        session.CloseVoluntarily();
+        for (int i = 0; i < 100 && session.AttemptActive(); ++i) { session.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+    }
     std::cout << "PASS: handshake, input and disconnect\n";
 }

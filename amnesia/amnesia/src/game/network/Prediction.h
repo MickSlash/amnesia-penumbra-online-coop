@@ -63,6 +63,8 @@ public:
         while(commands_.size() > 32) commands_.pop_front();
     }
     size_t Pending() const { return commands_.size(); }
+    // Correzione dell'ultima posa nuova (una volta per posa), in metri.
+    bool TakePoseCorrection(float& error) { if(!hasPoseCorrection_) return false; error = poseCorrection_; hasPoseCorrection_ = false; return true; }
     float CorrectionDistance() const { return std::sqrt(correction_.x*correction_.x + correction_.z*correction_.z); }
     template<class Collision>
     PredictedPosition Reconcile(const PlayerState& state, uint32_t acknowledged, Collision collide) {
@@ -100,6 +102,8 @@ public:
         PredictedPosition raw = Reconcile(state,acknowledged,collide);
         if(newPose) {
             const float dx = before.x - raw.x, dz = before.z - raw.z;
+            // Diagnostica: quanto la nuova posa autorevole sposta la previsione.
+            poseCorrection_ = std::sqrt(dx*dx + dz*dz); hasPoseCorrection_ = true;
             if(dx*dx + dz*dz > 0.0625f || std::abs(int64_t(state.y) - previousState_.y) > 250) correction_ = {};
             else { correction_.x += dx; correction_.z += dz; }
         }
@@ -117,7 +121,8 @@ public:
 private:
     struct Command { PlayerInput input; float dt; };
     std::deque<Command> commands_;
-    bool hasPrevious_ = false;
+    bool hasPrevious_ = false, hasPoseCorrection_ = false;
+    float poseCorrection_ = 0;
     PlayerState previousState_;
     uint32_t previousAcknowledged_ = 0, previousSequence_ = 0;
     PredictedPosition correction_;
