@@ -98,3 +98,20 @@ In ordine di valore e di rischio. Ogni passo: compilazione, test di protocollo, 
 6. **Chat vocale di prossimità**, con la dipendenza Opus e un'opzione di build come in Q.
 7. **Gameplay previsto da noi e assente in entrambi:** inventari separati, oggetti unici tracciati con consegna, consumabili per giocatore, diario per giocatore, spettatore. Prova "HasItem" del gruppo ispirata a GameScripts.cpp:815.
 8. **Opzioni configurabili:** giocatori solidi, fuoco amico, bottino condiviso.
+
+## Registro dell'integrazione
+
+### 1. Corpi del client guidati a velocità (BodySync) — provato, non adottato come predefinito
+
+- **Implementazione:** `DriveBody`/`PinBody` in `game/CoopNetwork.cpp`, adattati da `BodySync.cpp:480-931` (termine proporzionale verso la posa riprodotta, velocità stimata dal bersaglio, limiti diversi per i corpi con giunti, scatto oltre 1,5 m o se incastrato, blocco a riposo). Attivabile con `PENUMBRA_COOP_BODY_DRIVE=1`; il bersaglio è la nostra posa riprodotta sulla linea temporale dell'host.
+- **Misure A/B** (stesso eseguibile, una prova per caso):
+
+| Misura | Guida a velocità | Pose riprodotte (predefinito) |
+| --- | --- | --- |
+| Girarsi tenendo la bottiglia, locale / RTT 120 ms | 33 / 33 ms | 33 / 33 ms |
+| Anta dell'armadietto, locale / RTT 120 ms | 166 / 383 ms | 150 / 366 ms |
+| Camminata hammer locale: pose > 2 cm (finestra di ritorno) | 187 | 190 |
+| Camminata hammer RTT 120 ms + jitter 40 ms + 5 % perdita: pose > 10 cm | 16 | 14 |
+| Costo `UpdateClient` (hammer locale) | 1,3–1,6 ms | 1,1–1,5 ms |
+
+- **Decisione:** nessun miglioramento misurabile nei casi provati, quindi resta disattivata. Da rivalutare quando ci sarà una prova di spinta degli oggetti camminando, l'unico caso dove la fisica locale del client dovrebbe aiutare.

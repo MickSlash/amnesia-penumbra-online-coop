@@ -64,6 +64,62 @@ struct NativeStepper {
     }
     void End() { body->SetPredicting(false); body->SetPredictionState(saved); }
 };
+// Guida a velocità dei corpi replicati sul client, adattata da QuasiInteractive
+// (penumbra-overture-coop, Overture/multiplayer/BodySync.cpp, GPLv3).
+// Invece di posizionare ogni tick un corpo statico (SetMatrix non controlla le
+// collisioni), il corpo resta dinamico e riceve la velocità che chiude
+// l'errore verso la posa riprodotta dell'host: Newton gestisce i contatti,
+// quindi niente compenetrazioni, e il personaggio del client può spingerlo
+// subito come sull'host. Scatto solo per errori grandi o corpo incastrato;
+// a riposo il corpo viene bloccato esattamente nella posa dell'host.
+bool BodyDriveEnabled() { const char* v=getenv("PENUMBRA_COOP_BODY_DRIVE"); return v && std::string(v)=="1"; }
+float VectorLength(const cVector3f& v) { return std::sqrt(v.x*v.x+v.y*v.y+v.z*v.z); }
+cVector3f ClampLength(const cVector3f& v,float limit) { const float l=VectorLength(v); return l>limit && l>0 ? v*(limit/l) : v; }
+// Asse e angolo della rotazione nel mondo che porta l'orientamento attuale su quello obiettivo.
+void RotationError(const cMatrixf& target,const cMatrixf& current,cVector3f& axis,float& angle) {
+    float e[3][3];
+    for(int i=0;i<3;++i) for(int j=0;j<3;++j) e[i][j]=target.m[i][0]*current.m[j][0]+target.m[i][1]*current.m[j][1]+target.m[i][2]*current.m[j][2];
+    const cVector3f skew(e[2][1]-e[1][2],e[0][2]-e[2][0],e[1][0]-e[0][1]);
+    const float sine=VectorLength(skew);
+    const float cosine=std::clamp(0.5f*(e[0][0]+e[1][1]+e[2][2]-1.0f),-1.0f,1.0f);
+    angle=std::atan2(0.5f*sine,cosine); axis=sine>1e-6f?skew/sine:cVector3f(0,0,0);
+}
+void PinBody(iPhysicsBody* body,const cMatrixf& target,cCoopNetwork::DriveState& state) {
+    body->SetMatrix(target); body->SetLinearVelocity(cVector3f(0,0,0)); body->SetAngularVelocity(cVector3f(0,0,0));
+    body->SetEnabled(false); state.pinned=true; state.stuck=state.disturbed=0;
+}
+// Porta il corpo verso `target`; `resting` = l'host non lo muove più.
+void DriveBody(iPhysicsBody* body,const cMatrixf& target,bool resting,cCoopNetwork::DriveState& state,float dt,const cVector3f& gravity) {
+    const bool jointed=body->GetJointNum()>0;
+    // Velocità dell'obiettivo stimata fra due tick (feed-forward).
+    cVector3f feed(0,0,0), feedOmega(0,0,0);
+    if(state.hasTarget && dt>0 && !resting) {
+        feed=ClampLength((target.GetTranslation()-state.lastTarget.GetTranslation())/dt,20.0f);
+        cVector3f axis; float angle; RotationError(target,state.lastTarget,axis,angle); feedOmega=ClampLength(axis*(angle/dt),25.0f);
+    }
+    state.lastTarget=target; state.hasTarget=true;
+    if(state.pinned) {
+        if(!resting) state.pinned=false;
+        else if(!body->GetEnabled()) { state.disturbed=0; return; }
+        else { state.disturbed+=dt; if(state.disturbed<0.5f) return; state.pinned=false; }
+    }
+    const cMatrixf current=body->GetWorldMatrix(); const cVector3f centre=body->GetMassCentre();
+    const cVector3f error=cMath::MatrixMul(target,centre)-cMath::MatrixMul(current,centre);
+    const float distance=VectorLength(error); cVector3f axis; float angle; RotationError(target,current,axis,angle);
+    bool snap=distance>1.5f || angle>2.6f;
+    if(distance>0.35f || angle>1.0f) state.stuck+=dt; else state.stuck=0;
+    if(state.stuck>(jointed?1.5f:0.5f)) snap=true;
+    if(resting && (snap || (distance<0.02f && angle<0.035f))) { PinBody(body,target,state); return; }
+    if(snap) { body->SetMatrix(target); body->SetLinearVelocity(cVector3f(0,0,0)); body->SetAngularVelocity(cVector3f(0,0,0)); body->SetEnabled(true); state.stuck=0; return; }
+    cVector3f velocity=ClampLength(error*(1.0f/0.1f)+feed,jointed?4.0f:10.0f);
+    const cVector3f omega=ClampLength(axis*(angle/0.1f)+feedOmega,jointed?6.0f:20.0f);
+    if(!body->GetEnabled()) {
+        if(distance<0.005f && angle<0.009f && VectorLength(feed)<0.05f && VectorLength(feedOmega)<0.05f) return;
+        body->SetEnabled(true);
+    }
+    if(body->GetGravity()) velocity-=gravity;
+    body->SetLinearVelocity(velocity); body->SetAngularVelocity(omega);
+}
 bool KinematicPrediction() { const char* mode=getenv("PENUMBRA_COOP_PREDICTION"); return mode && std::string(mode)=="kinematic"; }
 struct PlayerScope {
     cInit* init; cPlayer* player; cPlayerHands* hands; bool simple;
@@ -686,7 +742,16 @@ void cCoopNetwork::UpdateClient(float dt) {
         const bool latestOnly=getenv("PENUMBRA_COOP_INTERPOLATION") && std::string(getenv("PENUMBRA_COOP_INTERPOLATION"))=="legacy";
         if(!pair.second.history.Sample(latestOnly?double(newestHostTick):playback.Tick(),from,to,alpha)) continue;
         if(to->meshMotion && from->meshMotion && e->GetMeshEntity()) e->GetMeshEntity()->SetMatrix(cMath::MatrixSlerp(alpha,from->mesh,to->mesh,true));
-        for(size_t n=0;n<to->bodies.size() && n<from->bodies.size() && n<size_t(e->GetBodyNum());++n) e->GetBody(int(n))->SetMatrix(cMath::MatrixSlerp(alpha,from->bodies[n],to->bodies[n],true));
+        const bool drive=BodyDriveEnabled() && e->GetType()!=eGameEntityType_Enemy;
+        // L'host non sposta il corpo da un secondo: è fermo.
+        const bool resting=double(pair.second.history.NewestTick())+60<playback.Tick();
+        auto& drives=pair.second.drive; if(drives.size()<to->bodies.size()) drives.resize(to->bodies.size());
+        const cVector3f gravity=init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld()->GetGravity()*dt;
+        for(size_t n=0;n<to->bodies.size() && n<from->bodies.size() && n<size_t(e->GetBodyNum());++n) {
+            const auto target=cMath::MatrixSlerp(alpha,from->bodies[n],to->bodies[n],true);
+            auto* body=e->GetBody(int(n));
+            if(drive && !body->IsCharacter()) DriveBody(body,target,resting && alpha>=1,drives[n],dt,gravity); else body->SetMatrix(target);
+        }
     }
     ApplyHeldPrediction();
     online::Presentation event;
@@ -817,10 +882,17 @@ void cCoopNetwork::ApplyHeldPrediction() {
                     auto* own=init->mpPlayer->GetCamera();
                     const auto clientCamera=camera(own->GetPosition(),own->GetYaw(),own->GetPitch());
                     const auto relative=cMath::MatrixMul(cMath::MatrixInverse(hostCamera),newest.bodies[self.heldBody]);
-                    heldBody->SetMatrix(cMath::MatrixMul(clientCamera,relative));
+                    const auto target=cMath::MatrixMul(clientCamera,relative);
+                    auto& drives=history->second.drive; if(drives.size()<=self.heldBody) drives.resize(self.heldBody+1);
+                    if(BodyDriveEnabled()) DriveBody(heldBody,target,false,drives[self.heldBody],1.0f/60,init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld()->GetGravity()/60);
+                    else heldBody->SetMatrix(target);
                 }
             } else {
-                for(size_t n=0;n<newest.bodies.size() && n<size_t(entity->GetBodyNum());++n) entity->GetBody(int(n))->SetMatrix(newest.bodies[n]);
+                auto& drives=history->second.drive; if(drives.size()<newest.bodies.size()) drives.resize(newest.bodies.size());
+                for(size_t n=0;n<newest.bodies.size() && n<size_t(entity->GetBodyNum());++n) {
+                    if(BodyDriveEnabled() && !entity->GetBody(int(n))->IsCharacter()) DriveBody(entity->GetBody(int(n)),newest.bodies[n],false,drives[n],1.0f/60,init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld()->GetGravity()/60);
+                    else entity->GetBody(int(n))->SetMatrix(newest.bodies[n]);
+                }
             }
         }
     }
@@ -979,6 +1051,16 @@ void cCoopNetwork::ApplyEntity(const online::EntityState& s) {
     if(s.liveMotion && s.health>0 && entity->GetType()==eGameEntityType_Enemy && entity->GetMeshEntity()) { pose.meshMotion=true; pose.mesh=Unpack(s.transform); }
     for(size_t n=0;n<s.bodies.size() && n<size_t(entity->GetBodyNum());++n) {
         auto* body=entity->GetBody(int(n)); pose.bodies.push_back(Unpack(s.bodies[n]));
+        if(!body->IsCharacter() && BodyDriveEnabled() && entity->GetType()!=eGameEntityType_Enemy) {
+            // Con la guida a velocità il corpo resta dinamico (massa e gravità
+            // originali); una posa affidabile (baseline, cambio di stato) lo
+            // blocca subito nella posa dell'host.
+            if(!s.liveMotion) {
+                auto& drives=motion[s.name].drive; if(drives.size()<=n) drives.resize(n+1);
+                PinBody(body,Unpack(s.bodies[n]),drives[n]);
+            }
+            continue;
+        }
         if(!body->IsCharacter()) {
             // On the host a character pushes bodies up to its push mass out of
             // the way (iCharacterBody push callback); the replica is static, so

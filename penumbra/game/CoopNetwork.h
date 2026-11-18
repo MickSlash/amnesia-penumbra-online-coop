@@ -17,6 +17,8 @@ class cSavedGame;
 
 class cCoopNetwork : public hpl::iUpdateable, public hpl::iSoundEntityGlobalCallback {
 public:
+    // Stato della guida a velocità di un corpo replicato (vedi DriveBody in CoopNetwork.cpp).
+    struct DriveState { float stuck = 0, disturbed = 0; bool pinned = false, hasTarget = false; hpl::cMatrixf lastTarget; };
     explicit cCoopNetwork(cInit* init);
     ~cCoopNetwork();
     bool IsClient() const { return session.GetRole() == online::Role::Client; }
@@ -116,7 +118,7 @@ private:
     // Replicated prop and enemy poses on the host timeline, played back by
     // `playback` (protocol 5, Interpolation.h).
     struct Pose { std::vector<hpl::cMatrixf> bodies; hpl::cMatrixf mesh; bool meshMotion = false; };
-    struct Motion { online::PoseHistory<Pose,16> history; };
+    struct Motion { online::PoseHistory<Pose,16> history; std::vector<DriveState> drive; };
     std::map<std::string, Motion> motion;
     online::PoseHistory<online::PlayerState,32> partnerHistory;
     // The client's own authoritative pose on the host timeline, to place the
