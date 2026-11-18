@@ -58,36 +58,30 @@ ENet su UDP (porta 27120), 4 canali (`game/network/NetSession.*`). Ogni messaggi
 
 Trasporto, coda di input, previsione, interpolazione e diagnostica non dipendono dal gioco. Gli agganci (`Capture`, `ApplyEntity`, `UpdateHost/UpdateClient`) sono in `CoopNetwork.cpp` e andranno adattati per ogni titolo.
 
-## Progetto: da 2 a 4 giocatori (non ancora implementato)
+## Da 2 a 4 giocatori
 
-Il modello resta autoritativo: per ogni ospite l'host simula un `cPlayer` remoto, come fa oggi per il partner. Il modello di QuasiInteractive (movimento deciso dal client, vedi `QUASI_INTEGRATION.md`) **non** viene adottato.
+Il modello resta autoritativo: per ogni ospite l'host simula un `cPlayer` remoto. Il modello di QuasiInteractive (movimento deciso dal client, vedi `QUASI_INTEGRATION.md`) **non** viene adottato.
 
-| Livello | Oggi | Con 4 giocatori |
+Il numero di giocatori, host compreso, è scelto sull'host con `PENUMBRA_COOP_PLAYERS` (2..4, predefinito 2).
+
+| Livello | Implementato (protocollo 7) | Ancora da fare |
 | --- | --- | --- |
-| `NetSession` | Un solo `peer_`; coda di input, identità, Pronto, `MapReady`/`WorldApplied` per un solo ospite | Stato per peer (`PeerState`): coda di input, cronologia, identità, Pronto, epoch confermati. Il client continua ad avere un solo peer (l'host). `Welcome` assegna uno **slot** 1..3 (host = 0), riusabile dopo un'uscita (come gli ID di Q, NM:6261). |
-| Snapshot | `players[2]` fisso, 141 byte | Numero di giocatori più gli stati con lo slot; `acknowledgedInput` per slot. Ogni ospite legge il proprio slot e mostra gli altri come partner. |
-| Host (`CoopNetwork`) | `remotePlayer`/`remoteHands` | Un array di slot con `cPlayer`, `cPlayerHands`, coda di input e stato di vita. `UpdateHost` cicla sugli slot. I giocatori restano tutti nel gruppo di collisione 1. |
-| Client | Un partner (`partnerHistory`, avatar) | Una cronologia e un avatar per ogni altro slot; previsione solo per il proprio. |
-| Nemici | `EntityState::target` 1 = host, 2 = client | Slot del bersaglio (0-3); `GetNetworkTarget` restituisce il `cPlayer` di qualsiasi slot. |
-| Vita e salvataggi | Partner salvato con `SavePartner` | Stato per slot nel checkpoint (salute, batteria, inventario personale quando ci sarà); respawn accanto a un giocatore vivo qualsiasi. |
-| Ingresso e uscita | Riconnessione dello stesso partner | Ingresso in corsa con baseline per il nuovo peer; uscita che libera lo slot e lascia gli oggetti unici nel mondo (con l'inventario per giocatore). |
+| Protocollo | `Welcome` assegna l'ID (host 1, ospiti 2..4). Gli snapshot hanno da 2 a 4 giocatori, ognuno con il suo ID: `players[0]` è l'host, `players[1]` il destinatario (a cui si riferisce `acknowledgedInput`), poi gli altri ospiti in partita. Il client rifiuta snapshot e transizioni di vita indirizzati a un altro ID. | — |
+| Trasporto host | `HostTransport` possiede l'`ENetHost` e smista gli eventi a una `Session` per ospite. Il peer resta in attesa fino a `Hello`, poi va alla `Session` che aspetta la sua identità (ripresa), altrimenti a una libera, altrimenti a quella di un ospite uscito volontariamente. Se non c'è posto viene rifiutato. `Session` funziona sia con il proprio socket (client, test) sia collegata al trasporto (`AttachHost`, `HandleEvent`). | — |
+| Host (`CoopNetwork`) | Lo stato per ospite è in `Guest`: sessione, `cPlayer`, mani, epoch della mappa, stato pubblicato, inventario, diario, media, code di eventi, snapshot, diagnostica, vita e teletrasporti. `UpdateHost` cattura le pose di tutti a inizio tick, poi lega a turno ogni ospite connesso (`Bind`) ed esegue `UpdateGuest`, il codice per singolo ospite già collaudato. Ogni ospite ha il suo epoch: una riconnessione non fa ricaricare la mappa agli altri. Gli ospiti sono piazzati in punti liberi attorno all'host. | — |
+| Client | Una cronologia per ogni altro ospite (`otherHistory`), riprodotta sulla linea temporale dell'host. Una silhouette per ID (`avatars`), rimossa quando quel giocatore lascia lo snapshot. Previsione solo per sé. | — |
+| Vita | Rinascita accanto a un compagno vivo qualsiasi; checkpoint quando tutti sono a terra da 5 s. | — |
+| Nemici | Bersaglio scelto ancora fra host e primo ospite; `EntityState::target` porta già l'ID. | Passo 5: bersagli, danni, `PlayerForBody` e attacchi ad area per tutti. |
+| Salvataggi | Checkpoint del solo primo ospite (`SavePartner`/`LoadPartner`). | Passo 6: stato per ID nel checkpoint. |
+| Agganci del motore | Fuori dal ciclo resta legato il primo ospite: gli agganci non ancora estesi (nemici, salvataggi) vedono lui. `IsRemoteContext`, `RemoteSimpleSwing`, `RemoteExamineDown`, `PlayerForBody` e `DamagePlayer` valgono per ogni ospite. | Passo 5. |
+| Slot vuoti | Il `cPlayer` di uno slot mai connesso è inattivo ma il suo corpo resta nel mondo fisico. | Passo 5: toglierlo dal mondo fisico. |
 
-Scelta di implementazione per il trasporto (decisa il 18/11): invece di riscrivere `Session` in versione multi-peer, si separa il trasporto.
+Passi:
 
-- Un oggetto `Transport` lato host possiede l'`ENetHost` e smista gli eventi:
-  - CONNECT: assegna uno slot libero e associa il peer a una `Session` dedicata;
-  - RECEIVE: passa i dati alla `Session` di quel peer;
-  - DISCONNECT: libera lo slot.
-- Ogni ospite ha la sua `Session` con il codice per singola connessione già testato (coda di input, epoch, checkpoint, identità).
-- I messaggi verso tutti (mappa, entità, media, inventario, diario, checkpoint) diventano un ciclo sulle `Session` attive.
-- Il client resta invariato: un solo peer, cioè l'host.
-
-Ordine previsto, ogni passo verificato con 2 giocatori prima di proseguire:
-
-1. Slot ID nel protocollo, ancora con 1 ospite.
-2. `NetSession` multi-peer, con test di protocollo per 3 peer.
-3. Array di slot sull'host.
-4. Avatar e cronologie per slot sul client.
-5. Nemici e vita per slot.
-6. Checkpoint per slot.
-7. Prove native con 3 e 4 istanze (`RunNativeTest.ps1` va esteso a N client).
+1. ✅ ID dei giocatori nel protocollo.
+2. ✅ Trasporto multi-ospite (`HostTransport`), con test di protocollo per 3 ospiti.
+3. ✅ Stato per ospite sull'host.
+4. ✅ Silhouette e cronologie per gli altri ospiti sul client.
+5. Nemici e vita per ogni giocatore.
+6. Checkpoint per ogni giocatore.
+7. ✅ Prove native con 3 e 4 istanze: `RunNativeTest.ps1 -Mode party -Players 3|4`.

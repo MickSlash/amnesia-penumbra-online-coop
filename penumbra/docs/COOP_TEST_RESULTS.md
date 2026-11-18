@@ -421,3 +421,66 @@ Verifica finale sulla stessa build:
 - prova `maps` con RTT 80 ms, jitter 20 ms e 2 % di perdita: 25/25 su host e client, PASS (su una mappa la baseline ha atteso qualche secondo, ma si è completata);
 - test di protocollo: PASS;
 - prove native: hammer locale e con jitter, full, intro, campagna e campagna con ritardo PASS. Hammer con frame lenti sul client: FAIL in questa esecuzione, per un singolo passo del client di 0,30 m oltre quello dell'host (nelle due esecuzioni precedenti 0,046 m). Intermittente, registrato in `COOP_KNOWN_ISSUES.md`.
+
+## 12. Aggiornamento 18 novembre — da 2 a 4 giocatori, passi 1-4 (protocollo 7)
+
+### Modifiche
+
+- **Protocollo 7:**
+  - `Welcome` assegna l'ID del giocatore (host 1, ospiti 2..4);
+  - gli snapshot hanno da 2 a 4 giocatori, ognuno con il suo ID (`players[0]` host, `players[1]` destinatario);
+  - il client rifiuta snapshot e transizioni di vita indirizzati a un altro ID.
+- **`HostTransport`:**
+  - un socket sull'host, una `Session` per ospite;
+  - assegnazione dello slot dopo `Hello`, in base all'identità;
+  - `Session::Poll` diviso in `HandleEvent` e `Maintain`.
+- **Host:**
+  - stato per ospite in `Guest`;
+  - pose di tutti catturate a inizio tick;
+  - `UpdateGuest` eseguito per ogni ospite connesso;
+  - epoch della mappa per ospite;
+  - eventi (messaggi, dissolvenze, suoni, particelle) a tutti gli ospiti interessati;
+  - vita e rinascita per qualsiasi numero di giocatori;
+  - ospiti piazzati in punti liberi attorno all'host.
+- **Client:** cronologia e silhouette per ogni altro ospite, riprodotte sulla linea temporale dell'host.
+
+### Difetti trovati durante il lavoro
+
+- **Snapshot mai inviati (prima build):** l'host compilava i `PlayerState` senza ID, `EncodeSnapshot` li rifiutava e il client restava in attesa del mondo per 45 s. Ora `Capture` riceve l'ID. Le prove `full` e `intro` hanno trovato il difetto subito.
+- **Test di protocollo intermittenti:** dopo molti avvii e arresti di ENet nello stesso processo, Windows poteva lasciare `Sleep(1)` a 15,6 ms (misurato: 311 ms per 20 pause) e gli input scadevano. I test ora tengono il timer a 1 ms per tutta l'esecuzione. Riguarda solo il processo dei test.
+- **Ospiti dentro l'arredo:** gli offset fissi (0,6 m) mettevano il quarto giocatore contro l'arredo della cabina. Il piazzamento ora cerca un punto libero, e la posizione storica resta la prima scelta.
+
+### Misure
+
+Test di protocollo: PASS. Nuove prove:
+- codec con 3 e 4 giocatori;
+- assegnazione dello slot e snapshot indirizzato a un altro ospite rifiutato;
+- tre ospiti su un socket, con traffico separato;
+- quarto ospite rifiutato;
+- riuso dello slot dopo un'uscita volontaria;
+- rientro con la stessa identità.
+
+Prova `party` (`RunNativeTest.ps1 -Mode party -Players 3|4`, tutti i processi sullo stesso PC, esterno di `level01_01_outside`):
+
+| Giocatori | Esecuzioni | Esito | Movimento degli ospiti sull'host | Snapshot | Silhouette per client |
+| --- | --- | --- | --- | --- | --- |
+| 3 | 2 | PASS 2/2 | 5,98–6,04 m | 3 giocatori | 2 |
+| 4 | 2 | PASS 2/2 | 5,79–7,30 m | 4 giocatori | 3 |
+
+La posizione che ogni client ha visto per sé coincide con quella dell'host entro 0,1 m.
+
+Due giocatori, stessa build:
+
+| Prova | Esito |
+| --- | --- |
+| full, intro | PASS |
+| hammer | PASS (`step_beyond_host_m`=0,035) |
+| hammer con RTT 80 ms, jitter 20 ms, 2 % di perdita | PASS (0,014) |
+| campaign, campaign con la stessa rete degradata | PASS |
+| maps | PASS, 25/25 |
+
+### Limiti
+
+- Nemici, attacchi ad area e checkpoint sono ancora a 2 giocatori (`COOP_KNOWN_ISSUES.md`).
+- Le prove a 3-4 giocatori non passano dal relay di rete degradata.
+- Non è stata fatta nessuna partita reale su più PC.

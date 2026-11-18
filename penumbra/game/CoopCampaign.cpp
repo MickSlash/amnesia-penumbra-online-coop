@@ -53,8 +53,8 @@ void cCoopNetwork::RunCampaignQA(float dt) {
         const bool items=init->mpInventory->GetItem("hammer") && local->GetState()==ePlayerState_WeaponMelee && local->GetFlashLight()->IsActive();
         const bool otherOK=IsClient() || (remotePlayer->GetHealth()>=42.9f && remotePlayer->GetHealth()<58 && std::abs(remotePlayer->GetPower()-61)<1.5f && remotePlayer->GetState()==ePlayerState_WeaponMelee && remotePlayer->GetFlashLight()->IsActive());
         const bool ok=worldOK && selfOK && items && otherOK && task && (IsClient() || (progress && progress->mlVal==31415));
-        Log("[COOP/QA] Saved state role=%s world=%d self=%d items=%d partner=%d notebook=%d health=%.2f power=%.2f epoch=%u\n",IsHost()?"host":"client",worldOK,selfOK,items,otherOK,task,local->GetHealth(),local->GetPower(),map.epoch);
-        Log("[COOP/QA] Equipment role=%s state=%d lamp=%d partner_state=%d partner_lamp=%d tool=%d flags=%d\n",IsHost()?"host":"client",int(local->GetState()),local->GetFlashLight()->IsActive(),remotePlayer?int(remotePlayer->GetState()):-1,remotePlayer?remotePlayer->GetFlashLight()->IsActive():0,latest.players[1].tinderboxes,latest.players[1].flags); return ok;
+        Log("[COOP/QA] Saved state role=%s world=%d self=%d items=%d partner=%d notebook=%d health=%.2f power=%.2f epoch=%u\n",IsHost()?"host":"client",worldOK,selfOK,items,otherOK,task,local->GetHealth(),local->GetPower(),g->map.epoch);
+        Log("[COOP/QA] Equipment role=%s state=%d lamp=%d partner_state=%d partner_lamp=%d tool=%d flags=%d\n",IsHost()?"host":"client",int(local->GetState()),local->GetFlashLight()->IsActive(),remotePlayer?int(remotePlayer->GetState()):-1,remotePlayer?remotePlayer->GetFlashLight()->IsActive():0,g->latest.players[1].tinderboxes,g->latest.players[1].flags); return ok;
     };
     if(resume) {
         if(campaignTime>3 && campaignStage==0) { qaLoaded=savedState(); campaignStage=1; }
@@ -65,7 +65,7 @@ void cCoopNetwork::RunCampaignQA(float dt) {
     }
     if(IsClient()) {
         if(local->GetHealth()<95 && !local->IsDead()) qaClientAttacked=true;
-        if(latest.players[0].health<9500 && !(latest.players[0].flags&8)) qaHostAttacked=true;
+        if(g->latest.players[0].health<9500 && !(g->latest.players[0].flags&8)) qaHostAttacked=true;
         auto* dog=enemy("CoopQA_DogClient");
         if(dog && dog->GetMeshEntity()->GetAnimationStateNum()>0 && dog->GetHealth()>0) {
             for(int n=0;n<dog->GetMeshEntity()->GetAnimationStateNum();++n) {

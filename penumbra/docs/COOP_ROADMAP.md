@@ -41,14 +41,18 @@ Niente push senza autorizzazione esplicita.
 | 1 | Analisi del progetto esistente | ✅ |
 | 2 | Stabilità: movimento, fisica, autorità, interazioni | in corso |
 | 3 | Campagna completa di Overture, inventari, consumabili, oggetti unici, spettatore | da fare |
-| 4 | Da 2 a 4 giocatori | da fare |
+| 4 | Da 2 a 4 giocatori | in corso: rete, movimento e silhouette fatti; nemici, salvataggi e inventari ancora a 2 |
 | 5 | Presentazione e accesso: modelli, animazioni, audio, menu nel gioco, Steam | da fare |
 | 6 | Validazione completa: automatica per ogni livello e reale su due PC | da fare |
 | 7 | Black Plague, poi Requiem | non iniziato (su richiesta) |
 
 ## Compito corrente
 
-Fase 4, da 2 a 4 giocatori, secondo il progetto in `COOP_ARCHITECTURE.md` ("Progetto: da 2 a 4 giocatori"). Primo passo: `NetSession` multi-peer e slot ID nel protocollo, verificati prima con 1 ospite.
+Fase 4, da 2 a 4 giocatori, secondo il progetto in `COOP_ARCHITECTURE.md` ("Da 2 a 4 giocatori"). Fatti i passi 1-4 e la prova con 3-4 istanze.
+
+Prossimo passo: nemici e vita per ogni giocatore (passo 5):
+- bersagli dei nemici, danni, `PlayerForBody` e attacchi ad area su tutti i giocatori;
+- giocatori di slot mai connessi tolti dal mondo fisico.
 
 ### Rimandato, con motivo
 
@@ -60,5 +64,13 @@ Fase 4, da 2 a 4 giocatori, secondo il progetto in `COOP_ARCHITECTURE.md` ("Prog
 
 ## Fatto di recente
 
+- Da 2 a 4 giocatori, passi 1-4:
+  - protocollo 7 con gli ID dei giocatori;
+  - `HostTransport` con una `Session` per ospite;
+  - stato per ospite sull'host: epoch, simulazione, eventi, silhouette;
+  - altri ospiti visibili sul client;
+  - ospiti piazzati in punti liberi.
+
+  La prova `party` passa con 3 e 4 istanze.
 - Protocollo 6: oggetti tenuti, porte, oggetti leggeri, teletrasporti, correzioni smorzate fino a 1 m.
 - Prova hammer resa significativa e passante da 0 a 120 ms di RTT.

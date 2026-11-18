@@ -17,14 +17,14 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
 | Funzione | Stato | Note |
 | --- | --- | --- |
 | 2 giocatori | ✅ | |
-| 3–4 giocatori | ❌ | protocollo, snapshot (`players[2]`), salvataggi e IA sono a 2 slot |
+| 3–4 giocatori | 🟡 | protocollo 7, trasporto, movimento e silhouette per 4 (prova `party` con 3 e 4 istanze sullo stesso PC); nemici, checkpoint e inventario ancora a 2; si attiva solo con `PENUMBRA_COOP_PLAYERS` sull'host, non dal launcher |
 | IP diretto (UDP 27120), LAN, VPN | ✅ | prove locali; mai provato su due PC via Radmin |
 | Ospitare/entrare dal menu del gioco | ❌ | si fa dal launcher (solo italiano) |
 | Lobby, inviti e relay Steam | ❌ | solo presenza Steam (App ID 22180); richiede uno studio dei requisiti Steamworks |
 | Elenco giocatori e stato connessione | ❌ | |
 | Riconnessione automatica | ✅ | |
 | Migrazione dell'host | ❌ | |
-| Versioni diverse rifiutate | ✅ | protocollo 5 |
+| Versioni diverse rifiutate | ✅ | protocollo 7 |
 
 ### Movimento e rete
 
