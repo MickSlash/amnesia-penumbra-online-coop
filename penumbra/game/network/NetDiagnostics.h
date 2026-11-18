@@ -59,7 +59,7 @@ struct ClientNetDiagnostics {
     }
     unsigned snapshots = 0;
     unsigned over2cm = 0, over10cm = 0, reset25cm = 0, hard2m = 0;
-    unsigned unpredictedTicks = 0, replayTruncated = 0;
+    unsigned unpredictedTicks = 0, replayTruncated = 0, teleports = 0;
     // Replay steps refused by the client's collision test, out of all replayed steps.
     unsigned replaySteps = 0, replayBlocked = 0;
     // Horizontal distance the host body moved between consecutive poses (cm).

@@ -37,7 +37,7 @@ public static class CoopUdpRelay {
                         received++;
                         largest=Math.Max(largest,n);
                         if(n>ceiling) { oversized++; dropped++; continue; }
-                        if(received % dropEvery == 0 || queue.Count >= 4096) { dropped++; continue; }
+                        if((dropEvery > 0 && received % dropEvery == 0) || queue.Count >= 4096) { dropped++; continue; }
                         EndPoint target = side==0 ? server : client;
                         if(target==null) continue;
                         var data = new byte[n]; Array.Copy(buffer,data,n);
@@ -55,7 +55,7 @@ public static class CoopUdpRelay {
                 }
                 Thread.Sleep(1);
             }
-            if(received==0 || dropped==0) throw new Exception("Relay did not exercise packet loss");
+            if(received==0 || (dropEvery > 0 && dropped==0)) throw new Exception("Relay did not exercise packet loss"); // dropEvery 0 = no loss
             return "received="+received+" forwarded="+forwarded+" dropped="+dropped+" forwardedBytes="+bytes+" oneWayDelayMs="+delay+" jitterMs="+jitter+" oversizedDropped="+oversized+" largestDatagram="+largest+" largestForwarded="+largestForwarded+" ceiling="+ceiling;
         }
     }

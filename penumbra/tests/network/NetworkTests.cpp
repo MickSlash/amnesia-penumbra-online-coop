@@ -545,6 +545,10 @@ static void RecoveryTests() {
     Check(position.x>0 && position.x<0.04f && smooth.CorrectionDistance()>0, "small authoritative correction eases instead of snapping");
     for(int i=0;i<60;++i) position=smooth.ReconcileSmoothed(corrected,0,2,1.0f/60,free);
     Check(std::fabs(position.x-0.04f)<0.001f, "correction converges without permanent drift");
+    { MovementPrediction half; PlayerState pose; pose.forwardMax=pose.sideMax=3000; pose.acceleration=pose.deceleration=30000;
+      half.ReconcileSmoothed(pose,0,1,1.0f/60,free); pose.x=500;
+      auto shown=half.ReconcileSmoothed(pose,0,2,1.0f/60,free);
+      Check(shown.x>0.01f && shown.x<0.25f && half.CorrectionDistance()>0, "a half-metre misprediction is eased, not snapped (teleports are announced)"); }
     smooth.Push(input,1.0f/60); position=smooth.ReconcileSmoothed(corrected,0,2,1.0f/60,free);
     Check(position.z<-0.007f, "new local input remains immediate during correction smoothing");
     corrected.x=2000; position=smooth.ReconcileSmoothed(corrected,1,3,1.0f/60,free);
@@ -702,6 +706,16 @@ static void NativeMovementPredictionTest() {
     Check(!crouched.LastReplayTruncated() && p.z < -0.012f, "a jump does not stop the horizontal replay");
     std::cout << "PASS: prediction replays native character movement\n";
 }
+static void HeldStateCodecTest() {
+    Snapshot snapshot; snapshot.epoch = 3; snapshot.players[0].heldEntity = 99; snapshot.players[0].heldMode = uint8_t(HeldMode::Grab);
+    auto bytes = EncodeSnapshot(snapshot); Snapshot read;
+    Check(bytes.size() == SnapshotBytes && DecodeSnapshot(bytes.data(), bytes.size(), read) && read.players[0].heldEntity == 99 && read.players[0].heldMode == 1, "held object roundtrip");
+    snapshot.players[0].heldMode = 4; Check(EncodeSnapshot(snapshot).empty(), "unknown held mode rejected");
+    snapshot.players[0].heldMode = 0; Check(EncodeSnapshot(snapshot).empty(), "held entity without a mode rejected");
+    snapshot.players[0].heldEntity = 0; Check(!EncodeSnapshot(snapshot).empty(), "nothing held is valid");
+    StressCodec(snapshot, EncodeSnapshot, DecodeSnapshot);
+    std::cout << "PASS: held object state codec\n";
+}
 static void InterpolationTest() {
     JitterDelay delay; Check(delay.Delay() == JitterDelay::MinDelay, "no arrivals: minimum delay");
     for(uint32_t t = 0; t < 60; ++t) delay.Arrival(1000 + t, t);
@@ -751,6 +765,7 @@ int main(int argc, char** argv) {
     InputBatchCodecTest();
     InputQueueTest();
     InterpolationTest();
+    HeldStateCodecTest();
     NativeMovementPredictionTest();
     PlayerInput input; input.sequence = 0x12345678; input.tick = 42;
     input.forward = -1000; input.strafe = 500; input.yaw = -3141; input.pitch = 1570; input.buttons = 15;
@@ -767,8 +782,9 @@ int main(int argc, char** argv) {
     input.lookYaw = 31421; Check(EncodeInput(input).empty(), "raw look bounded"); input.lookYaw = 0;
     Snapshot snapshot; snapshot.epoch = 1; snapshot.sequence = 17; snapshot.players[0].x = -54321;
     auto stateBytes = EncodeSnapshot(snapshot); Snapshot stateRead;
-    snapshot.hostTick = 0xfedcba98u; stateBytes = EncodeSnapshot(snapshot);
-    Check(stateBytes.size() == SnapshotBytes && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) && stateRead.hostTick == 0xfedcba98u &&
+    snapshot.hostTick = 0xfedcba98u; snapshot.players[1].heldEntity = 0x01020304u; snapshot.players[1].heldBody = 7; snapshot.players[1].heldMode = uint8_t(HeldMode::Move); snapshot.players[1].teleport = 201;
+    stateBytes = EncodeSnapshot(snapshot);
+    Check(stateBytes.size() == SnapshotBytes && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) && stateRead.hostTick == 0xfedcba98u && stateRead.players[1].heldEntity == 0x01020304u && stateRead.players[1].heldBody == 7 && stateRead.players[1].heldMode == 2 && stateRead.players[1].teleport == 201 &&
         stateRead.players[0].x == -54321 && stateRead.sequence == 17, "signed snapshot roundtrip");
     for(size_t n = 0; n < stateBytes.size(); ++n) Check(!DecodeSnapshot(stateBytes.data(), n, stateRead), "truncated snapshot");
     stateBytes.push_back(0); Check(!DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead), "snapshot trailing byte");

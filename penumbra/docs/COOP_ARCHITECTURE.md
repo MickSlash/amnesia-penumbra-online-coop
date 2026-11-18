@@ -57,3 +57,27 @@ ENet su UDP (porta 27120), 4 canali (`game/network/NetSession.*`). Ogni messaggi
 ## Riuso per Black Plague e Requiem
 
 Trasporto, coda di input, previsione, interpolazione e diagnostica non dipendono dal gioco. Gli agganci (`Capture`, `ApplyEntity`, `UpdateHost/UpdateClient`) sono in `CoopNetwork.cpp` e andranno adattati per ogni titolo.
+
+## Progetto: da 2 a 4 giocatori (non ancora implementato)
+
+Il modello resta autoritativo: per ogni ospite l'host simula un `cPlayer` remoto, come fa oggi per il partner. Il modello di QuasiInteractive (movimento deciso dal client, vedi `QUASI_INTEGRATION.md`) **non** viene adottato.
+
+| Livello | Oggi | Con 4 giocatori |
+| --- | --- | --- |
+| `NetSession` | Un solo `peer_`; coda di input, identità, Pronto, `MapReady`/`WorldApplied` per un solo ospite | Stato per peer (`PeerState`): coda di input, cronologia, identità, Pronto, epoch confermati. Il client continua ad avere un solo peer (l'host). `Welcome` assegna uno **slot** 1..3 (host = 0), riusabile dopo un'uscita (come gli ID di Q, NM:6261). |
+| Snapshot | `players[2]` fisso, 141 byte | Numero di giocatori più gli stati con lo slot; `acknowledgedInput` per slot. Ogni ospite legge il proprio slot e mostra gli altri come partner. |
+| Host (`CoopNetwork`) | `remotePlayer`/`remoteHands` | Un array di slot con `cPlayer`, `cPlayerHands`, coda di input e stato di vita. `UpdateHost` cicla sugli slot. I giocatori restano tutti nel gruppo di collisione 1. |
+| Client | Un partner (`partnerHistory`, avatar) | Una cronologia e un avatar per ogni altro slot; previsione solo per il proprio. |
+| Nemici | `EntityState::target` 1 = host, 2 = client | Slot del bersaglio (0-3); `GetNetworkTarget` restituisce il `cPlayer` di qualsiasi slot. |
+| Vita e salvataggi | Partner salvato con `SavePartner` | Stato per slot nel checkpoint (salute, batteria, inventario personale quando ci sarà); respawn accanto a un giocatore vivo qualsiasi. |
+| Ingresso e uscita | Riconnessione dello stesso partner | Ingresso in corsa con baseline per il nuovo peer; uscita che libera lo slot e lascia gli oggetti unici nel mondo (con l'inventario per giocatore). |
+
+Ordine previsto, ogni passo verificato con 2 giocatori prima di proseguire:
+
+1. Slot ID nel protocollo, ancora con 1 ospite.
+2. `NetSession` multi-peer, con test di protocollo per 3 peer.
+3. Array di slot sull'host.
+4. Avatar e cronologie per slot sul client.
+5. Nemici e vita per slot.
+6. Checkpoint per slot.
+7. Prove native con 3 e 4 istanze (`RunNativeTest.ps1` va esteso a N client).

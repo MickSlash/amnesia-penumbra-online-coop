@@ -57,6 +57,9 @@ private:
     void UpdateHost(float dt);
     void UpdateClient(float dt);
     bool PublishWorld(bool baseline);
+    bool PublishEntity(iGameEntity* entity,bool baseline);
+    void PublishHeld();
+    void ApplyHeldPrediction();
     void ApplyEntity(const online::EntityState& state);
     void UpdateAvatar(const online::PlayerState& state, float dt);
     void RunQA(float dt);
@@ -93,6 +96,16 @@ private:
     online::HostNetDiagnostics hostDiag;
     uint64_t diagReportAt = 0;
     float hitchClock = 0, partnerClosest = 1000, partnerCorrectionMax = 0;
+    // QA (full): time from the client's gesture to the first visible motion of
+    // the grabbed bottle (camera turn while holding) and of the dragged door.
+    float qaGrabResponse = -1, qaDoorResponse = -1;
+    // QA (hammer): a client step is judged 20 ticks later against the largest
+    // authoritative host step within +-20 ticks (prediction runs ahead of the
+    // host's confirmation); only the excess counts as a network error.
+    std::deque<std::pair<uint32_t,float>> qaClientSteps, qaHostSteps;
+    float stepExcessMax = 0;
+    void JudgeSteps(bool all);
+    hpl::cMatrixf qaGrabStart, qaDoorStart;
     online::Snapshot latest;
     uint32_t generation = 0, sequence = 0, inputSequence = 0, actionSequence = 0, lastInput = 0, lastSnapshot = 0;
     uint8_t remoteButtons = 0;
@@ -106,12 +119,26 @@ private:
     struct Motion { online::PoseHistory<Pose,16> history; };
     std::map<std::string, Motion> motion;
     online::PoseHistory<online::PlayerState,32> partnerHistory;
+    // The client's own authoritative pose on the host timeline, to place the
+    // object it holds relative to its camera (see ApplyHeldPrediction).
+    online::PoseHistory<online::PlayerState,32> selfHistory;
+    std::map<uint32_t, std::string> entityNames;
+    // Body whose character collision is suspended while this client holds it,
+    // by entity name and body index (the entity may be destroyed meanwhile).
+    std::string heldCollisionEntity;
+    int heldCollisionIndex = -1;
+    bool heldCollisionSaved = false;
     online::PlaybackClock playback;
     online::JitterDelay jitterDelay;
-    uint32_t hostTick = 0, clientTick = 0, newestHostTick = 0;
+    uint32_t hostTick = 0, clientTick = 0, newestHostTick = 0, teleportTick = 0;
+    // Host: last sent feet position and teleport counter per player.
+    hpl::cVector3f sentFeet[2];
+    bool hasSentFeet[2] = {};
+    uint8_t teleportCount[2] = {}, receivedTeleport = 0;
+    bool hasReceivedTeleport = false;
     bool hasHostTick = false;
     void NoteHostTick(uint32_t tick) { if(!hasHostTick || int32_t(tick-newestHostTick)>0) newestHostTick=tick; hasHostTick=true; }
-    void ResetPlayback() { motion.clear(); partnerHistory.Clear(); playback.Reset(); jitterDelay.Reset(); hasHostTick=false; }
+    void ResetPlayback() { motion.clear(); partnerHistory.Clear(); selfHistory.Clear(); entityNames.clear(); heldCollisionEntity.clear(); heldCollisionIndex=-1; heldCollisionSaved=false; playback.Reset(); jitterDelay.Reset(); hasHostTick=false; }
     std::vector<online::Presentation> pendingPresentation;
     online::InventoryState inventory;
     std::vector<uint8_t> inventoryBytes;

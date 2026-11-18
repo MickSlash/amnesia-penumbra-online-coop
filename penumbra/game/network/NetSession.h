@@ -17,8 +17,12 @@ namespace online {
 // snapshots acknowledge the command already integrated by physics.
 // 5: snapshots and entity poses carry the host logic tick (hostTick) for
 // client-side interpolation on the host timeline (Interpolation.h).
-constexpr uint16_t ProtocolVersion = 5;
-constexpr size_t SnapshotBytes = 127;
+// 6: each player state names the object it holds, pulls or pushes, and
+// counts intentional teleports (respawn, scripts) so they are never eased.
+constexpr uint16_t ProtocolVersion = 6;
+constexpr size_t SnapshotBytes = 141;
+// What a player is doing with an object (PlayerState::heldMode).
+enum class HeldMode : uint8_t { None = 0, Grab = 1, Move = 2, Push = 3 };
 constexpr uint32_t VoluntaryDisconnectReason = 0x504f0001;
 constexpr uint16_t DefaultPort = 27120;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
@@ -60,6 +64,13 @@ struct PlayerState {
     uint8_t flags = 4; // crouching, flashlight, active, dead, native door-controlled look
     int16_t forwardSpeed = 0, sideSpeed = 0; // current local-axis velocity, mm/s
     uint16_t forwardMax = 0, sideMax = 0, acceleration = 0, deceleration = 0, backwardMax = 0; // mm/s, mm/s^2
+    // Object held (Grab), moved by mouse (Move: doors, levers, drawers) or
+    // pushed (Push): entity ID (EntityID of its name) and body index.
+    uint32_t heldEntity = 0;
+    uint8_t heldBody = 0, heldMode = 0;
+    // Incremented by the host whenever the player moved more than 1 m within a
+    // tick (no walk or fall does that): the client snaps instead of correcting.
+    uint8_t teleport = 0;
 };
 struct Snapshot {
     uint32_t epoch = 0, sequence = 0, acknowledgedInput = 0;

@@ -327,3 +327,57 @@ Misure A/B (prova hammer, l'host si sposta di lato durante la camminata del clie
 | A | ritardo di riproduzione | 3,1–3,4 tick | — |
 
 Con jitter la riproduzione riduce gli scatti del partner di circa il 60 %. In locale il filtro precedente risulta un po' più morbido perché arrotonda anche i cambi di direzione reali dell'host; la riproduzione li mostra come sono. Nella prova A uno stallo di 500 ms ha portato il ritardo a 28 tick per pochi istanti (`playback_held` 26), poi è rientrato.
+
+## 10. Aggiornamento 18 novembre — protocollo 6: oggetti tenuti, porte, oggetti leggeri, teletrasporti
+
+### Modifiche
+
+- **Stato del giocatore** (139 → 141 byte di snapshot):
+  - l'oggetto preso (`Grab`), mosso col mouse (`Move`: porte, leve, cassetti) o spinto (`Push`): ID entità, indice del corpo, modo;
+  - un contatore di teletrasporti (`teleport`).
+- **Host:** l'oggetto in uso viene pubblicato a ogni tick invece che a 30 Hz (`PublishHeld`).
+- **Client** (`ApplyHeldPrediction`):
+  - l'oggetto preso viene mostrato alla stessa posizione relativa alla telecamera che ha sull'host, applicata alla telecamera attuale del client;
+  - porte, leve e oggetti spinti mostrano l'ultima posa dell'host senza ritardo di riproduzione;
+  - l'oggetto tenuto non blocca chi lo tiene.
+- **Client:** i corpi con massa fino alla massa spingibile del personaggio (`GetMaxPushMass`) non bloccano il personaggio del client, perché sull'host vengono spinti via dal callback del corpo.
+- **Teletrasporti:** l'host incrementa il contatore se il giocatore si sposta più di 1 m in un tick (camminata circa 5 cm, caduta massima 66 cm). Il client salta alla nuova posizione senza contarla come correzione, e il partner non viene interpolato attraverso il salto.
+- **Correzione di un difetto:** il corpo tenuto è ora risolto per nome a ogni tick. Un puntatore conservato diventava memoria liberata quando l'oggetto veniva distrutto mentre era in mano: nella prova hammer bloccava il client nella fase finale.
+
+### Reattività delle interazioni (prova `full`, A/B con `PENUMBRA_COOP_HELD_PREDICTION=0`)
+
+| Gesto del client | Locale, nuovo | Locale, prima | RTT 120 ms + jitter 20 ms, nuovo | RTT 120 ms + jitter 20 ms, prima |
+| --- | --- | --- | --- | --- |
+| Girare la visuale tenendo la bottiglia (primo movimento visibile) | **33 ms** | 183 ms | **33 ms** | 400 ms |
+| Trascinare l'anta dell'armadietto (primo movimento visibile) | **166 ms** | 233 ms | **350 ms** | 450 ms |
+
+L'anta resta legata al giro in rete: la sua fisica gira solo sull'host. Una previsione locale delle porte, con fisica temporaneamente posseduta dal client, è in `COOP_KNOWN_ISSUES.md`.
+
+### Prova hammer: rete separata da script e fisica
+
+- Il controllo di fluidità falliva sempre. Le cause, misurate: i teletrasporti dello script (39,5 s e la fase finale), le correzioni oltre 2 m che ne derivavano e due passi reali da circa 0,20 m. Questi ultimi avvengono quando il corpo dell'host sale sui frammenti delle casse e viene spinto avanti in un tick: registro `[COOP/QA] Walk`, z da 7,98 a 7,78, y da 0,16 a 0,24.
+- Ora:
+  - i teletrasporti annunciati non contano come correzioni;
+  - ogni passo del client viene valutato 20 tick dopo, contro il passo più grande dell'host nei ±20 tick, e conta solo l'eccedenza (`step_beyond_host_m`);
+  - la soglia resta 0,2 m;
+  - restano invariati i controlli su correzioni oltre 2 m e su intervalli fra snapshot oltre 200 ms.
+
+### Correzioni smorzate fino a 1 m e prova hammer a più latenze
+
+- **Misura con il nuovo controllo:** i due passi residui da 0,20 m a 0 ms (0,34 m a 40 ms, 0,54 m a 80 ms) **non** erano dell'host, il cui passo massimo nei ±20 tick era 1 mm. Erano previsioni del client che saltavano avanti quando il corpo finiva di salire sui frammenti e il replay dei comandi in attesa tornava libero. Sopra i 25 cm la correzione veniva applicata di colpo.
+- **Correzione:** i teletrasporti veri sono annunciati dall'host, quindi le correzioni fino a 1 m vengono smorzate (80 ms per gli errori piccoli, fino a 160 ms per quelli da mezzo metro). Restano a scatto solo i teletrasporti annunciati e gli errori oltre 1 m o con un salto verticale oltre 25 cm. Test unitario: "a half-metre misprediction is eased".
+- **Risultati** (prova `hammer`, `-Walk 1000`, una prova per riga, relay senza perdita con `-DropEvery 0`):
+
+| Scenario | Passo oltre l'host, prima → dopo | Passo massimo mostrato | Correzioni oltre 2 m | Esito della prova |
+| --- | --- | --- | --- | --- |
+| RTT 0 (circa 22 ms locale) | 0,200 → **0,035 m** | 0,084 m | 0 | PASS |
+| RTT 40 (circa 92 ms misurati) | 0,338 → **0,078 m** | 0,079 m | 0 | PASS |
+| RTT 80 (circa 124 ms) | 0,538 → **0,074 m** | 0,118 m | 0 | PASS |
+| RTT 120 (circa 157 ms) | 0,530 → **0,062 m** | 0,063 m | 0 | PASS |
+| RTT 80 + jitter 30 ms + 2 % perdita | 0,576 → **0,067 m** | 0,069 m | 0 | PASS |
+| RTT 120 + jitter 40 ms + 5 % perdita | 0,499 → **0,085 m** | 0,119 m | 0 | 1 FAIL su 2 (vedi sotto) |
+
+Nota: l'RTT "misurato" include l'elaborazione delle due istanze sullo stesso PC.
+
+- Nello scenario più duro, in una delle due esecuzioni il client ha messo a segno 4 colpi di martello su 7 sulla sua cassa entro la finestra dello script (nell'altra esecuzione 7 su 7). È in `COOP_KNOWN_ISSUES.md`.
+- **Prove funzionali sulla stessa build:** full, intro, campagna e campagna con ritardo tutte PASS.

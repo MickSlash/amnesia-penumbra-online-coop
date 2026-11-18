@@ -22,7 +22,7 @@ bool ValidPlayer(const PlayerState& p) {
     return p.x >= -100000000 && p.x <= 100000000 && p.y >= -100000000 && p.y <= 100000000 &&
         p.z >= -100000000 && p.z <= 100000000 && p.yaw >= -3142 && p.yaw <= 3142 &&
         p.pitch >= -1571 && p.pitch <= 1571 && p.health <= 10000 && p.sanity <= 10000 && p.oil <= 10000 &&
-        p.eyeHeight >= -5000 && p.eyeHeight <= 5000 && !(p.flags & ~127) &&
+        p.eyeHeight >= -5000 && p.eyeHeight <= 5000 && !(p.flags & ~127) && p.heldMode <= 3 && (p.heldMode || !p.heldEntity) &&
         p.roll >= -3142 && p.roll <= 3142 && p.cameraX >= -5000 && p.cameraX <= 5000 &&
         p.cameraZ >= -5000 && p.cameraZ <= 5000 && p.fov >= 10 && p.fov <= 3142 &&
         p.aspect >= 10 && p.aspect <= 20000 && p.lookSpeed <= 10000;
@@ -282,6 +282,7 @@ std::vector<uint8_t> EncodeSnapshot(const Snapshot& s) {
                 U16(out, p.fov); U16(out, p.aspect); U16(out, p.lookSpeed);
         U16(out, uint16_t(p.forwardSpeed)); U16(out, uint16_t(p.sideSpeed));
         U16(out, p.forwardMax); U16(out, p.sideMax); U16(out, p.acceleration); U16(out, p.deceleration); U16(out,p.backwardMax);
+        U32(out, p.heldEntity); out.push_back(p.heldBody); out.push_back(p.heldMode); out.push_back(p.teleport);
     }
     return out;
 }
@@ -290,7 +291,7 @@ bool DecodeSnapshot(const uint8_t* p, size_t n, Snapshot& s) {
     Snapshot value; value.epoch = R32(p + 5); value.sequence = R32(p + 9); value.acknowledgedInput = R32(p + 13); value.hostTick = R32(p + 17);
     if (!value.epoch) return false;
     for (unsigned i = 0; i < 2; ++i) {
-        const uint8_t* b = p + 21 + i * 53; auto& player = value.players[i];
+        const uint8_t* b = p + 21 + i * 60; auto& player = value.players[i];
         player.x = Signed32(b); player.y = Signed32(b + 4); player.z = Signed32(b + 8);
         player.yaw = Signed16(b + 12); player.pitch = Signed16(b + 14);
         player.health = R16(b + 16); player.sanity = R16(b + 18); player.oil = R16(b + 20);
@@ -300,6 +301,7 @@ bool DecodeSnapshot(const uint8_t* p, size_t n, Snapshot& s) {
         player.forwardSpeed = Signed16(b+39); player.sideSpeed = Signed16(b+41);
         player.forwardMax = R16(b+43); player.sideMax = R16(b+45); player.acceleration = R16(b+47); player.deceleration = R16(b+49);
         player.backwardMax = R16(b+51);
+        player.heldEntity = R32(b+53); player.heldBody = b[57]; player.heldMode = b[58]; player.teleport = b[59];
         if (!ValidPlayer(player)) return false;
     }
     s = value; return true;

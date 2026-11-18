@@ -30,7 +30,7 @@ $hashes=@()
 Get-ChildItem -LiteralPath $release -File -Recurse | ForEach-Object {
     $hashes+=[ordered]@{file=$_.FullName.Substring($release.Length+1).Replace('\','/'); sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash; bytes=$_.Length}
 }
-$manifest=[ordered]@{version='0.4-experimental'; protocol_version=5; source_commit=$revision; created_utc=[DateTime]::UtcNow.ToString('o'); full_campaign_certified=$false; files=$hashes}
+$manifest=[ordered]@{version='0.4-experimental'; protocol_version=6; source_commit=$revision; created_utc=[DateTime]::UtcNow.ToString('o'); full_campaign_certified=$false; files=$hashes}
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $release 'manifest.json') -Encoding UTF8
 $zip=Join-Path $packages ($name+'.zip')
 Compress-Archive -LiteralPath $release -DestinationPath $zip

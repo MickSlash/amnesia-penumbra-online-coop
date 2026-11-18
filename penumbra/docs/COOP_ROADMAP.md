@@ -48,4 +48,10 @@ Niente push senza autorizzazione esplicita.
 
 ## Compito corrente
 
-Fase 2: previsione durante prendere, trascinare e lanciare oggetti, e durante l'uso di porte, cassetti e leve (`ePlayerState_Move`, `Grab`, `Push`). Poi la spinta degli oggetti leggeri e la riparazione della prova `hammer`.
+1. Ramo `quasi-integration`: integrazione delle parti utili di QuasiInteractive secondo il piano in `QUASI_INTEGRATION.md`.
+2. Fase 4 (da 2 a 4 giocatori) secondo il progetto in `COOP_ARCHITECTURE.md`.
+
+## Fatto di recente
+
+- Protocollo 6: oggetti tenuti, porte, oggetti leggeri, teletrasporti, correzioni smorzate fino a 1 m.
+- Prova hammer resa significativa e passante da 0 a 120 ms di RTT.

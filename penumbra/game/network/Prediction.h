@@ -108,6 +108,7 @@ public:
     }
     template<class Collision>
     PredictedPosition Reconcile(const PlayerState& state, uint32_t acknowledged, const MovementLimits& limits, Collision collide);
+    static constexpr float MaxEasedCorrection = 1.0f;
     static bool Predicts(const PlayerState& state) { return (state.flags & 4) && !(state.flags & (8|16|32)); }
     template<class Collision>
     PredictedPosition ReconcileSmoothed(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, Collision collide) {
@@ -129,13 +130,20 @@ public:
         PredictedPosition raw = Replay(state,acknowledged,stepper);
         if(newPose) {
             const float dx = before.x - raw.x, dz = before.z - raw.z;
-            const bool reset = dx*dx + dz*dz > 0.0625f || std::abs(int64_t(state.y) - previousState_.y) > 250;
+            // Intentional teleports are announced by the host (PlayerState::teleport)
+            // and clear the prediction, so any other misprediction up to 1 m is eased:
+            // snapping 25-100 cm errors (e.g. when a step climb finishes and the
+            // pending replay is suddenly free) was the largest visible jump.
+            const bool reset = dx*dx + dz*dz > MaxEasedCorrection*MaxEasedCorrection || std::abs(int64_t(state.y) - previousState_.y) > 250;
             if(reset) correction_ = {};
             else { correction_.x += dx; correction_.z += dz; }
             poseCorrection_ = true; poseDistance_ = std::sqrt(dx*dx + dz*dz); poseReset_ = reset;
         }
-        if(correction_.x*correction_.x + correction_.z*correction_.z > 0.0625f) correction_ = {};
-        const float decay = std::exp(-std::min(dt,0.25f)/0.08f);
+        if(correction_.x*correction_.x + correction_.z*correction_.z > MaxEasedCorrection*MaxEasedCorrection) correction_ = {};
+        // Small errors fade in about 80 ms; larger ones over up to 160 ms so a
+        // half-metre correction is not a visible jump either.
+        const float size = std::sqrt(correction_.x*correction_.x + correction_.z*correction_.z);
+        const float decay = std::exp(-std::min(dt,0.25f)/(0.08f + 0.08f*std::min(1.0f, size/0.5f)));
         correction_.x *= decay; correction_.z *= decay;
         PredictedPosition shown = raw;
         if(std::fabs(correction_.x) + std::fabs(correction_.z) > 0.0001f) {
