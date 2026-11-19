@@ -190,6 +190,21 @@ public sealed class CoopLauncher : Form {
         }
         return "";
     }
+    // Schermo intero alla risoluzione nativa (0x0: finestra senza bordi grande
+    // quanto il desktop). Fino alla 0.5.1 il launcher impostava 1280x720 a
+    // schermo intero: su schermi più grandi l'immagine veniva ingrandita e
+    // sembrava sgranata. Un profilo rimasto a quel valore passa alla nativa;
+    // una risoluzione scelta nelle opzioni del gioco resta com'è.
+    void UpgradeOldResolution() {
+        try {
+            string file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),"Amnesia",saveFolder,"main_settings.cfg");
+            if(!File.Exists(file)) return;
+            string text = File.ReadAllText(file);
+            var screen = Regex.Match(text,"<Screen\\s+Width=\"1280\"\\s+Height=\"720\"(?<rest>[^>]*FullScreen=\"true\"[^>]*)>");
+            if(!screen.Success) return;
+            File.WriteAllText(file,text.Replace(screen.Value,"<Screen Width=\"0\" Height=\"0\"" + screen.Groups["rest"].Value + ">"),new UTF8Encoding(false));
+        } catch(IOException) {} catch(UnauthorizedAccessException) {}
+    }
     public Process Launch(string path, bool full, bool steam) {
         if(!Valid(path)) throw new IOException(Lang.T("This folder does not contain the Amnesia game data. Select the folder of the original game.","Questa cartella non contiene i dati di Amnesia. Scegli la cartella del gioco originale."));
         path = Path.GetFullPath(path);
@@ -206,7 +221,8 @@ public sealed class CoopLauncher : Form {
         if(!File.Exists(executable)) throw new FileNotFoundException(Lang.T("Lux.exe is missing: extract the whole ZIP package before launching.","Lux.exe mancante: estrai tutto il pacchetto ZIP prima di avviare."));
         Directory.CreateDirectory(state); File.WriteAllText(Path.Combine(state,"game-folder.txt"),path,Encoding.UTF8);
         string settings = Path.Combine(state,"settings.cfg"), init = Path.Combine(state,"init.cfg");
-        File.WriteAllText(settings,"<Main ShowMenu=\"true\" ShowPreMenu=\"false\" SaveConfig=\"true\" DefaultProfileName=\"online\" UpdateLogActive=\"false\" />\n<Graphics TextureQuality=\"0\" Shadows=\"1\" SSAOActive=\"true\" />\n<Engine LimitFPS=\"true\" />\n<Screen Width=\"1280\" Height=\"720\" Display=\"0\" FullScreen=\"" + (full ? "true" : "false") + "\" Vsync=\"true\" />\n<Physics PhysicsAccuracy=\"2\" UpdatesPerSec=\"60\" />\n<Online AutoProfile=\"true\" />\n",new UTF8Encoding(false));
+        File.WriteAllText(settings,"<Main ShowMenu=\"true\" ShowPreMenu=\"false\" SaveConfig=\"true\" DefaultProfileName=\"online\" UpdateLogActive=\"false\" />\n<Graphics TextureQuality=\"0\" Shadows=\"1\" SSAOActive=\"true\" />\n<Engine LimitFPS=\"true\" />\n<Screen Width=\"" + (full ? "0" : "1280") + "\" Height=\"" + (full ? "0" : "720") + "\" Display=\"0\" FullScreen=\"" + (full ? "true" : "false") + "\" Vsync=\"true\" />\n<Physics PhysicsAccuracy=\"2\" UpdatesPerSec=\"60\" />\n<Online AutoProfile=\"true\" />\n",new UTF8Encoding(false));
+        if(full) UpgradeOldResolution();
         string source = File.ReadAllText(Path.Combine(path,"config","main_init.cfg"));
         source = Regex.Replace(source,"MainSaveFolder\\s*=\\s*\"[^\"]*\"", "MainSaveFolder = \"" + saveFolder + "\"");
         if(saveFolder.StartsWith("OnlineCoopMenuQA_")) source = Regex.Replace(source,"GameName\\s*=\\s*\"[^\"]*\"", "GameName = \"Amnesia Menu QA [" + saveFolder + "]\"");

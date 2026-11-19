@@ -357,6 +357,10 @@ namespace hpl {
 		cVector3f GetCameraPosAdd();
 		void SetCameraSmoothPosNum(int alNum){ mlCameraSmoothPosNum = alNum;}
 		int GetCameraSmoothPosNum(){ return mlCameraSmoothPosNum;}
+		// Ritardo della media della telecamera: media delle ultime posizioni della
+		// testa meno la più recente (zero senza media). Il co-op online lo toglie
+		// dallo scostamento inviato; il client rifà la media sui propri piedi.
+		cVector3f GetCameraSmoothLag() const;
 
 		void SetEntity(iEntity3D *apEntity);
 		iEntity3D* GetEntity();

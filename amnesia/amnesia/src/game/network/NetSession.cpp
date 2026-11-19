@@ -22,10 +22,12 @@ bool ValidPlayer(const PlayerState& p) {
     return p.x >= -100000000 && p.x <= 100000000 && p.y >= -100000000 && p.y <= 100000000 &&
         p.z >= -100000000 && p.z <= 100000000 && p.yaw >= -3142 && p.yaw <= 3142 &&
         p.pitch >= -1571 && p.pitch <= 1571 && p.health <= 10000 && p.sanity <= 10000 && p.oil <= 10000 &&
-        p.eyeHeight >= -5000 && p.eyeHeight <= 5000 && !(p.flags & ~127) &&
+        p.eyeHeight >= -5000 && p.eyeHeight <= 5000 &&
         p.roll >= -3142 && p.roll <= 3142 && p.cameraX >= -5000 && p.cameraX <= 5000 &&
         p.cameraZ >= -5000 && p.cameraZ <= 5000 && p.fov >= 10 && p.fov <= 3142 &&
-        p.aspect >= 10 && p.aspect <= 20000 && p.lookSpeed <= 10000 && p.grounded <= 1 && p.jumpSpeed <= 32000;
+        p.aspect >= 10 && p.aspect <= 20000 && p.lookSpeed <= 10000 && p.grounded <= 1 && p.jumpSpeed <= 32000 &&
+        p.runForward >= 100 && p.runForward <= 10000 && p.runBackward >= 100 && p.runBackward <= 10000 &&
+        p.runSide >= 100 && p.runSide <= 10000 && p.moveFlags <= 1;
 }
 bool ValidMap(const std::string& file) {
     if (file.size() < 10 || file.size() > 240 || file.compare(0, 5, "maps/") ||
@@ -279,15 +281,16 @@ std::vector<uint8_t> EncodeSnapshot(const Snapshot& s) {
         U16(out, uint16_t(p.forwardSpeed)); U16(out, uint16_t(p.sideSpeed));
         U16(out, p.forwardMax); U16(out, p.sideMax); U16(out, p.acceleration); U16(out, p.deceleration); U16(out,p.backwardMax);
         U16(out,uint16_t(p.verticalSpeed)); U16(out,uint16_t(p.verticalAcceleration)); U16(out,p.jumpSpeed); out.push_back(p.grounded);
+        U16(out,p.runForward); U16(out,p.runBackward); U16(out,p.runSide); out.push_back(p.moveFlags);
     }
     return out;
 }
 bool DecodeSnapshot(const uint8_t* p, size_t n, Snapshot& s) {
-    if (!ValidHeader(p, n) || n != 137 || p[4] != uint8_t(Message::Snapshot)) return false;
+    if (!ValidHeader(p, n) || n != 151 || p[4] != uint8_t(Message::Snapshot)) return false;
     Snapshot value; value.epoch = R32(p + 5); value.sequence = R32(p + 9); value.acknowledgedInput = R32(p + 13);
     if (!value.epoch) return false;
     for (unsigned i = 0; i < 2; ++i) {
-        const uint8_t* b = p + 17 + i * 60; auto& player = value.players[i];
+        const uint8_t* b = p + 17 + i * 67; auto& player = value.players[i];
         player.x = Signed32(b); player.y = Signed32(b + 4); player.z = Signed32(b + 8);
         player.yaw = Signed16(b + 12); player.pitch = Signed16(b + 14);
         player.health = R16(b + 16); player.sanity = R16(b + 18); player.oil = R16(b + 20);
@@ -298,6 +301,7 @@ bool DecodeSnapshot(const uint8_t* p, size_t n, Snapshot& s) {
         player.forwardMax = R16(b+43); player.sideMax = R16(b+45); player.acceleration = R16(b+47); player.deceleration = R16(b+49);
         player.backwardMax = R16(b+51);
         player.verticalSpeed=Signed16(b+53); player.verticalAcceleration=Signed16(b+55); player.jumpSpeed=R16(b+57); player.grounded=b[59];
+        player.runForward=R16(b+60); player.runBackward=R16(b+62); player.runSide=R16(b+64); player.moveFlags=b[66];
         if (!ValidPlayer(player)) return false;
     }
     s = value; return true;
@@ -308,7 +312,7 @@ std::vector<uint8_t> EncodeLife(const Snapshot& s) {
     return bytes;
 }
 bool DecodeLife(const uint8_t* p, size_t n, Snapshot& s) {
-    if(!ValidHeader(p, n) || n != 137 || p[4] != uint8_t(Message::Life)) return false;
+    if(!ValidHeader(p, n) || n != 151 || p[4] != uint8_t(Message::Life)) return false;
     auto bytes = std::vector<uint8_t>(p, p + n);
     bytes[4] = uint8_t(Message::Snapshot);
     return DecodeSnapshot(bytes.data(), bytes.size(), s);
@@ -580,7 +584,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         return;
     }
     if(ready_ && role_ == Role::Host && channel == 0 && n >= 23 && p[4] == uint8_t(Message::Action)) {
-        if(p[13] < 1 || p[13] > 7 || p[14] > 1) { Reject("invalid player action"); return; }
+        if(p[13] < 1 || p[13] > 8 || p[14] > 1) { Reject("invalid player action"); return; }
         ActionRequest action; action.epoch = R32(p + 5); action.sequence = R32(p + 9);
         action.action = PlayerAction(p[13]); action.pressed = p[14] != 0; action.inputSequence = R32(p + 15);
         size_t cursor = 19;
@@ -674,6 +678,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
     }
     Reject("unexpected message, channel, size or input value");
 }
+void Session::Flush() { if(host_ && peer_) enet_host_flush(host_); }
 void Session::Poll() {
     if (!host_) return;
     const uint32_t now = enet_time_get();
@@ -904,7 +909,7 @@ bool Session::ReadEntity(EntityState& e) {
     return true;
 }
 bool Session::SendAction(const ActionRequest& a) {
-    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 7 || a.item.size() > 128 || a.secondItem.size() > 128) return false;
+    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 8 || a.item.size() > 128 || a.secondItem.size() > 128) return false;
     auto out = Header(Message::Action); U32(out, a.epoch); U32(out, a.sequence); out.push_back(uint8_t(a.action)); out.push_back(a.pressed ? 1 : 0);
     U32(out, a.inputSequence); String(out, a.item); String(out, a.secondItem);
     return Send(out, 0, true);

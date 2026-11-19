@@ -969,8 +969,10 @@ void cLuxPlayerFlashback::Update(float afTimeStep)
 			mpPlayer->SetEventRunSpeedMul(mfRunSpeedMul);
 
 			//Coop: the vision is shown to both players, so slow both of them.
-			if(gpBase->mpMapHandler->GetCoopMode() && gpBase->mpPlayer2 && gpBase->mpPlayer2!=mpPlayer &&
-				ImGuiDebugMenu::GetSharedFlashbackVisions())
+			//Online the partner always sees the vision (replicated), so slow it too.
+			if(gpBase->mpPlayer2 && gpBase->mpPlayer2!=mpPlayer &&
+				((gpBase->mpMapHandler->GetCoopMode() && ImGuiDebugMenu::GetSharedFlashbackVisions()) ||
+				 (gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())))
 			{
 				gpBase->mpPlayer2->SetEventMoveSpeedMul(mfMoveSpeedMul);
 				gpBase->mpPlayer2->SetEventRunSpeedMul(mfRunSpeedMul);
@@ -1030,8 +1032,10 @@ void cLuxPlayerFlashback::Update(float afTimeStep)
 			mpPlayer->SetEventRunSpeedMul(1.0f);
 
 			//Coop: restore the other player too (see the matching block above).
-			if(gpBase->mpMapHandler->GetCoopMode() && gpBase->mpPlayer2 && gpBase->mpPlayer2!=mpPlayer &&
-				ImGuiDebugMenu::GetSharedFlashbackVisions())
+			//Online the partner always sees the vision (replicated), so slow it too.
+			if(gpBase->mpPlayer2 && gpBase->mpPlayer2!=mpPlayer &&
+				((gpBase->mpMapHandler->GetCoopMode() && ImGuiDebugMenu::GetSharedFlashbackVisions()) ||
+				 (gpBase->mpNetwork && gpBase->mpNetwork->HasNetworkPlayers())))
 			{
 				gpBase->mpPlayer2->SetEventMoveSpeedMul(1.0f);
 				gpBase->mpPlayer2->SetEventRunSpeedMul(1.0f);

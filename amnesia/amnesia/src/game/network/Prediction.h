@@ -70,7 +70,7 @@ public:
     PredictedPosition Reconcile(const PlayerState& state, uint32_t acknowledged, Collision collide) {
         while(!commands_.empty() && uint32_t(acknowledged - commands_.front().input.sequence) < 0x80000000u) commands_.pop_front();
         PredictedPosition p = {state.x/1000.0f,state.z/1000.0f};
-        if(!(state.flags & 4) || (state.flags & (1|8|16|32))) { Clear(); return p; }
+        if(!(state.flags & 4) || (state.flags & (1|8|16|32|128))) { Clear(); return p; }
         float forward = state.forwardSpeed/1000.0f, side = state.sideSpeed/1000.0f, age = 0;
         auto speed = [](float current, float target, float change) { return current + std::max(-change,std::min(change,target-current)); };
         for(const auto& command : commands_) {
@@ -101,13 +101,14 @@ public:
     PredictedPosition ReplayWith(const PlayerState& state, uint32_t acknowledged, Stepper& stepper) {
         while(!commands_.empty() && uint32_t(acknowledged - commands_.front().input.sequence) < 0x80000000u) commands_.pop_front();
         PredictedPosition p = {state.x/1000.0f,state.z/1000.0f};
-        if(!(state.flags & 4) || (state.flags & (1|8|16|32))) { Clear(); return p; }
+        // Il corpo del motore ha già la forma e le velocità da accovacciato
+        // dell'host; restano escluse solo morte, visuale guidata e scale.
+        if(!(state.flags & 4) || (state.flags & (8|16|32|128))) { Clear(); return p; }
         float age = 0; bool begun = false;
         for(const auto& command : commands_) {
             const float dt = std::min(command.dt,0.5f-age);
             if(dt <= 0) break;
             age += dt;
-            if(command.input.buttons & 2) break; // crouch changes the collision shape
             if(!begun) { stepper.Begin(state); begun = true; }
             p = stepper.Step(command.input, dt);
         }
@@ -116,15 +117,15 @@ public:
     }
     template<class Collision>
     PredictedPosition ReconcileSmoothed(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, Collision collide) {
-        return Smoothed(state,acknowledged,poseSequence,dt,collide,[&](const PlayerState& s, uint32_t ack) { return Reconcile(s,ack,collide); });
+        return Smoothed(state,acknowledged,poseSequence,dt,uint8_t(1|8|16|32|128),collide,[&](const PlayerState& s, uint32_t ack) { return Reconcile(s,ack,collide); });
     }
     template<class Stepper, class Collision>
     PredictedPosition ReconcileSmoothedWith(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, Stepper& stepper, Collision collide) {
-        return Smoothed(state,acknowledged,poseSequence,dt,collide,[&](const PlayerState& s, uint32_t ack) { return ReplayWith(s,ack,stepper); });
+        return Smoothed(state,acknowledged,poseSequence,dt,uint8_t(8|16|32|128),collide,[&](const PlayerState& s, uint32_t ack) { return ReplayWith(s,ack,stepper); });
     }
     template<class Collision, class Replay>
-    PredictedPosition Smoothed(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, Collision collide, Replay replay) {
-        if(!std::isfinite(dt) || dt <= 0 || !(state.flags & 4) || (state.flags & (1|8|16|32))) {
+    PredictedPosition Smoothed(const PlayerState& state, uint32_t acknowledged, uint32_t poseSequence, float dt, uint8_t excluded, Collision collide, Replay replay) {
+        if(!std::isfinite(dt) || dt <= 0 || !(state.flags & 4) || (state.flags & excluded)) {
             hasPrevious_ = false; correction_ = {}; return replay(state,acknowledged);
         }
         const bool newPose = hasPrevious_ && poseSequence != previousSequence_;
@@ -135,11 +136,13 @@ public:
             const float dx = before.x - raw.x, dz = before.z - raw.z;
             // Diagnostica: quanto la nuova posa autorevole sposta la previsione.
             poseCorrection_ = std::sqrt(dx*dx + dz*dz); hasPoseCorrection_ = true;
-            if(dx*dx + dz*dz > 0.0625f || std::abs(int64_t(state.y) - previousState_.y) > 250) correction_ = {};
+            if(dx*dx + dz*dz > 1.0f || std::abs(int64_t(state.y) - previousState_.y) > 250) correction_ = {};
             else { correction_.x += dx; correction_.z += dz; }
         }
-        if(correction_.x*correction_.x + correction_.z*correction_.z > 0.0625f) correction_ = {};
-        const float decay = std::exp(-std::min(dt,0.25f)/0.08f);
+        const float correction2 = correction_.x*correction_.x + correction_.z*correction_.z;
+        if(correction2 > 1.0f) correction_ = {};
+        // Le correzioni grandi rientrano più in fretta.
+        const float decay = std::exp(-std::min(dt,0.25f)/(correction2 > 0.0625f ? 0.05f : 0.08f));
         correction_.x *= decay; correction_.z *= decay;
         PredictedPosition shown = raw;
         if(std::fabs(correction_.x) + std::fabs(correction_.z) > 0.0001f) {
@@ -164,7 +167,7 @@ public:
     void Clear() { valid_=pending_=false; correction_=0; jumpAge_=0; }
     bool Pending() const { return pending_; }
     bool StartJump(const PlayerState& state,uint32_t inputSequence) {
-        if(pending_ || !state.grounded || !state.jumpSpeed || !(state.flags&4) || (state.flags&(1|8|16|32|64))) return false;
+        if(pending_ || !state.grounded || !state.jumpSpeed || !(state.flags&4) || (state.flags&(1|8|16|32|64|128))) return false;
         pending_=true; jumpSequence_=inputSequence; jumpAge_=0;
         jumpBase_=valid_?shown_:state.y/1000.0f; jumpSpeed_=state.jumpSpeed/1000.0f;
         jumpAcceleration_=state.verticalAcceleration/1000.0f*.15f;
@@ -174,7 +177,7 @@ public:
     float Update(const PlayerState& state,uint32_t acknowledged,uint32_t poseSequence,float dt,float poseAge,Collision collide,
                  float groundHeight=std::numeric_limits<float>::quiet_NaN()) {
         const float base=state.y/1000.0f;
-        if(!std::isfinite(dt) || dt<=0 || !(state.flags&4) || (state.flags&(1|8|16|32|64))) { Clear(); return base; }
+        if(!std::isfinite(dt) || dt<=0 || !(state.flags&4) || (state.flags&(8|16|32|64|128))) { Clear(); return base; }
         dt=std::min(dt,.05f);
         if(pending_) {
             jumpAge_+=dt;

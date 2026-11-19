@@ -620,6 +620,13 @@ namespace hpl {
 			mlstEntityYPositions.clear();
 		}
 	}
+	cVector3f iCharacterBody::GetCameraSmoothLag() const
+	{
+		if(mlCameraSmoothPosNum <= 0 || mlstCameraPos.empty()) return cVector3f(0);
+		cVector3f vTotal(0);
+		for(tVector3fList::const_iterator it = mlstCameraPos.begin(); it != mlstCameraPos.end(); ++it) vTotal += *it;
+		return vTotal / (float)mlstCameraPos.size() - mlstCameraPos.back();
+	}
 	const cVector3f& iCharacterBody::GetPosition()
 	{
 		return mvPosition;

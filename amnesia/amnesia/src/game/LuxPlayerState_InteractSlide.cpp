@@ -18,6 +18,7 @@
  */
 
 #include "LuxPlayerState_InteractSlide.h"
+#include "LuxNetwork.h"
 
 #include "LuxPlayer.h"
 #include "LuxMapHandler.h"
@@ -235,6 +236,8 @@ bool cLuxPlayerState_InteractSlide::OnAddYaw(float afAmount)
 
 bool cLuxPlayerState_InteractSlide::OnAddPitch(float afAmount)
 {
+	//A remote player's pitch already follows its own invert setting.
+	if(!gpBase->mpNetwork || !gpBase->mpNetwork->OwnsPlayerInput(mpPlayer)) {
 #ifdef USE_GAMEPAD
 	////////////////
 	// We have both gamepad and mouse connected?
@@ -257,6 +260,7 @@ bool cLuxPlayerState_InteractSlide::OnAddPitch(float afAmount)
 #else
 	if(gpBase->mpInputHandler->GetInvertMouse()) afAmount = -afAmount;
 #endif
+	}
 	mvMouseAdd.y += afAmount;
 
 	return false;

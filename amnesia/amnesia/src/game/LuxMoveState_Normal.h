@@ -92,6 +92,9 @@ public:
 
 	float GetMoveSpeedMul();
 	float GetRunSpeedMul();
+	// Velocità massima con la corsa divisa per quella senza, adesso (1 da
+	// accovacciati o in aria). Serve alla previsione del client online.
+	void GetRunMaxSpeedRatios(float& afForward, float& afBackward, float& afSideway);
 	
 private:
 	bool UpdateLedgeCheck(float afTimeStep);

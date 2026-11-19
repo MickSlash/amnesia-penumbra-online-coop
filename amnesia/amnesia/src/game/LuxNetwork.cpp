@@ -212,13 +212,16 @@ void cLuxNetwork::OnStart() {
     if (std::string(role) == "host") Host(port);
     else if (std::string(role) == "client") {
         const char* address = std::getenv("AMNESIA_NET_ADDRESS");
-        Join(address ? address : "127.0.0.1", port);
+        // Prova degli inviti: il client entra solo dall'invito Steam (finto).
+        if(std::getenv("AMNESIA_NET_TEST_STEAM_JOIN")) NetLog("[NET/STEAM] QA client waits for the Steam join request");
+        else Join(address ? address : "127.0.0.1", port);
     } else NetLog("[NET] AMNESIA_NET_ROLE must be host or client");
     if (mSession.GetRole() != online::Role::Offline || mSmokeSeconds)
         gpBase->mpEngine->SetWaitIfAppOutOfFocus(false);
 }
 void cLuxNetwork::Update(float timeStep) {
     luxsteam::Update();
+    UpdateSteam();
     gpBase->mpEngine->SetWaitIfAppOutOfFocus(
         mSession.GetRole() == online::Role::Offline && !mSmokeSeconds ? mOriginalFocusWait : false);
     mSession.Poll();
@@ -284,7 +287,7 @@ void cLuxNetwork::Update(float timeStep) {
             mSession.StartClient(mConnectAddress, mConnectPort, true); mRetryAt = connectionNow + std::chrono::seconds(1);
         }
         const auto missing = connectionNow - mRecoveryStart;
-        if(!mMigrationHost && !mMigrationAttempted && mSession.RetryAllowed() && !mSession.PartnerLeftVoluntarily()) {
+        if(!mMigrationHost && !mMigrationAttempted && !mSteamBridge.Running() && mSession.RetryAllowed() && !mSession.PartnerLeftVoluntarily()) {
             if(IsClientReplica() && missing >= std::chrono::seconds(12) && !mRecoveryCheckpoint.bytes.empty()) {
                 mMigrationAttempted = true;
                 if(!PromoteFromCheckpoint()) NetLog("[NET/RECOVERY] Promotion failed; campaign remains paused");
@@ -310,6 +313,9 @@ void cLuxNetwork::Update(float timeStep) {
     }
     const auto replicationStart = std::chrono::steady_clock::now();
     UpdateReplication(timeStep);
+    // Gli snapshot di questo tick partono subito, non al Poll del tick dopo.
+    mSession.Flush();
+    UpdateGameShot();
     if(mSession.GetRole() != online::Role::Offline) {
         const auto replicationEnd = std::chrono::steady_clock::now();
         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(replicationEnd-replicationStart).count();
@@ -705,8 +711,10 @@ bool cLuxNetwork::PlaceRemotePlayer2() {
 struct NativeStepper {
     iCharacterBody* body;
     iCharacterBody::tPredictionState saved;
+    online::PlayerState host;
     explicit NativeStepper(iCharacterBody* b) : body(b) {}
     void Begin(const online::PlayerState& s) {
+        host = s;
         saved = body->GetPredictionState();
         auto start = saved;
         start.mvPosition = start.mvLastPosition = cVector3f(s.x/1000.0f, s.y/1000.0f, s.z/1000.0f) + cVector3f(0, body->GetSize().y/2, 0);
@@ -723,6 +731,18 @@ struct NativeStepper {
     }
     online::PredictedPosition Step(const online::PlayerInput& input, float dt) {
         body->SetYaw(input.yaw/1000.0f);
+        // Corsa premuta o lasciata dopo l'ultima posa dell'host: la stessa
+        // velocità massima che l'host userà con questo comando.
+        const bool run = (input.buttons & 4) != 0, hostRun = (host.moveFlags & 1) != 0;
+        float forward = 1, backward = 1, side = 1;
+        if(run != hostRun) {
+            forward = host.runForward/1000.0f; backward = host.runBackward/1000.0f; side = host.runSide/1000.0f;
+            if(!run) { forward = 1/forward; backward = 1/backward; side = 1/side; }
+        }
+        body->SetMaxPositiveMoveSpeed(eCharDir_Forward, host.forwardMax/1000.0f*forward);
+        body->SetMaxNegativeMoveSpeed(eCharDir_Forward, -host.backwardMax/1000.0f*backward);
+        body->SetMaxPositiveMoveSpeed(eCharDir_Right, host.sideMax/1000.0f*side);
+        body->SetMaxNegativeMoveSpeed(eCharDir_Right, -host.sideMax/1000.0f*side);
         // Come sull'host: un asse fermo non riceve Move (Move(0) toglie l'attrito).
         if(input.forward) body->Move(eCharDir_Forward, input.forward/1000.0f);
         if(input.strafe) body->Move(eCharDir_Right, input.strafe/1000.0f);
@@ -922,7 +942,11 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
             continue;
         }
         if(!player->IsActive()) continue;
-        if(action.action==online::PlayerAction::Jump) { player->Jump(action.pressed); continue; }
+        // Con la coda dei comandi il salto arriva già, al tick giusto, dal bit
+        // del comando; l'azione serve solo all'invio della 0.5.1.
+        if(action.action==online::PlayerAction::Jump) { if(LegacyInput()) player->Jump(action.pressed); continue; }
+        // Rotellina: distanza degli oggetti afferrati e simili.
+        if(action.action==online::PlayerAction::Scroll) { player->Scroll(action.pressed ? 1.0f : -1.0f); continue; }
         if(action.action == online::PlayerAction::UseInventory || action.action == online::PlayerAction::CombineInventory) {
             gpBase->mpInventory->ApplyNetworkItemAction(player, action.item, action.secondItem, action.action == online::PlayerAction::CombineInventory);
             continue;
@@ -954,6 +978,53 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
     if(!active && mRemoteInteractHeld) { player->DoAction(eLuxPlayerAction_Interact, false); mRemoteInteractHeld = false; }
     mPreviousButtons = buttons;
     return true;
+}
+// QA: AMNESIA_QA_GAME_SHOT=<file> salva un'immagine della visuale di gioco
+// (host e client, stessa direzione) per confrontare la qualità del client.
+void cLuxNetwork::UpdateGameShot() {
+    const char* path = std::getenv("AMNESIA_QA_GAME_SHOT");
+    if(!path || mGameShotDone || !gpBase->mpMapHandler->MapIsLoaded() || !mSession.Connected()) return;
+    if(IsClientReplica() ? !mBaselineApplied : !mBaselineSent) return;
+    const auto now = std::chrono::steady_clock::now();
+    if(!mGameShotAt.time_since_epoch().count()) { mGameShotAt = now; return; }
+    const float age = std::chrono::duration<float>(now - mGameShotAt).count();
+    // Due immagini, a 8 e 16 s: distingue un effetto passeggero da un difetto.
+    const int index = mGameShotCount;
+    // L'host mette il giocatore 2 accanto a sé: stessa scena per il confronto.
+    if(!IsClientReplica() && age > 2 && age < 3 && gpBase->mpPlayer2 && gpBase->mpPlayer2->GetCharacterBody())
+        gpBase->mpPlayer2->GetCharacterBody()->SetFeetPosition(gpBase->mpPlayer->GetCharacterBody()->GetFeetPosition() + cVector3f(0.6f,0,0));
+    if(age < 8 + 8 * index) { gpBase->mpPlayer->GetCamera()->SetYaw(0); gpBase->mpPlayer->GetCamera()->SetPitch(-0.15f); return; }
+    std::string file = path;
+    if(index) { const auto dot = file.rfind('.'); file = file.substr(0, dot) + "_2" + (dot == std::string::npos ? "" : file.substr(dot)); }
+    cBitmap* bitmap = gpBase->mpEngine->GetGraphics()->GetLowLevel()->CopyFrameBufferToBitmap();
+    if(bitmap) { gpBase->mpEngine->GetResources()->GetBitmapLoaderHandler()->SaveBitmap(bitmap, cString::To16Char(file), 0); hplDelete(bitmap); }
+    const cVector2l size = gpBase->mpEngine->GetGraphics()->GetLowLevel()->GetScreenSizeInt();
+    NetLog(std::string("[NET/TEST] Game screenshot saved role=") + (IsClientReplica() ? "client" : "host") +
+        " size=" + std::to_string(size.x) + "x" + std::to_string(size.y) + " index=" + std::to_string(index));
+    mGameShotDone = ++mGameShotCount >= 2;
+}
+bool cLuxNetwork::LegacyCamera() {
+    static const bool legacy = [] { const char* v = std::getenv("AMNESIA_NET_CAMERA"); return v && std::string(v) == "legacy"; }();
+    return legacy;
+}
+// Client: quanto la telecamera locale si scosta dalla media dei piedi mostrati
+// mentre ci si muove (lean e oscillazione della testa compresi), ogni 5 s.
+void cLuxNetwork::ReportCamera(const cVector3f& camera, const cVector3f& smoothed, const cVector3f& feet) {
+    const auto now = std::chrono::steady_clock::now();
+    if((feet - mCameraLastFeet).Length() > 0.001f) mCameraMovedAt = now;
+    mCameraLastFeet = feet;
+    if(!mCameraReportAt.time_since_epoch().count()) mCameraReportAt = now;
+    if(mCameraMovedAt.time_since_epoch().count() && now - mCameraMovedAt < std::chrono::milliseconds(500)) {
+        const float dx = camera.x - smoothed.x, dz = camera.z - smoothed.z, error = std::sqrt(dx*dx + dz*dz);
+        ++mCameraFrames; mCameraSum += error; mCameraMax = std::max(mCameraMax, error);
+        if(error > 0.05f) ++mCameraOver5cm;
+        if(error > 0.10f) ++mCameraOver10cm;
+    }
+    if(now - mCameraReportAt < std::chrono::seconds(5)) return;
+    if(mCameraFrames) NetLog(std::string("[NET/CAMERA] mode=") + (LegacyCamera() ? "legacy" : "local_smoothing") + " frames=" + std::to_string(mCameraFrames) +
+        " over_5cm=" + std::to_string(mCameraOver5cm) + " over_10cm=" + std::to_string(mCameraOver10cm) +
+        " mean_cm=" + std::to_string(100.0f * mCameraSum / mCameraFrames) + " max_cm=" + std::to_string(100.0f * mCameraMax));
+    mCameraFrames = mCameraOver5cm = mCameraOver10cm = 0; mCameraSum = mCameraMax = 0; mCameraReportAt = now;
 }
 bool cLuxNetwork::KinematicPrediction() {
     static const bool kinematic = [] { const char* v = std::getenv("AMNESIA_NET_PREDICTION"); return v && std::string(v) == "kinematic"; }();
@@ -1043,8 +1114,69 @@ bool cLuxNetwork::Host(uint16_t port) {
     gpBase->mpMainConfig->SetString("Online","Port",std::to_string(port));
     mRecoveryCheckpoint.bytes.clear(); mMigrationAttempted = mMigrationHost = false;
     const bool started = mSession.StartHost(port);
-    if(started) gpBase->mpEngine->SetWaitIfAppOutOfFocus(false);
+    if(started) { gpBase->mpEngine->SetWaitIfAppOutOfFocus(false); StartSteamHost(port); }
     return started;
+}
+bool cLuxNetwork::SteamAvailable() const { return luxsteam::Available() && luxsteam::Transport(); }
+bool cLuxNetwork::SteamLobbyOpen() const { return luxsteam::Lobby() != 0 && mSteamBridge.IsHost(); }
+// L'host apre una lobby Steam riservata agli amici e inoltra alla sua porta
+// ENet i messaggi che arrivano dalla rete di Steam.
+bool cLuxNetwork::StartSteamHost(uint16_t port) {
+    if(!SteamAvailable()) return false;
+    mSteamJoining = false; mSteamHost = 0;
+    if(!mSteamBridge.StartHost(luxsteam::Transport(), port)) { NetLog("[NET/STEAM] Cannot start the Steam bridge"); return false; }
+    if(!luxsteam::Lobby() && !luxsteam::CreateLobby()) { NetLog("[NET/STEAM] Cannot create the Steam lobby"); return false; }
+    NetLog("[NET/STEAM] Steam lobby and relay bridge started for port " + std::to_string(port));
+    return true;
+}
+// Invito accettato: il ponte locale porta la sessione ENet all'host via Steam.
+// Se è lo stesso host dell'ultima partita, si riprende la sessione (rientro in
+// una partita già in corso: l'host la tiene in pausa e ricostruisce il mondo).
+bool cLuxNetwork::JoinSteamHost(uint64_t owner) {
+    uint16_t port = 0;
+    mSteamBridge.Stop();
+    if(!mSteamBridge.StartClient(luxsteam::Transport(), owner, port)) { NetLog("[NET/STEAM] Cannot start the Steam bridge"); return false; }
+    const bool sameHost = gpBase->mpMainConfig->GetString("Online","LastSteamHost","") == std::to_string(owner);
+    mSteamHost = owner;
+    gpBase->mpMainConfig->SetString("Online","LastSteamHost",std::to_string(owner));
+    bool ok = false;
+    if(mSession.GetRole() == online::Role::Client || (sameHost && mLastRole == online::Role::Client && gpBase->mpMapHandler->MapIsLoaded())) {
+        mConnectAddress = "127.0.0.1"; mConnectPort = port;
+        if(mSession.GetRole() == online::Role::Offline) mLastRole = online::Role::Client;
+        ok = Reconnect();
+    } else ok = Join("127.0.0.1", port);
+    gpBase->mpMainConfig->SetString("Online","LastConnection","steam");
+    NetLog(std::string("[NET/STEAM] ") + (ok ? "Connecting to the host through Steam" : "Cannot connect to the host through Steam"));
+    return ok;
+}
+void cLuxNetwork::UpdateSteam() {
+    if(mSteamBridge.Running() && mSession.GetRole() == online::Role::Offline && !mSteamJoining) mSteamBridge.Stop();
+    if(!SteamAvailable()) return;
+    const bool it = ItalianText();
+    uint64_t lobby = 0;
+    while(luxsteam::TakeJoinRequest(lobby)) {
+        if(mSession.GetRole() == online::Role::Host) { NetLog("[NET/STEAM] Join request ignored: this PC is hosting"); continue; }
+        if(mSession.Connected()) { NetLog("[NET/STEAM] Join request ignored: already connected"); continue; }
+        mSteamJoining = luxsteam::JoinLobby(lobby);
+        mSteamNotice = mSteamJoining ? (it ? "Ingresso nella lobby Steam..." : "Joining the Steam lobby...") :
+            (it ? "Impossibile entrare nella lobby Steam." : "Could not join the Steam lobby.");
+        NetLog(mSteamJoining ? "[NET/STEAM] Joining a Steam lobby" : "[NET/STEAM] Cannot join the Steam lobby");
+    }
+    uint64_t owner = 0; bool ok = false;
+    while(luxsteam::TakeLobbyEntered(lobby, owner, ok)) {
+        if(!mSteamJoining) {
+            if(!ok && mSession.GetRole() == online::Role::Host) mSteamNotice = it ? "Lobby Steam non creata: gli inviti non sono disponibili." : "Steam lobby not created: invites are unavailable.";
+            continue; // l'host entra nella propria lobby
+        }
+        mSteamJoining = false;
+        if(!ok || !owner || owner == luxsteam::LocalUser()) {
+            mSteamNotice = it ? "Impossibile entrare nella lobby Steam (piena o chiusa)." : "Could not join the Steam lobby (full or closed).";
+            continue;
+        }
+        const std::string name = luxsteam::UserName(owner);
+        mSteamNotice = JoinSteamHost(owner) ? (it ? "Collegamento a " : "Connecting to ") + name + (it ? " tramite Steam..." : " through Steam...") :
+            (it ? "Collegamento tramite Steam non riuscito." : "Could not connect through Steam.");
+    }
 }
 bool cLuxNetwork::Join(const std::string& address, uint16_t port) {
     ++mCheckpointContext;
@@ -1054,6 +1186,8 @@ bool cLuxNetwork::Join(const std::string& address, uint16_t port) {
     gpBase->mpMainConfig->SetString("Online","LastAddress",address);
     gpBase->mpMainConfig->SetString("Online","Port",std::to_string(port));
     mRecoveryCheckpoint.bytes.clear(); mMigrationAttempted = mMigrationHost = false;
+    gpBase->mpMainConfig->SetString("Online","LastConnection","ip");
+    if(address != "127.0.0.1" || !mSteamBridge.Running() || mSteamBridge.IsHost()) { mSteamBridge.Stop(); mSteamHost = 0; }
     mSession.SetListenPort(port);
     const bool started = mSession.StartClient(address, port);
     if(started) gpBase->mpEngine->SetWaitIfAppOutOfFocus(false);
@@ -1071,6 +1205,9 @@ void cLuxNetwork::Disconnect(bool menuHandlesReset) {
             gpBase->mpMainConfig->SetString("Online","LastAddress",mConnectAddress);
     }
     ++mCheckpointContext; mSession.CloseVoluntarily(); mRecovering = mEverConnected = mClientSharedIntro = false;
+    // La lobby si lascia subito; il ponte si ferma quando la chiusura è
+    // arrivata all'altro PC (sessione offline, vedi UpdateSteam).
+    luxsteam::LeaveLobby(); mSteamJoining = false; mSteamNotice.clear();
     mInputLeaseSeen = mInputLeasePaused = false; mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0;
     if(menuHandlesReset) mWasClient = mHadClientConnection = false;
 }
@@ -1079,8 +1216,21 @@ bool cLuxNetwork::Reconnect() {
     if(role == online::Role::Offline) return false;
     uint16_t port = mConnectPort;
     if(mSession.GetRole() == online::Role::Offline && !Port(gpBase->mpMainConfig->GetString("Online","Port","27020"),port)) return false;
-    const auto address = mSession.GetRole() == online::Role::Client ? mConnectAddress :
+    auto address = mSession.GetRole() == online::Role::Client ? mConnectAddress :
         gpBase->mpMainConfig->GetString("Online","LastAddress","127.0.0.1");
+    // Ultima partita tramite Steam: ponte verso lo stesso host (o di nuovo la lobby).
+    if(gpBase->mpMainConfig->GetString("Online","LastConnection","") == "steam" && SteamAvailable()) {
+        if(role == online::Role::Client) {
+            const uint64_t steamHost = std::strtoull(gpBase->mpMainConfig->GetString("Online","LastSteamHost","").c_str(), NULL, 10);
+            if(!steamHost) return false;
+            if(!mSteamBridge.Running() || mSteamBridge.IsHost() || mSteamBridge.Peer() != steamHost) {
+                uint16_t bridgePort = 0;
+                if(!mSteamBridge.StartClient(luxsteam::Transport(), steamHost, bridgePort)) return false;
+                mSteamHost = steamHost; mConnectPort = bridgePort;
+            }
+            address = "127.0.0.1"; port = mSteamBridge.LocalPort();
+        }
+    }
     const bool inGame = gpBase->mpMapHandler->MapIsLoaded();
     ++mCheckpointContext; mConnectionGeneration = 0; mInputLeaseSeen = mInputLeasePaused = false;
     mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0; mMigrationAttempted = mMigrationHost = false;
@@ -1089,20 +1239,33 @@ bool cLuxNetwork::Reconnect() {
     mConnectAddress = address; mConnectPort = port;
     mSession.SetListenPort(port);
     const bool ok = role == online::Role::Host ? mSession.StartHost(port,true) : mSession.StartClient(address,port,true);
+    if(ok && role == online::Role::Host) StartSteamHost(port);
     if(ok) { gpBase->mpEngine->SetWaitIfAppOutOfFocus(false); NetLog("[NET/CONNECTION] Manual reconnect requested"); }
     else mRecovering = mEverConnected = false;
     return ok;
 }
+bool cLuxNetwork::ItalianText() {
+    tString language = cString::ToLowerCase(gpBase->msCurrentLanguage);
+    return language.find("italian") != tString::npos;
+}
 std::string cLuxNetwork::ConnectionStatus() const {
+    const bool it = ItalianText();
+    auto T = [it](const char* english, const char* italian) { return std::string(it ? italian : english); };
     if(mRecovering && mSession.GetRole() == online::Role::Host && mSession.PartnerLeftVoluntarily())
-        return "Il partner e uscito. Campagna in pausa, in attesa che si ricolleghi.";
-    if(mInputLeasePaused) return "La rete non risponde: campagna in pausa, attesa del partner.";
-    if(mMigrationHost && mRecovering) return "Host trasferito a questo PC. Campagna recuperata, in attesa del partner.";
-    if(mRecovering) return mSession.RetryAllowed() ? "Connessione persa: riconnessione automatica, campagna in pausa." : "Connessione rifiutata: controlla versione e dati del gioco.";
-    if(mSession.GetRole() == online::Role::Offline) return "Scegli Ospita oppure inserisci l'IP del tuo amico e premi Connetti.";
-    if(!mSession.Connected()) return mSession.GetRole() == online::Role::Host ? "In attesa del tuo amico sulla porta UDP " + std::to_string(mConnectPort) : "Connessione in corso...";
-    if(!mSession.LobbyReady()) return "Amico connesso. Entrambi devono premere Pronto.";
-    return "Entrambi pronti. L'host puo avviare la campagna. Ping: " + std::to_string(mSession.Ping()) + " ms";
+        return T("Your partner left. Campaign paused until they reconnect.", "Il partner e uscito. Campagna in pausa, in attesa che si ricolleghi.");
+    if(mInputLeasePaused) return T("The network is not responding: campaign paused, waiting for your partner.", "La rete non risponde: campagna in pausa, attesa del partner.");
+    if(mMigrationHost && mRecovering) return T("Host moved to this PC. Campaign recovered, waiting for your partner.", "Host trasferito a questo PC. Campagna recuperata, in attesa del partner.");
+    if(mRecovering) return mSession.RetryAllowed() ? T("Connection lost: reconnecting automatically, campaign paused.", "Connessione persa: riconnessione automatica, campagna in pausa.") :
+        T("Connection refused: check the game version and data.", "Connessione rifiutata: controlla versione e dati del gioco.");
+    if(!mSteamNotice.empty() && !mSession.Connected()) return mSteamNotice;
+    if(mSession.GetRole() == online::Role::Offline) return SteamAvailable() ?
+        T("Choose Host and invite a Steam friend, or enter your friend's IP and press Connect.", "Scegli Ospita e invita un amico di Steam, oppure inserisci l'IP del tuo amico e premi Connetti.") :
+        T("Choose Host, or enter your friend's IP and press Connect.", "Scegli Ospita oppure inserisci l'IP del tuo amico e premi Connetti.");
+    if(!mSession.Connected()) return mSession.GetRole() == online::Role::Host ?
+        (SteamLobbyOpen() ? T("Steam lobby open: invite a friend, or wait on UDP port ", "Lobby Steam aperta: invita un amico, oppure attendi sulla porta UDP ") :
+            T("Waiting for your friend on UDP port ", "In attesa del tuo amico sulla porta UDP ")) + std::to_string(mConnectPort) : T("Connecting...", "Connessione in corso...");
+    if(!mSession.LobbyReady()) return T("Friend connected. Both players must press Ready.", "Amico connesso. Entrambi devono premere Pronto.");
+    return T("Both ready. The host can start the campaign. Ping: ", "Entrambi pronti. L'host puo avviare la campagna. Ping: ") + std::to_string(mSession.Ping()) + " ms";
 }
 void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
     mPropMotion.clear(); mEnemyMotion.clear(); mHasLastLocalFeet = false;
@@ -1170,7 +1333,24 @@ void cLuxNetwork::ApplyReplica(cLuxPlayer* player, const online::PlayerState& st
         player->GetCamera()->SetPitch(state.pitch / 1000.0f);
     }
     // Physics is disabled on replicas; position the camera without advancing a body.
-    player->GetCamera()->SetPosition(body->GetFeetPosition() + cVector3f(state.cameraX / 1000.0f, state.eyeHeight / 1000.0f, state.cameraZ / 1000.0f));
+    // La telecamera dell'host fa la media delle ultime posizioni della testa
+    // (CameraSmoothPosNum, 10 tick): lo scostamento inviato non contiene più
+    // quel ritardo e la media si rifà qui sui piedi mostrati, cioè previsti
+    // per il giocatore locale. Prima il ritardo arrivava vecchio di un RTT e
+    // tirava indietro la visuale quando si partiva, in avanti quando ci si
+    // fermava. AMNESIA_NET_CAMERA=legacy (su entrambi i PC) per i confronti.
+    const cVector3f feet = body->GetFeetPosition();
+    const cVector3f offset(state.cameraX / 1000.0f, state.eyeHeight / 1000.0f, state.cameraZ / 1000.0f);
+    auto& history = mCameraFeet[localView ? 0 : 1];
+    if(!history.empty() && (history.back() - feet).Length() > 1.0f) history.clear();
+    history.push_back(feet);
+    while(history.size() > size_t(std::max(1, body->GetCameraSmoothPosNum()))) history.pop_front();
+    cVector3f smoothed(0);
+    for(const auto& f : history) smoothed += f;
+    smoothed = smoothed / float(history.size());
+    const cVector3f camera = LegacyCamera() ? feet + offset : smoothed + offset;
+    player->GetCamera()->SetPosition(camera);
+    if(localView && IsClientReplica()) ReportCamera(camera, smoothed, feet);
     player->GetCamera()->SetRoll(state.roll / 1000.0f);
     player->GetCamera()->SetFOV(state.fov / 1000.0f);
     // The client keeps its own display ratio; reproduce only the scripted multiplier.
@@ -1321,18 +1501,29 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                 NetLog("[NET/STATE] First authoritative player snapshot applied");
                 const auto& p = snapshot.players[1]; mReplicaInitialFeet = cVector3f(p.x / 1000.0f, p.y / 1000.0f, p.z / 1000.0f);
             }
+            if(!mReceivedSnapshot) { mHasSnapshotTimeline = false; mSnapshots.clear(); }
             mReceivedSequence = snapshot.sequence; mReceivedSnapshot = true;
-            mSnapshots.push_back({snapshot, now});
+            // Ogni snapshot è un tick dell'host: l'orario di arrivo meno il suo
+            // tick dà l'origine della linea temporale. Si tiene la più precoce
+            // (risale lentamente per la deriva degli orologi), così il jitter e
+            // i pacchetti arrivati a gruppi non cambiano la velocità del compagno.
+            const auto tick = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(double(snapshot.sequence) * gpBase->mpEngine->GetStepSize()));
+            const auto origin = now - tick;
+            if(!mHasSnapshotTimeline || origin < mSnapshotTimeline || origin - mSnapshotTimeline > std::chrono::seconds(1)) mSnapshotTimeline = origin;
+            else mSnapshotTimeline += (origin - mSnapshotTimeline) / 100;
+            mHasSnapshotTimeline = true;
+            mSnapshots.push_back({snapshot, now, mSnapshotTimeline + tick});
             if(mSnapshots.size() > 32) mSnapshots.pop_front();
         }
         if(mSnapshots.empty()) return;
         const auto renderTime = now - std::chrono::milliseconds(100);
-        while(mSnapshots.size() > 2 && mSnapshots[1].received <= renderTime) mSnapshots.pop_front();
+        while(mSnapshots.size() > 2 && mSnapshots[1].timeline <= renderTime) mSnapshots.pop_front();
         online::Snapshot interpolated = mSnapshots.front().state;
         if(mSnapshots.size() > 1) {
             const auto& a = mSnapshots[0]; const auto& b = mSnapshots[1];
-            float duration = std::chrono::duration<float>(b.received - a.received).count();
-            float alpha = duration > 0 ? std::chrono::duration<float>(renderTime - a.received).count() / duration : 1;
+            float duration = std::chrono::duration<float>(b.timeline - a.timeline).count();
+            float alpha = duration > 0 ? std::chrono::duration<float>(renderTime - a.timeline).count() / duration : 1;
             alpha = std::max(0.0f, std::min(1.0f, alpha));
             for(int i = 0; i < 2; ++i) {
                 auto& p = interpolated.players[i]; const auto& q = b.state.players[i];
@@ -1658,12 +1849,14 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         p.health = uint16_t(std::max(0.0f, std::min(100.0f, player->GetHealth())) * 100);
         p.sanity = uint16_t(std::max(0.0f, std::min(100.0f, player->GetSanity())) * 100);
         p.oil = uint16_t(std::max(0.0f, std::min(100.0f, player->GetLampOil())) * 100);
-        p.eyeHeight = int16_t(std::max(-5.0f, std::min(5.0f, player->GetCamera()->GetPosition().y - feet.y)) * 1000);
         cCamera* camera = player->GetCamera();
+        // Testa senza il ritardo della media della telecamera (vedi ApplyReplica).
+        const cVector3f head = camera->GetPosition() - (LegacyCamera() ? cVector3f(0) : player->GetCharacterBody()->GetCameraSmoothLag());
+        p.eyeHeight = int16_t(std::max(-5.0f, std::min(5.0f, head.y - feet.y)) * 1000);
         const float roll = camera->GetRoll();
         p.roll = int16_t(std::atan2(std::sin(roll), std::cos(roll)) * 1000);
-        p.cameraX = int16_t(std::max(-5.0f, std::min(5.0f, camera->GetPosition().x - feet.x)) * 1000);
-        p.cameraZ = int16_t(std::max(-5.0f, std::min(5.0f, camera->GetPosition().z - feet.z)) * 1000);
+        p.cameraX = int16_t(std::max(-5.0f, std::min(5.0f, head.x - feet.x)) * 1000);
+        p.cameraZ = int16_t(std::max(-5.0f, std::min(5.0f, head.z - feet.z)) * 1000);
         p.fov = uint16_t(std::max(0.01f, std::min(3.142f, camera->GetFOV())) * 1000);
         const cVector2f screen = gpBase->mpEngine->GetGraphics()->GetLowLevel()->GetScreenSizeFloat();
         p.aspect = uint16_t(std::max(0.01f, std::min(20.0f, camera->GetAspect() / (screen.x / screen.y))) * 1000);
@@ -1682,6 +1875,11 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         auto* move=static_cast<cLuxMoveState_Normal*>(player->GetMoveStateData(eLuxMoveState_Normal));
         p.verticalAcceleration=signedSpeed(body->GravityIsActive()?gravity.y*move->GetJumpGravityMultiplier():0);
         p.grounded=body->IsOnGround()?1:0;
+        float runForward = 1, runBackward = 1, runSide = 1;
+        move->GetRunMaxSpeedRatios(runForward, runBackward, runSide);
+        auto ratio = [](float r) { return uint16_t(std::max(100.0f, std::min(10000.0f, r * 1000))); };
+        p.runForward = ratio(runForward); p.runBackward = ratio(runBackward); p.runSide = ratio(runSide);
+        p.moveFlags = move->IsRunning() ? 1 : 0;
         if(player->GetCurrentMoveState()==eLuxMoveState_Normal && player->GetCurrentState()==eLuxPlayerState_Normal &&
             !player->GetJumpDisabled() && !player->GetInsanityCollapse()->IsActive())
             p.jumpSpeed=fixedSpeed(move->GetJumpStartForce()*player->GetScriptJumpForceMul()*
@@ -1689,7 +1887,9 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         p.flags = (player->GetCharacterBody()->GetActiveSize() == 1 ? 1 : 0) |
             (player->GetHelperLantern()->IsActive() ? 2 : 0) | (player->IsActive() ? 4 : 0) | (player->IsDead() ? 8 : 0) |
             (player->GetHelperLookAt()->IsActive() || player->GetLookSpeedMul() <= 0 ? 16 : 0) |
-            (player->NetworkObjectControlsLook() ? 32 : 0);
+            (player->NetworkObjectControlsLook() ? 32 : 0) |
+            // Scala a pioli o arrampicata su un bordo: niente previsione.
+            (player->GetCurrentState() == eLuxPlayerState_Ladder || player->GetCurrentMoveState() != eLuxMoveState_Normal ? 128 : 0);
     }
     if(map->GetName() == "00_rainy_hall") {
         const auto* intro = map->GetVar("IntroSequenceState");
@@ -2902,8 +3102,9 @@ void cLuxNetwork::OnDraw(float afFrameTime) {
     if(!IsClientReplica() || !mSession.Connected() || !gpBase->mpGameHudSet || !gpBase->mpDefaultFont ||
         !gpBase->mpMapHandler->GetCurrentMap()) return;
     const wchar_t* text = NULL;
-    if(mSession.Loading()) text = _W("L'host sta caricando la mappa...");
-    else if(mSession.ApplicationAgeMs() > 1500) text = _W("In attesa dell'host...");
+    const bool italian = ItalianText();
+    if(mSession.Loading()) text = italian ? _W("L'host sta caricando la mappa...") : _W("The host is loading the map...");
+    else if(mSession.ApplicationAgeMs() > 1500) text = italian ? _W("In attesa dell'host...") : _W("Waiting for the host...");
     if(!text) return;
     gpBase->mpGameHudSet->DrawFont(gpBase->mpDefaultFont, cVector3f(400, 540, 30), cVector2f(18, 18), cColor(0.9f, 0.9f),
         eFontAlign_Center, eGuiMaterial_FontNormal, text);
@@ -2917,6 +3118,10 @@ void cLuxNetwork::OnDraw(float afFrameTime) {
 // used to crash in cGuiSet::RenderClipRegion; the PowerShell side also requires
 // the GuiSet warnings that prove the dead elements were skipped.
 void cLuxNetwork::UpdateFlashbackTest(cLuxMap* map) {
+    if(!IsClientReplica() && mFlashbackTestStage >= 1 && !mFlashbackSlowLogged && gpBase->mpPlayer2) {
+        if(gpBase->mpPlayer2->GetEventMoveSpeedMul() < 0.99f) { mFlashbackSlowLogged = true; NetLog("[NET/TEST] PASS flashback slows the remote player too"); }
+        else if(std::chrono::steady_clock::now() - mFlashbackTestAt > std::chrono::seconds(25)) { mFlashbackSlowLogged = true; NetLog("[NET/TEST] FAILED flashback did not slow the remote player"); }
+    }
     if(!map || !mSession.Connected() || !mSession.IsWorldApplied(mEpoch) || !gpBase->mpPlayer2 || mFlashbackTestStage >= 3) return;
     const auto now = std::chrono::steady_clock::now();
     if(!mFlashbackTestAt.time_since_epoch().count()) { mFlashbackTestAt = now; return; }

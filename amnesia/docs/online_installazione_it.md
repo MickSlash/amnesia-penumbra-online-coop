@@ -105,7 +105,22 @@ Se manca `MSVCP140.dll`, `VCRUNTIME140.dll` o `VCRUNTIME140_1.dll`, installare i
 
 Steam deve essere aperto e la mod deve avere gli stessi privilegi Windows del client Steam: normalmente avviare entrambi senza **Esegui come amministratore**. Se il runtime manca, verificare i file di Amnesia dalla libreria Steam. L'avvio segnala un errore se l'integrazione richiesta non può essere inizializzata; non passa silenziosamente a una presenza diversa.
 
-Per giocare senza Steam, con un'altra distribuzione legittima o offline senza il client, deselezionare la casella. La rete co-op resta su IP/UDP. Questa integrazione registra l'attività di gioco: non aggiunge achievement, sincronizzazione dei salvataggi Steam Cloud, inviti Steam o matchmaking. È comparsa la notifica dell'overlay nel test locale; l'apertura con Shift+Tab non è stata confermata dall'automazione. I salvataggi co-op restano nel profilo separato descritto sotto. Nessuna DLL Steam viene inclusa nello ZIP. Dettagli delle prove in `docs/qa_steam_2026-10-03.md` dentro `source.zip`.
+Per giocare senza Steam, con un'altra distribuzione legittima o offline senza il client, deselezionare la casella: la rete co-op resta su IP/UDP. Con la casella selezionata la mod aggiunge gli inviti Steam (sezione seguente); non aggiunge achievement, sincronizzazione dei salvataggi Steam Cloud o matchmaking pubblico. È comparsa la notifica dell'overlay nel test locale; l'apertura con Shift+Tab non è stata confermata dall'automazione. I salvataggi co-op restano nel profilo separato descritto sotto. Nessuna DLL Steam viene inclusa nello ZIP. Dettagli delle prove in `docs/qa_steam_2026-10-03.md` dentro `source.zip`.
+
+
+## Inviti Steam e rientro in partita
+
+Con **Mostra Amnesia su Steam** selezionato su entrambi i PC non servono IP, porte aperte, Hamachi o Radmin: la connessione passa per la rete di Steam e i suoi relay.
+
+1. Chi ospita apre **Co-op online** e preme **Ospita**: si apre una lobby Steam visibile solo agli amici.
+2. Nella riga in basso sceglie l'amico (prima chi sta già giocando ad Amnesia; se l'overlay di Steam è attivo c'è anche la finestra di invito di Steam) e preme **Invita**.
+3. L'amico avvia prima **AmnesiaCoop.exe**, poi accetta l'invito dalla chat di Steam oppure usa **Unisciti alla partita** sul nome di chi ospita nella lista amici. Il gioco si collega da solo; poi entrambi premono **Pronto** come sempre.
+
+Il pulsante Gioca della libreria Steam avvia il gioco originale: un invito accettato con il gioco chiuso apre quello e non la mod. Per questo l'amico deve avere la mod già aperta.
+
+**Rientro.** Se il client si disconnette o il gioco si chiude durante la campagna, l'host mette la partita in pausa e la tiene aperta. Il client riapre la mod e usa di nuovo **Unisciti alla partita** (o **Riconnettiti** nel menu): rientra nella stessa partita, con la stessa identità, e l'host ricostruisce il mondo. La lobby resta aperta finché l'host non chiude la sessione.
+
+Il collegamento diretto per IP resta disponibile e funziona come prima.
 
 ## LAN, Hamachi e Radmin VPN
 

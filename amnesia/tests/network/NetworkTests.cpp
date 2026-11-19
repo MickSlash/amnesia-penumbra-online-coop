@@ -3,6 +3,8 @@
 #include "../../amnesia/src/game/network/Prediction.h"
 #include "../../amnesia/src/game/network/ScriptPreloads.h"
 #include "../../amnesia/src/game/network/CrashDiagnostics.h"
+#include "../../amnesia/src/game/network/MessageBridge.h"
+#include <mutex>
 #include <chrono>
 #include <iostream>
 #ifdef _WIN32
@@ -741,6 +743,53 @@ static void BunchedInputTransportTest() {
     client.Stop(); host.Stop();
     std::cout << "PASS: redundant input batches over UDP\n";
 }
+// Rete di Steam finta in memoria: messaggi indirizzati per utente.
+struct FakeSteamNetwork { std::mutex lock; std::map<uint64_t, std::deque<std::pair<uint64_t, std::vector<uint8_t>>>> inbox; };
+class FakeSteamEndpoint : public online::MessageTransport {
+public:
+    FakeSteamEndpoint(FakeSteamNetwork& network, uint64_t id) : network_(network), id_(id) {}
+    bool Send(uint64_t peer, const uint8_t* data, size_t size) override {
+        std::lock_guard<std::mutex> guard(network_.lock); network_.inbox[peer].push_back({id_, std::vector<uint8_t>(data, data + size)}); return true;
+    }
+    bool Receive(uint64_t& peer, std::vector<uint8_t>& data) override {
+        std::lock_guard<std::mutex> guard(network_.lock); auto& queue = network_.inbox[id_];
+        if(queue.empty()) return false;
+        peer = queue.front().first; data = std::move(queue.front().second); queue.pop_front(); return true;
+    }
+    uint64_t Id() const { return id_; }
+private:
+    FakeSteamNetwork& network_; uint64_t id_;
+};
+// Sessione completa attraverso il ponte verso la rete di Steam (inviti), poi
+// rientro dello stesso giocatore con un ponte nuovo e un'altra porta locale.
+static void MessageBridgeTransportTest() {
+    FakeSteamNetwork steam;
+    FakeSteamEndpoint hostEnd(steam, 76561190000000001ull), clientEnd(steam, 76561190000000002ull);
+    online::MessageBridge hostBridge, clientBridge;
+    Session host(Log), client(Log);
+    uint16_t local = 0;
+    Check(host.StartHost(27062) && hostBridge.StartHost(&hostEnd, 27062), "steam bridge host startup");
+    Check(clientBridge.StartClient(&clientEnd, hostEnd.Id(), local) && local && client.StartClient("127.0.0.1", local), "steam bridge client startup");
+    auto pump = [&](int ms) { for(int i = 0; i < ms; ++i) { host.Poll(); client.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    for(int i = 0; i < 20 && !(host.Connected() && client.Connected()); ++i) pump(50);
+    Check(host.Connected() && client.Connected(), "handshake through the steam bridge");
+    PlayerInput input; input.forward = 1000; input.sequence = 1;
+    Check(client.SendInput(input), "send input through the bridge");
+    pump(40);
+    PlayerInput next; bool repeated = false;
+    Check(host.NextInput(next, repeated) && next.sequence == 1 && next.forward == 1000, "host simulates the command sent through the bridge");
+    Check(hostBridge.Received() > 0 && hostBridge.Sent() > 0 && clientBridge.Received() > 0 && clientBridge.Sent() > 0, "datagrams cross the bridge both ways");
+    client.CloseVoluntarily();
+    for(int i = 0; i < 20 && host.Connected(); ++i) pump(50);
+    Check(!host.Connected(), "host sees the partner leave through the bridge");
+    clientBridge.Stop(); client.Stop();
+    uint16_t again = 0;
+    Check(clientBridge.StartClient(&clientEnd, hostEnd.Id(), again) && again && client.StartClient("127.0.0.1", again), "rejoin bridge startup");
+    for(int i = 0; i < 40 && !(host.Connected() && client.Connected()); ++i) pump(50);
+    Check(host.Connected() && client.Connected(), "the same player rejoins the running host through a new bridge");
+    client.Stop(); clientBridge.Stop(); host.Stop(); hostBridge.Stop();
+    std::cout << "PASS: ENet session, leave and rejoin through the Steam message bridge\n";
+}
 int main(int argc, char** argv) {
 #ifdef _WIN32
     // ENet chiede il timer a 1 ms a ogni enet_initialize e lo rilascia a ogni
@@ -760,6 +809,7 @@ int main(int argc, char** argv) {
     }
     if(argc == 1) PropMotionTransportTest();
     if(argc == 1) BunchedInputTransportTest();
+    if(argc == 1) MessageBridgeTransportTest();
     InputBatchCodecTest();
     InputQueueTest();
     ScriptPreloadTest();
@@ -780,7 +830,7 @@ int main(int argc, char** argv) {
     Snapshot snapshot; snapshot.epoch = 1; snapshot.sequence = 17; snapshot.players[0].x = -54321;
     snapshot.players[1].verticalSpeed=4567; snapshot.players[1].verticalAcceleration=-20000; snapshot.players[1].jumpSpeed=4666; snapshot.players[1].grounded=1;
     auto stateBytes = EncodeSnapshot(snapshot); Snapshot stateRead;
-    Check(stateBytes.size() == 137 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
+    Check(stateBytes.size() == 151 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
         stateRead.players[0].x == -54321 && stateRead.sequence == 17, "signed snapshot roundtrip");
     Check(stateRead.players[1].verticalSpeed==4567 && stateRead.players[1].verticalAcceleration==-20000 && stateRead.players[1].jumpSpeed==4666 && stateRead.players[1].grounded==1,"vertical motor state roundtrip");
     snapshot.players[1].grounded=2; Check(EncodeSnapshot(snapshot).empty(),"grounded flag bounded"); snapshot.players[1].grounded=1;
@@ -797,8 +847,12 @@ int main(int argc, char** argv) {
     snapshot.players[1].flags |= 64;
     const auto introBytes=EncodeSnapshot(snapshot);
     Check(DecodeSnapshot(introBytes.data(),introBytes.size(),stateRead) && (stateRead.players[1].flags & 64), "shared intro camera flag survives snapshot codec");
-    snapshot.players[1].flags |= 128;
-    Check(EncodeSnapshot(snapshot).empty(), "unknown camera flags rejected");
+    snapshot.players[1].flags |= 128; snapshot.players[1].runForward = 1700; snapshot.players[1].moveFlags = 1;
+    const auto ladderBytes=EncodeSnapshot(snapshot);
+    Check(DecodeSnapshot(ladderBytes.data(),ladderBytes.size(),stateRead) && (stateRead.players[1].flags & 128) &&
+        stateRead.players[1].runForward == 1700 && stateRead.players[1].runSide == 1000 && stateRead.players[1].moveFlags == 1, "ladder flag and run ratios survive snapshot codec");
+    snapshot.players[1].runForward = 50; Check(EncodeSnapshot(snapshot).empty(), "run ratio bounded"); snapshot.players[1].runForward = 1000;
+    snapshot.players[1].moveFlags = 2; Check(EncodeSnapshot(snapshot).empty(), "unknown move flags rejected"); snapshot.players[1].moveFlags = 0;
     snapshot.players[1].flags &= 127;
     for(size_t n = 0; n < lifeBytes.size(); ++n) Check(!DecodeLife(lifeBytes.data(), n, stateRead), "truncated life event");
     snapshot.players[1].fov = 0; Check(EncodeLife(snapshot).empty(), "life camera range");

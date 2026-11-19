@@ -3,6 +3,7 @@
 #include "LuxBase.h"
 #include "network/NetSession.h"
 #include "network/Prediction.h"
+#include "network/MessageBridge.h"
 #include <chrono>
 #include <deque>
 #include <map>
@@ -44,11 +45,20 @@ public:
     bool Join(const std::string& address, uint16_t port);
     void Disconnect(bool menuHandlesReset = false);
     bool Reconnect();
+    // Steam (lobby, inviti, rete con relay). La lobby nasce con Host() quando
+    // Steam è attivo; chi accetta un invito entra con JoinSteamHost().
+    bool SteamAvailable() const;
+    bool SteamLobbyOpen() const;
+    bool SteamSession() const { return mSteamBridge.Running(); }
+    const std::string& SteamNotice() const { return mSteamNotice; }
+    void SetSteamNotice(const std::string& notice) { mSteamNotice = notice; }
     bool CanReconnect() const { return mLastRole != online::Role::Offline; }
     bool ClearOnlineImage() const { return mClearImage && mSession.GetRole() != online::Role::Offline; }
     bool ClearImagePreference() const { return mClearImage; }
     void SetClearImage(bool clear);
     std::string ConnectionStatus() const;
+    // Testi dell'interfaccia online: italiano se il gioco è in italiano.
+    static bool ItalianText();
 private:
     online::Session mSession;
     uint8_t mPreviousButtons = 0;
@@ -71,6 +81,29 @@ private:
     struct DeferredAction { online::ActionRequest request; std::chrono::steady_clock::time_point received; };
     std::deque<DeferredAction> mDeferredActions;
     static bool KinematicPrediction();
+    static bool LegacyCamera();
+    void UpdateGameShot();
+    bool mGameShotDone = false; int mGameShotCount = 0;
+    std::chrono::steady_clock::time_point mGameShotAt;
+    online::MessageBridge mSteamBridge;
+    uint64_t mSteamHost = 0;
+    bool mSteamJoining = false;
+    std::string mSteamNotice;
+    void UpdateSteam();
+    bool JoinSteamHost(uint64_t owner);
+    bool StartSteamHost(uint16_t port);
+    // Media della telecamera rifatta sul client (vedi ApplyReplica): piedi
+    // mostrati negli ultimi tick, 0 = giocatore locale, 1 = compagno.
+    std::deque<cVector3f> mCameraFeet[2];
+    void ReportCamera(const cVector3f& camera, const cVector3f& smoothed, const cVector3f& feet);
+    unsigned mCameraFrames = 0, mCameraOver5cm = 0, mCameraOver10cm = 0;
+    float mCameraSum = 0, mCameraMax = 0;
+    cVector3f mCameraLastFeet = cVector3f(0);
+    std::chrono::steady_clock::time_point mCameraReportAt, mCameraMovedAt;
+    bool mFlashbackSlowLogged = false;
+    // Linea temporale degli snapshot dal tick dell'host (non dall'arrivo).
+    std::chrono::steady_clock::time_point mSnapshotTimeline;
+    bool mHasSnapshotTimeline = false;
     void ReportPrediction(float error);
     unsigned mCorrectionPoses = 0, mCorrectionsOver2cm = 0, mCorrectionsOver10cm = 0;
     float mCorrectionSum = 0, mCorrectionMax = 0;
@@ -99,7 +132,7 @@ private:
     bool mMapAnnounced = false, mReceivedSnapshot = false, mTestMovement = false;
     std::chrono::steady_clock::time_point mMapWaitStart;
     std::chrono::steady_clock::time_point mLastSnapshotAt;
-    struct TimedSnapshot { online::Snapshot state; std::chrono::steady_clock::time_point received; };
+    struct TimedSnapshot { online::Snapshot state; std::chrono::steady_clock::time_point received, timeline; };
     std::deque<TimedSnapshot> mSnapshots;
     uint32_t mActionSequence = 0;
     bool mRemoteInteractHeld = false, mLoggedWorldReplica = false;

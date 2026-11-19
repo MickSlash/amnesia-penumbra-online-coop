@@ -487,6 +487,18 @@ void cLuxMoveState_Normal::UpdateMovement(float afTimeStep)
 
 //-----------------------------------------------------------------------
 
+void cLuxMoveState_Normal::GetRunMaxSpeedRatios(float& afForward, float& afBackward, float& afSideway)
+{
+	afForward = afBackward = afSideway = 1;
+	if(!mpPlayer->GetCharacterBody()->IsOnGround() || mbCrouching) return;
+	const float fRunSpeedMul = GetRunSpeedMul();
+	afForward = 1 + (mfRunForwardMul-1) * fRunSpeedMul;
+	afBackward = 1 + (mfRunBackwardMul-1) * fRunSpeedMul;
+	afSideway = 1 + (mfRunSidewayMul-1) * fRunSpeedMul;
+}
+
+//-----------------------------------------------------------------------
+
 void cLuxMoveState_Normal::UpdateSpeedMultipliers(float afTimeStep)
 {
 	iCharacterBody *pCharBody = mpPlayer->GetCharacterBody();

@@ -30,6 +30,7 @@
 #include "LuxDebugHandler.h"
 #include "LuxLoadScreenHandler.h"
 #include "LuxNetwork.h"
+#include "LuxSteam.h"
 #include <cstdlib>
 
 #include "LuxMainMenu_Profile.h"
@@ -462,6 +463,23 @@ void cLuxMainMenu::Update(float afTimeStep)
 	UpdateBase(afTimeStep);
 	//Log("3\n");
 	UpdateTopMenu(afTimeStep);
+
+	// QA: AMNESIA_QA_MENU_SHOT=<file.png> apre la finestra Co-op online, ne
+	// salva un'immagine dal frame buffer e chiude il gioco (screenshot per la
+	// documentazione senza controllare il mouse).
+	if(const char* pShot = std::getenv("AMNESIA_QA_MENU_SHOT"))
+	{
+		static float fShotTime = 0; static int lShotStage = 0;
+		fShotTime += afTimeStep;
+		if(lShotStage == 0 && fShotTime > 4 && mbTopMenuVisible) { SetWindowActive(eLuxMainMenuWindow_Online); lShotStage = 1; fShotTime = 0; }
+		else if(lShotStage == 1 && fShotTime > 2)
+		{
+			cBitmap *pBmp = gpBase->mpEngine->GetGraphics()->GetLowLevel()->CopyFrameBufferToBitmap();
+			if(pBmp) { gpBase->mpEngine->GetResources()->GetBitmapLoaderHandler()->SaveBitmap(pBmp, cString::To16Char(pShot), 0); hplDelete(pBmp); }
+			Log("[QA] Online menu screenshot saved: %s\n", pShot);
+			lShotStage = 2; gpBase->mpEngine->Exit();
+		}
+	}
 	//Log("Update end!\n");
 
 	//mpViewport->GetRenderSettings()->mbLog = true;
@@ -1215,7 +1233,7 @@ void cLuxMainMenu::CreateTopMenuGui()
 
 	///////////////
 	//Options
-    pLabel = mpGuiSet->CreateWidgetLabel(vPos,0,L"Co-op online");
+    pLabel = mpGuiSet->CreateWidgetLabel(vPos,0,cLuxNetwork::ItalianText() ? L"Co-op online" : L"Online co-op");
     pLabel->AddCallback(eGuiMessage_MouseDown,this,kGuiCallback(PressOnline));
     SetupTopMenuLabel(pLabel); vPos.y += fRowAdd;
 	pLabel = mpGuiSet->CreateWidgetLabel(vPos,0,kTranslate("MainMenu","Options"));

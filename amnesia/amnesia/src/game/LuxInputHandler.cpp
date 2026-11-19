@@ -1486,6 +1486,9 @@ void cLuxInputHandler::UpdateGamePlayerInput()
             }
             if(P1WasTriggerd(inputs[i])) gpBase->mpNetwork->SendLocalAction(actions[i], false);
         }
+        // Rotellina: l'host la applica allo stato del giocatore 2 (oggetti afferrati).
+        if(P1BecameTriggerd(eLuxAction_ScrollUp)) gpBase->mpNetwork->SendLocalAction(online::PlayerAction::Scroll, true);
+        if(P1BecameTriggerd(eLuxAction_ScrollDown)) gpBase->mpNetwork->SendLocalAction(online::PlayerAction::Scroll, false);
         if(!gpBase->mpInventory->GetDisabled() && P1BecameTriggerd(eLuxAction_Inventory)) {
             gpBase->mpInventory->SetActivePlayer(mpPlayer);
             gpBase->mpEngine->GetUpdater()->SetContainer("Inventory");

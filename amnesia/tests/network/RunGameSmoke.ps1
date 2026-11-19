@@ -179,7 +179,7 @@ try {
             Write-Output "PASS: $role level door with authoring path reached 09_back_hall"
         }
         if($Flashback) {
-            $markers = if($role -eq 'client') { @('PASS flashback sepia applied on client') } else { @('Host flashback started','PASS removing a held item returns its holder to normal','PASS destroyed GUI element drawn for 30 frames without crashing') }
+            $markers = if($role -eq 'client') { @('PASS flashback sepia applied on client') } else { @('Host flashback started','PASS flashback slows the remote player too','PASS removing a held item returns its holder to normal','PASS destroyed GUI element drawn for 30 frames without crashing') }
             foreach($marker in $markers) { if(!$log.Contains($marker)) {throw "Missing $role flashback/GUI proof: $marker"} }
             if($role -eq 'host' -and (!($log -match 'skipped \d+ draw of destroyed') -or !($log -match 'skipped \d+ render of destroyed'))) {throw 'Destroyed GUI elements were not skipped at draw and render'}
             if($log.Contains('FAILED held item')) {throw 'Held item regression failed'}

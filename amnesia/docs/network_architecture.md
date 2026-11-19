@@ -83,7 +83,21 @@ Questa sezione è nata con il protocollo 7; dove il codice è cambiato fa fede
 | 14 | Flag 128 delle entità: porta a battente rotta. |
 | 15 | Nessun cambio sul filo; rifiuta host con il difetto dei percorsi delle immagini degli oggetti. |
 | 16 | Nessun cambio sul filo; rifiuta host che inviano percorsi assoluti degli autori originali. |
-| 17 | Un comando di movimento per tick logico; ogni pacchetto (`InputBatch`) ripete gli ultimi 6 comandi e l'host ne simula uno per tick (`InputQueue`), con un buffer adattivo contro il jitter e il recupero degli arretrati. |
+| 17 | Un comando di movimento per tick logico; ogni pacchetto (`InputBatch`) ripete gli ultimi 6 comandi e l'host ne simula uno per tick (`InputQueue`), con un buffer adattivo contro il jitter e il recupero degli arretrati. | Nella 0.6.0 lo snapshot passa a 151 byte: per giocatore i rapporti della velocità massima con e senza corsa, lo stato di corsa e il flag 128 (scala a pioli o arrampicata, senza previsione). `cameraX`/`cameraZ`/`eyeHeight` non contengono più il ritardo della media della telecamera (`CameraSmoothPosNum`): il client rifà la media sui piedi mostrati. Nuova azione 8 (rotellina). |
+
+### Inviti Steam
+
+Con Steam attivo l'host apre una lobby riservata agli amici e un ponte
+(`network/MessageBridge`): i datagrammi ENet di ogni utente della lobby passano
+per `ISteamNetworkingMessages` (relay di Steam) e arrivano alla porta ENet
+dell'host da un socket locale dedicato. Il client che accetta l'invito apre il
+ponte inverso e collega ENet a `127.0.0.1`. ENet, il protocollo e l'identità di
+ripresa non cambiano, quindi il rientro in una partita in corso usa lo stesso
+recupero del collegamento per IP. Il ponte gira su un proprio thread e funziona
+anche durante i caricamenti. Con Steam la migrazione dell'host è disattivata
+(l'indirizzo del compagno è il ponte locale). Le prove usano
+`AMNESIA_NET_TEST_STEAM_FAKE`, che sostituisce Steam con porte UDP locali.
+
 
 
 ENet 1.3.18 incluso da sorgenti, licenza MIT conservata; mod GPLv3. Header AO,
@@ -93,15 +107,15 @@ trasmessa in memoria. Quattro canali:
 | Canale | Affidabilità | Contenuto |
 | --- | --- | --- |
 | 0 | Affidabile e ordinato | Hello/Welcome, Map/MapReady, Action, Peer lobby, CheckpointAck, Snapshot di riserva a 10 Hz e al cambio lanterna |
-| 1 | Ordinato, non affidabile | InputBatch a ogni tick logico, 60 Hz (gli ultimi 1–6 comandi, 10 + 21 byte per comando), Snapshot a 60 Hz (137 byte) |
-| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (137 byte), Media (115–627 byte), Journal |
+| 1 | Ordinato, non affidabile | InputBatch a ogni tick logico, 60 Hz (gli ultimi 1–6 comandi, 10 + 21 byte per comando), Snapshot a 60 Hz (151 byte) |
+| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (151 byte), Media (115–627 byte), Journal |
 | 3 | Affidabile e ordinato | Checkpoint compresso, frammenti da 1 KiB, massimo un invio per tick a 60 Hz |
 
 Ogni stato gameplay include un'epoch di mappa. Sequenze obsolete o duplicate
 sono ignorate con aritmetica che supporta il wraparound. MapReady abilita snapshot
 e intenti; WorldReady e applicazione della baseline abilitano l'input client.
 
-Gli snapshot di riserva hanno lo stesso codec da 137 byte e lo stesso spazio di
+Gli snapshot di riserva hanno lo stesso codec da 151 byte e lo stesso spazio di
 sequenza degli snapshot ordinari. Il client accetta solo lo stato più recente,
 indipendentemente dal canale: un backup ritardato non sovrascrive una posa nuova.
 Il canale 0 li separa dalle code affidabili di entità/media sul canale 2. Entità,

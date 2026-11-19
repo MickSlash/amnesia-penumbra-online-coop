@@ -8,6 +8,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="$(MSBuildThisFileDirectory)NetSession.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)MessageBridge.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\callbacks.c" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\compress.c" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\..\..\..\third_party\enet\host.c" />

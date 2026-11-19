@@ -68,19 +68,23 @@ struct PlayerState {
     uint16_t tinderboxes = 0;
     int16_t roll = 0, cameraX = 0, cameraZ = 0; // radians *1000; head offsets in mm
     uint16_t fov = 1200, aspect = 1000, lookSpeed = 1000; // *1000; aspect multiplier
-    uint8_t flags = 4; // crouching, lantern, active, dead, scripted look, object-controlled look, shared intro view
+    uint8_t flags = 4; // crouching, lantern, active, dead, scripted look, object-controlled look, shared intro view, ladder/ledge
     int16_t forwardSpeed = 0, sideSpeed = 0; // current local-axis velocity, mm/s
     uint16_t forwardMax = 0, sideMax = 0, acceleration = 0, deceleration = 0, backwardMax = 0; // mm/s, mm/s^2
     int16_t verticalSpeed = 0, verticalAcceleration = 0; // mm/s, mm/s^2
     uint16_t jumpSpeed = 0; // initial impulse velocity, mm/s; zero when jumping is unavailable
     uint8_t grounded = 0;
+    // Velocità massima con la corsa / senza, nella situazione attuale (per
+    // mille; 1000 da accovacciati o in aria) e corsa attiva (bit 0).
+    uint16_t runForward = 1000, runBackward = 1000, runSide = 1000;
+    uint8_t moveFlags = 0;
 };
 struct Snapshot {
     uint32_t epoch = 0, sequence = 0, acknowledgedInput = 0;
     PlayerState players[2]; // stable network IDs 1 (host), 2 (client)
 };
 struct MapState { uint32_t epoch = 0; uint64_t fingerprint = 0; std::string file; };
-enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, Jump = 7 };
+enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, Jump = 7, Scroll = 8 }; // Scroll: pressed = su
 // inputSequence: il comando di movimento del client nel cui tick l'azione è
 // avvenuta. L'host la applica dopo aver simulato quel comando, così la mira
 // del giocatore 2 è quella che il client aveva al clic (protocollo 17).
@@ -149,6 +153,7 @@ public:
     // Fault injection used only by the opt-in QA driver. Retain session identity.
     void SuspendTransportForTest();
     void Poll(); // non-blocking; caller owns scheduling
+    void Flush(); // spedisce subito ciò che è in coda (snapshot di questo tick)
     // Notify the partner before synchronous native loading blocks the game loop.
     void BeginMapLoad();
     void RecoverConnection(const char* reason);
