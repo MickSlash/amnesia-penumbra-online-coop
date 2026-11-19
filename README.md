@@ -32,7 +32,11 @@ their own movement predicted locally so it does not feel laggy.
 - Saves are written on the host. Death and checkpoints are shared.
 - Automatic reconnect after a short disconnect. If the host disappears for good, the
   client can take over from the last checkpoint it received.
-- Optional Steam presence: it shows you as playing Amnesia (no achievements or invites).
+- Optional Steam integration: Steam shows you as playing Amnesia, and from v0.6.0 the host
+  can **invite a Steam friend** instead of sharing an IP (see *Connecting*; not yet tested
+  between two real Steam accounts).
+- Rejoining a running game: if the client drops or its game closes, the host pauses the
+  campaign and the client can come back into the same game.
 
 ### How far it has been tested
 
@@ -54,12 +58,21 @@ their own movement predicted locally so it does not feel laggy.
   [OpenAL Windows installer](https://www.openal.org/downloads/) (`oalinst`).
 - The **same mod package** on both PCs. A build with a different network protocol is
   refused at connection, so always update both.
-- A way for the two PCs to reach each other (see *Connecting* below). The mod has no
-  matchmaking or NAT punch-through of its own.
+- A way for the two PCs to reach each other: a Steam invite, or one of the options in
+  *Connecting* below.
 
 ### Connecting
 
-The host's game listens on **UDP port 27020**. Any of these works:
+**Steam invite (new in v0.6.0, please test and report):** both players launch with
+*Show Amnesia on Steam* ticked and Steam open. The host clicks **Host**, picks the friend
+in the list at the bottom of the online menu and clicks **Invite**. The friend opens
+`AmnesiaCoop.exe` **first**, then accepts the invite from Steam chat or uses **Join Game**
+on the host in the Steam friends list. The connection goes through Steam's relays: no IP,
+VPN or open port. Steam's own Play button starts the original game, which is why the
+friend must open the mod before accepting. This has been tested on one PC with a
+stand-in for Steam, not yet between two real Steam accounts.
+
+Without Steam, the host's game listens on **UDP port 27020**. Any of these works:
 
 - **[Radmin VPN](https://www.radmin-vpn.com/)** (used for the full playthrough): both join
   the same Radmin network; the client connects to the host's Radmin IP (`26.x.x.x`).
@@ -79,27 +92,16 @@ The host's game listens on **UDP port 27020**. Any of these works:
    right). It finds the Steam install automatically; otherwise select your game folder.
 3. Tick *Show Amnesia on Steam* only for the Steam edition, with Steam open.
 4. Click **Launch Amnesia co-op**.
-5. In the main menu choose **Co-op online**:
-   - the host clicks **Ospita**;
-   - the other player types the host's IP (see *Connecting*) and clicks **Connetti**;
-   - both click **Pronto**;
-   - the host picks **Nuova campagna** or **Continua salvataggio**.
+5. In the main menu choose **Online co-op**:
+   - the host clicks **Host** (and can invite a Steam friend, see *Connecting*);
+   - otherwise the other player types the host's IP and clicks **Connect**;
+   - both click **Ready**;
+   - the host picks **New campaign** or **Continue saved game**.
 
-The in-game online menu is currently in Italian only:
-
-| In game | Meaning |
-| --- | --- |
-| Ospita | Host |
-| Connetti | Join |
-| Riconnettiti | Reconnect |
-| Pronto / Non pronto | Ready / Not ready |
-| Nuova campagna | New campaign |
-| Continua salvataggio | Continue from save |
-| Chiudi sessione | End session |
-| Indietro | Back |
-| Immagine nitida | Sharp image (less motion trails and blur) |
-
+From v0.6.0 the online menu is in English, or in Italian when the game is set to Italian.
 The game's own menus, subtitles and text stay in whatever language your game uses.
+In fullscreen the launcher now uses your screen's native resolution; older versions
+used 1280×720, which looked blurry on larger screens.
 
 ### Antivirus warnings
 
@@ -118,20 +120,18 @@ restarting**, and open an issue saying which map and what happened. Lines starti
 
 ### Known bugs
 
-- **Levers and hand wheels are hard to use for the client**: pulling a lever down or
-  turning a wheel often takes several tries. The host can operate them normally, so
-  when one gets stuck, let the host do it.
-- **Rubber banding**: the client's own movement is sometimes pulled back or corrected,
-  more often with higher latency or packet loss.
 - **Flashbacks**: during flashbacks the colours look less saturated than in the original
-  game, and the client's player moves too fast.
+  game.
+- v0.6.0 reworks the client's movement and camera (rubber banding) and fixes levers,
+  hand wheels and drawers for the client, and the client's speed in flashbacks. These
+  were measured in automated tests on one PC; a real game between two PCs on v0.6.0
+  has not been played yet, so please report how it feels.
 
 ### Known limits
 
 - Two players only; Windows only.
 - The host's PC runs the whole game. A slow host or a slow connection is felt by both.
 - Progress since the last checkpoint can be lost if the host crashes.
-- The in-game online menu is Italian only (see the table above).
 
 ## Penumbra: Overture
 
