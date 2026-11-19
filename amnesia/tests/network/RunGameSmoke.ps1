@@ -126,6 +126,10 @@ try {
         }
         if($Lean -and $role -eq 'client') {
             if(!$log.Contains('PASS client lean reached the camera')) {throw 'Client lean did not reach the camera'}
+            if($log.Contains('Client predicted item pickup hidden=')) {
+                if(!$log.Contains('Client predicted item pickup hidden=1') -or !$log.Contains('PASS client predicted pickup shown again')) {throw 'Client predicted pickup did not hide and come back'}
+                Write-Output 'PASS: client item pickup shown at once and restored when the host kept the item'
+            }
             Write-Output 'PASS: client lean (E) applied by the host and shown on the client camera'
         }
         if($ItemPath) {

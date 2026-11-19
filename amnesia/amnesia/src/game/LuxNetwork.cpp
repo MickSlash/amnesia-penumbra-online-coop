@@ -316,6 +316,16 @@ void cLuxNetwork::Update(float timeStep) {
     // Gli snapshot di questo tick partono subito, non al Poll del tick dopo.
     mSession.Flush();
     UpdateGameShot();
+    if(!mPendingPickups.empty()) {
+        const auto now = std::chrono::steady_clock::now();
+        cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
+        for(auto it = mPendingPickups.begin(); it != mPendingPickups.end();) {
+            if(now - it->at < std::chrono::milliseconds(1500)) { ++it; continue; }
+            iLuxEntity* entity = map ? map->GetEntityByID(it->id) : NULL;
+            if(entity && !entity->IsActive()) { entity->SetActive(true); NetLog("[NET/WORLD] Host kept an item the client tried to pick up; shown again"); }
+            it = mPendingPickups.erase(it);
+        }
+    }
     if(mSession.GetRole() != online::Role::Offline) {
         const auto replicationEnd = std::chrono::steady_clock::now();
         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(replicationEnd-replicationStart).count();
@@ -712,13 +722,24 @@ struct NativeStepper {
     iCharacterBody* body;
     iCharacterBody::tPredictionState saved;
     online::PlayerState host;
-    explicit NativeStepper(iCharacterBody* b) : body(b) {}
-    void Begin(const online::PlayerState& s) {
-        host = s;
+    // Salto come in cLuxMoveState_Normal: spinta iniziale, poi per
+    // MaxJumpCount secondi una parte della gravità viene tolta.
+    float gravityY, maxJumpCount, jumpCount = 0;
+    bool jumping = false;
+    uint8_t previousButtons = 0;
+    NativeStepper(iCharacterBody* b, float gravity, float maxJump) : body(b), gravityY(gravity), maxJumpCount(maxJump) {}
+    void Begin(const online::PlayerState& s, uint8_t ackedButtons) {
+        host = s; previousButtons = ackedButtons;
         saved = body->GetPredictionState();
         auto start = saved;
         start.mvPosition = start.mvLastPosition = cVector3f(s.x/1000.0f, s.y/1000.0f, s.z/1000.0f) + cVector3f(0, body->GetSize().y/2, 0);
-        start.mvVelocity = start.mvForce = cVector3f(0);
+        start.mvForce = cVector3f(0);
+        start.mvVelocity = cVector3f(0, s.verticalSpeed/1000.0f, 0);
+        // Salto già in corso sull'host: lo ricava dalla gravità ridotta.
+        const float gravityMul = gravityY != 0 ? (s.verticalAcceleration/1000.0f) / gravityY : 1;
+        // (nei primi tick del salto l'host risulta ancora «a terra»: conta solo la gravità ridotta)
+        jumping = maxJumpCount > 0 && s.verticalAcceleration != 0 && gravityMul < 0.95f;
+        jumpCount = jumping ? std::max(0.0f, std::min(maxJumpCount, maxJumpCount * (gravityMul - 0.1f) / 0.5f)) : 0;
         // Velocità e limiti di movimento dell'host per questo giocatore.
         start.mfMoveSpeed[eCharDir_Forward] = s.forwardSpeed/1000.0f; start.mfMoveSpeed[eCharDir_Right] = s.sideSpeed/1000.0f;
         start.mfMaxPosMoveSpeed[eCharDir_Forward] = s.forwardMax/1000.0f; start.mfMaxNegMoveSpeed[eCharDir_Forward] = -s.backwardMax/1000.0f;
@@ -746,9 +767,20 @@ struct NativeStepper {
         // Come sull'host: un asse fermo non riceve Move (Move(0) toglie l'attrito).
         if(input.forward) body->Move(eCharDir_Forward, input.forward/1000.0f);
         if(input.strafe) body->Move(eCharDir_Right, input.strafe/1000.0f);
+        // Salto: sul fronte del tasto, da terra, come cLuxMoveState_Normal::OnJump.
+        if((input.buttons & 1) && !(previousButtons & 1) && !jumping && body->IsOnGround() && host.jumpSpeed) {
+            body->AddForceVelocity(cVector3f(0, host.jumpSpeed/1000.0f, 0));
+            jumping = true; jumpCount = 0;
+        }
+        previousButtons = input.buttons;
+        if(jumping) {
+            jumpCount += dt;
+            if(jumpCount >= maxJumpCount) { jumpCount = maxJumpCount; jumping = false; }
+            else body->AddForceVelocity(cVector3f(0, -gravityY * (0.4f + 0.5f * (1 - jumpCount / maxJumpCount)) * dt, 0));
+        }
         body->Update(dt);
-        const cVector3f position = body->GetPosition();
-        return {position.x, position.z};
+        const cVector3f feet = body->GetFeetPosition();
+        return {feet.x, feet.z, feet.y};
     }
     void End() { body->SetPredicting(false); body->SetPredictionState(saved); }
 };
@@ -792,20 +824,48 @@ void cLuxNetwork::SendLocalInput(online::PlayerInput input, float timeStep) {
         const float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - mSmokeStart).count();
         if(elapsed >= 12 && elapsed < 15) {
             input.buttons |= 32;
+            gpBase->mpPlayer->SetLean(1); // come il tasto E (il test non passa dall'input handler)
             mTestLeanMaxRoll = std::max(mTestLeanMaxRoll, std::fabs(gpBase->mpPlayer->GetCamera()->GetRoll()));
+            if(mTestLeanLatency < 0 && std::fabs(gpBase->mpPlayer->GetCamera()->GetRoll()) > 0.001f) mTestLeanLatency = elapsed - 12;
+            if(elapsed < 12.3f && !mSnapshots.empty()) NetLog("[NET/TEST] Lean trace t=" + std::to_string(elapsed - 12) +
+                " local_roll=" + std::to_string(gpBase->mpPlayer->GetLeanRoll()) + " camera_roll=" + std::to_string(gpBase->mpPlayer->GetCamera()->GetRoll()) +
+                " host_lean_roll=" + std::to_string(mSnapshots.back().state.players[1].leanRoll) + " flags=" + std::to_string(mSnapshots.back().state.players[1].flags) +
+                " state=" + std::to_string(int(gpBase->mpPlayer->GetCurrentState())));
         } else if(elapsed >= 15) {
             mTestLeanLogged = true;
+            // Raccolta prevista: un oggetto che l'host non dà al client sparisce
+            // subito e torna dopo 1,5 s.
+            if(cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap()) {
+                cLuxEntityIterator it = map->GetEntityIterator();
+                while(it.HasNext()) {
+                    iLuxEntity* entity = it.Next();
+                    if(entity->GetEntityType() == eLuxEntityType_Prop && static_cast<iLuxProp*>(entity)->GetPropType() == eLuxPropType_Item && entity->IsActive()) {
+                        PredictItemPickup(entity); mTestPickupId = entity->GetID(); mTestPickupAt = std::chrono::steady_clock::now();
+                        NetLog(std::string("[NET/TEST] Client predicted item pickup hidden=") + (entity->IsActive() ? "0" : "1"));
+                        break;
+                    }
+                }
+            }
             NetLog(std::string("[NET/TEST] ") + (mTestLeanMaxRoll > 0.05f ? "PASS" : "FAILED") +
-                " client lean reached the camera max_roll=" + std::to_string(mTestLeanMaxRoll));
+                " client lean reached the camera max_roll=" + std::to_string(mTestLeanMaxRoll) +
+                " latency_ms=" + std::to_string(int(mTestLeanLatency * 1000)));
         }
+    }
+    if(mTestPickupId && std::chrono::steady_clock::now() - mTestPickupAt > std::chrono::milliseconds(2000)) {
+        cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
+        iLuxEntity* entity = map ? map->GetEntityByID(mTestPickupId) : NULL;
+        NetLog(std::string("[NET/TEST] ") + (entity && entity->IsActive() ? "PASS" : "FAILED") + " client predicted pickup shown again when the host kept the item");
+        mTestPickupId = 0;
     }
     if(IsClientReplica() && (mClientDead || mClientSharedIntro)) { input.forward = input.strafe = 0; input.buttons = 0; input.lookYaw = input.lookPitch = 0; }
     if(IsClientReplica() && !mTestMovement) { input.sequence = mInputSequence + 1; mPrediction.Push(input,timeStep); }
     const bool jumpEdge=((input.buttons^mLocalInputButtons)&1)!=0;
     if(jumpEdge) {
-        if((input.buttons&1) && IsClientReplica() && !mSnapshots.empty())
-            mVerticalPrediction.StartJump(mSnapshots.back().state.players[1],mInputSequence+1);
-        SendLocalAction(online::PlayerAction::Jump,(input.buttons&1)!=0);
+        if((input.buttons&1) && IsClientReplica() && !mSnapshots.empty()) {
+            if(KinematicPrediction()) mVerticalPrediction.StartJump(mSnapshots.back().state.players[1],mInputSequence+1);
+            mJumpPressSequence = mInputSequence + 1;
+        }
+        if(LegacyInput()) SendLocalAction(online::PlayerAction::Jump,(input.buttons&1)!=0);
     }
     mLocalInputButtons=input.buttons;
     ++mInputTick;
@@ -909,6 +969,10 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
         online::PlayerInput extra;
         if(!LegacyInput() && !repeated && mSession.CatchUpInput(extra)) {
             apply(input);
+            // Un tocco di Spazio lungo un solo comando non va perso.
+            if ((input.buttons ^ mPreviousButtons) & 1) player->Jump((input.buttons & 1) != 0);
+            if ((input.buttons ^ mPreviousButtons) & 2) player->Crouch((input.buttons & 2) != 0);
+            mPreviousButtons = input.buttons;
             player->GetCharacterBody()->Update(gpBase->mpEngine->GetStepSize());
             input = extra; buttons = input.buttons; ++mInputCaughtUp;
         }
@@ -969,6 +1033,7 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
             action.action == online::PlayerAction::Lantern ? eLuxPlayerAction_Lantern :
             action.action == online::PlayerAction::Ignite ? eLuxPlayerAction_Ignite : eLuxPlayerAction_Attack;
         player->DoAction(type, action.pressed);
+        if(action.action == online::PlayerAction::Interact && action.pressed) mReplicateWorldNow = true;
         if(action.action == online::PlayerAction::Lantern && action.pressed)
             NetLog("[NET/LANTERN] Remote intent applied: active=" + std::to_string(player->GetHelperLantern()->IsActive()) +
                 " oil=" + std::to_string(player->GetLampOil()) + " item=" +
@@ -1002,6 +1067,15 @@ void cLuxNetwork::UpdateGameShot() {
     NetLog(std::string("[NET/TEST] Game screenshot saved role=") + (IsClientReplica() ? "client" : "host") +
         " size=" + std::to_string(size.x) + "x" + std::to_string(size.y) + " index=" + std::to_string(index));
     mGameShotDone = ++mGameShotCount >= 2;
+}
+// Client: un oggetto da inventario raccolto sparisce subito. L'host lo toglie
+// davvero; se non lo fa entro 1,5 s (troppo lontano, inventario pieno...) torna.
+void cLuxNetwork::PredictItemPickup(iLuxEntity* entity) {
+    if(!IsClientReplica() || !entity || !entity->IsActive() || entity->GetEntityType() != eLuxEntityType_Prop ||
+        static_cast<iLuxProp*>(entity)->GetPropType() != eLuxPropType_Item) return;
+    entity->SetActive(false);
+    gpBase->mpHelpFuncs->PlayGuiSoundData("ui/pick_" + static_cast<cLuxProp_Item*>(entity)->GetPickSound(), eSoundEntryType_World);
+    mPendingPickups.push_back({entity->GetID(), std::chrono::steady_clock::now()});
 }
 bool cLuxNetwork::LegacyCamera() {
     static const bool legacy = [] { const char* v = std::getenv("AMNESIA_NET_CAMERA"); return v && std::string(v) == "legacy"; }();
@@ -1069,14 +1143,16 @@ void cLuxNetwork::SendLocalAction(online::PlayerAction action, bool pressed) {
     if(!IsClientReplica() || !mReceivedSnapshot || !mEpoch || !mBaselineApplied || mClientSharedIntro) return;
     if(mClientDead && pressed) return;
     online::ActionRequest request; request.epoch = mEpoch; request.sequence = ++mActionSequence;
-    request.inputSequence = mInputSequence + 1; // il comando di questo tick (o il successivo)
+    // Le azioni partono dopo SendLocalInput: il comando di questo tick è già
+    // mInputSequence (con +1 l'host aspettava un tick in più).
+    request.inputSequence = mInputSequence;
     request.action = action; request.pressed = pressed; mSession.SendAction(request);
 }
 void cLuxNetwork::SendInventoryAction(online::PlayerAction action, const std::string& item, const std::string& secondItem) {
     if(!IsClientReplica() || !mReceivedSnapshot || !mBaselineApplied || mClientSharedIntro) return;
     if(mClientDead) return;
     online::ActionRequest request; request.epoch = mEpoch; request.sequence = ++mActionSequence;
-    request.inputSequence = mInputSequence + 1;
+    request.inputSequence = mInputSequence;
     request.action = action; request.pressed = true; request.item = item; request.secondItem = secondItem; mSession.SendAction(request);
 }
 void cLuxNetwork::OnGameStart() {
@@ -1340,7 +1416,16 @@ void cLuxNetwork::ApplyReplica(cLuxPlayer* player, const online::PlayerState& st
     // tirava indietro la visuale quando si partiva, in avanti quando ci si
     // fermava. AMNESIA_NET_CAMERA=legacy (su entrambi i PC) per i confronti.
     const cVector3f feet = body->GetFeetPosition();
-    const cVector3f offset(state.cameraX / 1000.0f, state.eyeHeight / 1000.0f, state.cameraZ / 1000.0f);
+    cVector3f offset(state.cameraX / 1000.0f, state.eyeHeight / 1000.0f, state.cameraZ / 1000.0f);
+    float roll = state.roll / 1000.0f;
+    // Q/E: per la propria visuale l'inclinazione calcolata qui sostituisce
+    // quella dell'host, che arriva un RTT dopo e a scatti di pacchetto.
+    if(localView && localLook && !(state.flags & (8|128))) {
+        const float yaw = body->GetYaw(), hostYaw = state.yaw / 1000.0f;
+        offset += cVector3f(std::cos(yaw), 0, -std::sin(yaw)) * player->GetHeadPosAdd(eLuxHeadPosAdd_Lean).x -
+                  cVector3f(std::cos(hostYaw), 0, -std::sin(hostYaw)) * (state.leanMove / 1000.0f);
+        roll += player->GetLeanRoll() - state.leanRoll / 1000.0f;
+    }
     auto& history = mCameraFeet[localView ? 0 : 1];
     if(!history.empty() && (history.back() - feet).Length() > 1.0f) history.clear();
     history.push_back(feet);
@@ -1351,7 +1436,7 @@ void cLuxNetwork::ApplyReplica(cLuxPlayer* player, const online::PlayerState& st
     const cVector3f camera = LegacyCamera() ? feet + offset : smoothed + offset;
     player->GetCamera()->SetPosition(camera);
     if(localView && IsClientReplica()) ReportCamera(camera, smoothed, feet);
-    player->GetCamera()->SetRoll(state.roll / 1000.0f);
+    player->GetCamera()->SetRoll(roll);
     player->GetCamera()->SetFOV(state.fov / 1000.0f);
     // The client keeps its own display ratio; reproduce only the scripted multiplier.
     const float displayAspect = gpBase->mpEngine->GetGraphics()->GetLowLevel()->GetScreenSizeFloat().x /
@@ -1538,7 +1623,10 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                 p.health = q.health; p.sanity = q.sanity; p.oil = q.oil;
                 p.eyeHeight += int16_t((q.eyeHeight - p.eyeHeight) * alpha);
                 p.flags = q.flags; p.tinderboxes = q.tinderboxes;
-                p.roll = q.roll; p.fov = q.fov; p.aspect = q.aspect; p.lookSpeed = q.lookSpeed;
+                { const float from = p.roll / 1000.0f, delta = (q.roll - p.roll) / 1000.0f;
+                  p.roll = int16_t((from + std::atan2(std::sin(delta), std::cos(delta)) * alpha) * 1000); }
+                p.leanMove += int16_t((q.leanMove - p.leanMove) * alpha); p.leanRoll = q.leanRoll;
+                p.fov = q.fov; p.aspect = q.aspect; p.lookSpeed = q.lookSpeed;
                 p.cameraX += int16_t((q.cameraX - p.cameraX) * alpha);
                 p.cameraZ += int16_t((q.cameraZ - p.cameraZ) * alpha);
             }
@@ -1578,7 +1666,9 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             };
             // Previsione con il corpo del motore (come sull'host); il modello
             // cinematico resta per i confronti (AMNESIA_NET_PREDICTION=kinematic).
-            NativeStepper stepper(body);
+            auto* moveState = static_cast<cLuxMoveState_Normal*>(gpBase->mpPlayer->GetMoveStateData(eLuxMoveState_Normal));
+            const float gravityY = body->GetCustomGravityActive() ? body->GetCustomGravity().y : map->GetPhysicsWorld()->GetGravity().y;
+            NativeStepper stepper(body, gravityY, moveState ? moveState->GetMaxJumpCount() : 0);
             const auto predicted = KinematicPrediction() ?
                 mPrediction.ReconcileSmoothed(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,collide) :
                 mPrediction.ReconcileSmoothedWith(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,stepper,collide);
@@ -1586,6 +1676,14 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             const auto predictionUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-predictionStart).count();
             if(predictionUs >= 5000) NetLog("[NET/PERF] Replica prediction item_us=" + std::to_string(predictionUs) +
                 " collision_queries=" + std::to_string(collisionCache.Queries()) + " reused=" + std::to_string(collisionCache.Hits()));
+            if(std::isfinite(predicted.y)) {
+                // Altezza dal corpo del motore: salto, gradini, cadute e pendii
+                // come sull'host, senza la stima separata (che in salto
+                // tornava all'altezza dell'host, indietro di un RTT).
+                local.x = int32_t(predicted.x*1000); local.z = int32_t(predicted.z*1000);
+                local.y = int32_t(std::lround(predicted.y*1000));
+                mVerticalPrediction.Clear();
+            } else {
             float groundHeight=local.y/1000.0f;
             if(local.grounded && !mVerticalPrediction.Pending() &&
                (std::fabs(predicted.x-local.x/1000.0f)+std::fabs(predicted.z-local.z/1000.0f)>.001f)) {
@@ -1615,6 +1713,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                 return safe;
             },groundHeight);
             local.y=int32_t(y*1000);
+            }
             if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_PREDICTION") && !mPredictionSmoothTestObserved && mPrediction.CorrectionDistance() > 0.002f) {
                 mPredictionSmoothTestObserved = true; NetLog("[NET/TEST] Small authoritative movement correction smoothed with collision checks");
             }
@@ -1880,6 +1979,8 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         auto ratio = [](float r) { return uint16_t(std::max(100.0f, std::min(10000.0f, r * 1000))); };
         p.runForward = ratio(runForward); p.runBackward = ratio(runBackward); p.runSide = ratio(runSide);
         p.moveFlags = move->IsRunning() ? 1 : 0;
+        p.leanMove = int16_t(std::max(-2.0f, std::min(2.0f, player->GetHeadPosAdd(eLuxHeadPosAdd_Lean).x)) * 1000);
+        p.leanRoll = int16_t(std::max(-3.142f, std::min(3.142f, player->GetLeanRoll())) * 1000);
         if(player->GetCurrentMoveState()==eLuxMoveState_Normal && player->GetCurrentState()==eLuxPlayerState_Normal &&
             !player->GetJumpDisabled() && !player->GetInsanityCollapse()->IsActive())
             p.jumpSpeed=fixedSpeed(move->GetJumpStartForce()*player->GetScriptJumpForceMul()*
@@ -1924,7 +2025,8 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             NetLog("[NET/TEST] Sent remote life snapshot dead=" + std::to_string(dead ? 1 : 0) + " sequence=" + std::to_string(snapshot.sequence));
         }
     }
-    if(mWorldReplicationAccumulator < 1.0f / 20.0f) return;
+    if(mWorldReplicationAccumulator < 1.0f / 20.0f && !mReplicateWorldNow) return;
+    mReplicateWorldNow = false;
     mWorldReplicationAccumulator = std::fmod(mWorldReplicationAccumulator, 1.0f / 20.0f);
     const bool mediaReady = ReplicateMedia(map);
     if(!mSession.Connected()) return;
@@ -1973,7 +2075,7 @@ void cLuxNetwork::ReplicateWorld(cLuxMap* map) {
     cLuxEntityIterator it = map->GetEntityIterator();
     while(it.HasNext()) {
         iLuxEntity* entity = it.Next();
-        if(entity->GetEntityType() > eLuxEntityType_Enemy) continue;
+        if(entity->GetEntityType() > eLuxEntityType_Enemy || entity->GetDestroyMe()) continue;
         online::EntityState state; state.epoch = mEpoch; state.id = uint32_t(entity->GetID());
         state.name = entity->GetName(); state.type = uint8_t(entity->GetEntityType());
         state.flags = (entity->IsActive() ? 1 : 0) | (entity->GetInteractionDisabled() ? 2 : 0);
@@ -3287,16 +3389,32 @@ void cLuxNetwork::UpdateEffectsTest(cLuxMap* map) {
             if(step>.15f) NetLog("[NET/TEST] Vertical jump discontinuity age="+std::to_string(age)+" step="+std::to_string(step)+" pending="+std::to_string(mVerticalPrediction.Pending()));
             maxStep=std::max(maxStep,step); previousHeight=height;
             mEffectsTestJumpApex=std::max(mEffectsTestJumpApex,height);
-            if(mVerticalPrediction.Pending() && !mSnapshots.empty() &&
-                local->GetCharacterBody()->GetFeetPosition().y>mSnapshots.back().state.players[1].y/1000.0f+.01f) {
+            if(age>.95f && age<2.4f && !mSnapshots.empty()) {
+                const auto& h=mSnapshots.back().state;
+                NetLog("[NET/TEST] Jump trace age="+std::to_string(age)+" shown="+std::to_string(height)+
+                    " host="+std::to_string(h.players[1].y/1000.0f-mEffectsTestJumpBase)+" grounded="+std::to_string(h.players[1].grounded)+
+                    " vspeed="+std::to_string(h.players[1].verticalSpeed)+" vacc="+std::to_string(h.players[1].verticalAcceleration)+
+                    " ack="+std::to_string(h.acknowledgedInput)+" jump_seq="+std::to_string(mJumpPressSequence)+" pending="+std::to_string(mPrediction.Pending()));
+            }
+            // Doppio salto: la visuale sale, riscende di oltre 3 cm e risale prima di atterrare.
+            static float riseMax=0, dipMin=0; static bool dipping=false;
+            if(height>.02f) {
+                if(!dipping) { riseMax=std::max(riseMax,height); if(height<riseMax-.03f) { dipping=true; dipMin=height; } }
+                else { dipMin=std::min(dipMin,height); if(height>dipMin+.03f && !mEffectsTestDoubleJump) {
+                    mEffectsTestDoubleJump=true; NetLog("[NET/TEST] Client jump rose again after falling (double jump) age="+std::to_string(age)); } }
+            } else { riseMax=0; dipping=false; }
+            const bool jumpUnacknowledged=!mSnapshots.empty() && mJumpPressSequence &&
+                uint32_t(mSnapshots.back().state.acknowledgedInput - mJumpPressSequence) >= 0x80000000u;
+            if(jumpUnacknowledged && local->GetCharacterBody()->GetFeetPosition().y>mSnapshots.back().state.players[1].y/1000.0f+.01f) {
                 if(!mEffectsTestJumpImmediate) NetLog("[NET/TEST] Client jump visible before host acknowledgement");
                 mEffectsTestJumpImmediate=true;
             }
             if(age>5) {
                 const bool grounded=!mSnapshots.empty() && mSnapshots.back().state.players[1].grounded;
-                const bool ok=mEffectsTestJumpImmediate && mEffectsTestJumpApex>.2f && grounded && std::fabs(height)<.08f && maxStep<.2f;
+                const bool ok=mEffectsTestJumpImmediate && mEffectsTestJumpApex>.2f && grounded && std::fabs(height)<.08f && maxStep<.2f && !mEffectsTestDoubleJump;
                 NetLog(std::string("[NET/TEST] ")+(ok?"PASS client jump prediction and landing":"FAILED effects client jump")+
-                    " apex="+std::to_string(mEffectsTestJumpApex)+" landed_delta="+std::to_string(height)+" max_step="+std::to_string(maxStep));
+                    " apex="+std::to_string(mEffectsTestJumpApex)+" landed_delta="+std::to_string(height)+" max_step="+std::to_string(maxStep)+
+                    " double_jump="+std::to_string(mEffectsTestDoubleJump?1:0)+" model="+(KinematicPrediction()?"kinematic":"native"));
                 mEffectsTestStage=5;
             }
         }

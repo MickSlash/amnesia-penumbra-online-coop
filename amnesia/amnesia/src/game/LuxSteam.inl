@@ -196,7 +196,7 @@ void Dispatch() {
                 LobbyCreated created = {}; bool failed = true;
                 if(api.callResult(pipe, completed->call, &created, sizeof(created), CallLobbyCreated, &failed) && !failed && created.result == 1) {
                     lobby = created.lobby;
-                    api.setLobbyData(api.matchmaking, lobby, "amnesia_online_coop", "17");
+                    api.setLobbyData(api.matchmaking, lobby, "amnesia_online_coop", "18");
                     SetPresence();
                     Log("[STEAM] Friends-only lobby created\n");
                 } else {

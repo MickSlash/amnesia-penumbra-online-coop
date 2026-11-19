@@ -18,9 +18,9 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("Amnesia Online Co-op")]
 [assembly: AssemblyCompany("MickSlash")]
 [assembly: AssemblyCopyright("GPL-3.0-or-later, https://github.com/MickSlash/amnesia-penumbra-online-coop")]
-[assembly: AssemblyVersion("0.6.0.0")]
-[assembly: AssemblyFileVersion("0.6.0.0")]
-[assembly: AssemblyInformationalVersion("0.6.0")]
+[assembly: AssemblyVersion("0.6.1.0")]
+[assembly: AssemblyFileVersion("0.6.1.0")]
+[assembly: AssemblyInformationalVersion("0.6.1")]
 
 // Artwork ships as plain files in assets/ beside the launcher (see
 // tools/BuildLauncher.ps1). Embedding the compressed PNGs made the executable

@@ -122,10 +122,12 @@ restarting**, and open an issue saying which map and what happened. Lines starti
 
 - **Flashbacks**: during flashbacks the colours look less saturated than in the original
   game.
-- v0.6.0 reworks the client's movement and camera (rubber banding) and fixes levers,
-  hand wheels and drawers for the client, and the client's speed in flashbacks. These
-  were measured in automated tests on one PC; a real game between two PCs on v0.6.0
-  has not been played yet, so please report how it feels.
+- v0.6.0 reworked the client's movement and camera (rubber banding) and fixed levers,
+  hand wheels and drawers for the client and its speed in flashbacks; a real game
+  confirmed the rubber banding is mostly gone. v0.6.1 fixes the client's jump (it looked
+  doubled), makes leaning with Q/E smooth and makes picking up items instant on the
+  client. These last fixes were measured in automated tests on one PC; please report
+  how they feel in a real game.
 
 ### Known limits
 

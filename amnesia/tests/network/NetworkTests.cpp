@@ -830,7 +830,7 @@ int main(int argc, char** argv) {
     Snapshot snapshot; snapshot.epoch = 1; snapshot.sequence = 17; snapshot.players[0].x = -54321;
     snapshot.players[1].verticalSpeed=4567; snapshot.players[1].verticalAcceleration=-20000; snapshot.players[1].jumpSpeed=4666; snapshot.players[1].grounded=1;
     auto stateBytes = EncodeSnapshot(snapshot); Snapshot stateRead;
-    Check(stateBytes.size() == 151 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
+    Check(stateBytes.size() == 159 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
         stateRead.players[0].x == -54321 && stateRead.sequence == 17, "signed snapshot roundtrip");
     Check(stateRead.players[1].verticalSpeed==4567 && stateRead.players[1].verticalAcceleration==-20000 && stateRead.players[1].jumpSpeed==4666 && stateRead.players[1].grounded==1,"vertical motor state roundtrip");
     snapshot.players[1].grounded=2; Check(EncodeSnapshot(snapshot).empty(),"grounded flag bounded"); snapshot.players[1].grounded=1;
@@ -848,9 +848,12 @@ int main(int argc, char** argv) {
     const auto introBytes=EncodeSnapshot(snapshot);
     Check(DecodeSnapshot(introBytes.data(),introBytes.size(),stateRead) && (stateRead.players[1].flags & 64), "shared intro camera flag survives snapshot codec");
     snapshot.players[1].flags |= 128; snapshot.players[1].runForward = 1700; snapshot.players[1].moveFlags = 1;
+    snapshot.players[1].leanMove = -350; snapshot.players[1].leanRoll = 120;
     const auto ladderBytes=EncodeSnapshot(snapshot);
     Check(DecodeSnapshot(ladderBytes.data(),ladderBytes.size(),stateRead) && (stateRead.players[1].flags & 128) &&
-        stateRead.players[1].runForward == 1700 && stateRead.players[1].runSide == 1000 && stateRead.players[1].moveFlags == 1, "ladder flag and run ratios survive snapshot codec");
+        stateRead.players[1].runForward == 1700 && stateRead.players[1].runSide == 1000 && stateRead.players[1].moveFlags == 1 &&
+        stateRead.players[1].leanMove == -350 && stateRead.players[1].leanRoll == 120, "ladder flag, run ratios and lean survive snapshot codec");
+    snapshot.players[1].leanMove = 2001; Check(EncodeSnapshot(snapshot).empty(), "lean move bounded"); snapshot.players[1].leanMove = 0;
     snapshot.players[1].runForward = 50; Check(EncodeSnapshot(snapshot).empty(), "run ratio bounded"); snapshot.players[1].runForward = 1000;
     snapshot.players[1].moveFlags = 2; Check(EncodeSnapshot(snapshot).empty(), "unknown move flags rejected"); snapshot.players[1].moveFlags = 0;
     snapshot.players[1].flags &= 127;

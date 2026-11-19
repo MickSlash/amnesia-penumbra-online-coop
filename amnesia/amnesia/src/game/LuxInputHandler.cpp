@@ -1471,6 +1471,10 @@ void cLuxInputHandler::UpdateGamePlayerInput()
             input.buttons = (P1IsTriggerd(eLuxAction_Jump) ? 1 : 0) | (P1IsTriggerd(eLuxAction_Crouch) ? 2 : 0) |
                 (P1IsTriggerd(eLuxAction_Run) ? 4 : 0) | (P1IsTriggerd(eLuxAction_Rotate) ? 8 : 0) |
                 (P1IsTriggerd(eLuxAction_LeanLeft) ? 16 : 0) | (P1IsTriggerd(eLuxAction_LeanRight) ? 32 : 0);
+            // Inclinazione calcolata anche qui per la propria visuale (l'host
+            // resta l'autorità per il corpo e le collisioni).
+            if(P1IsTriggerd(eLuxAction_LeanRight)) mpPlayer->SetLean(1);
+            else if(P1IsTriggerd(eLuxAction_LeanLeft)) mpPlayer->SetLean(-1);
 		}
 		float yaw = mpPlayer->GetCamera()->GetYaw();
 		input.yaw = (int16_t)(atan2f(sinf(yaw), cosf(yaw)) * 1000.0f);
@@ -1483,6 +1487,7 @@ void cLuxInputHandler::UpdateGamePlayerInput()
             if(P1BecameTriggerd(inputs[i])) {
                 gpBase->mpNetwork->SendLocalAction(actions[i], true);
                 if(i == 0 && mpPlayer->GetCurrentState() == eLuxPlayerState_UseItem) mpPlayer->ChangeState(eLuxPlayerState_Normal);
+                else if(i == 0 && mpPlayer->GetCurrentState() == eLuxPlayerState_Normal) gpBase->mpNetwork->PredictItemPickup(mpPlayer->GetEntityInFocus());
             }
             if(P1WasTriggerd(inputs[i])) gpBase->mpNetwork->SendLocalAction(actions[i], false);
         }

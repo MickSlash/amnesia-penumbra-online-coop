@@ -83,6 +83,7 @@ public:
 	float GetHeadBobCount(){ return mfHeadBobCount;}
 
 	bool IsRunning(){ return mbRunning;}
+	float GetMaxJumpCount() const { return mfMaxJumpCount; }
 	bool IsCrouching(){ return mbCrouching;}
 	float GetJumpStartForce() const { return mfJumpStartForce; }
 	float GetJumpGravityMultiplier() const { return mbJumping && mfMaxJumpCount>0 ? .1f+.5f*mfJumpCount/mfMaxJumpCount : 1.0f; }

@@ -82,6 +82,19 @@ private:
     std::deque<DeferredAction> mDeferredActions;
     static bool KinematicPrediction();
     static bool LegacyCamera();
+    uint32_t mJumpPressSequence = 0;
+    bool mReplicateWorldNow = false;
+    float mTestLeanLatency = -1;
+    int mTestPickupId = 0;
+    std::chrono::steady_clock::time_point mTestPickupAt;
+    bool mEffectsTestDoubleJump = false;
+    // Oggetti raccolti dal client: nascosti subito, riappaiono se l'host non
+    // li toglie entro 1,5 s.
+    struct PendingPickup { int id; std::chrono::steady_clock::time_point at; };
+    std::vector<PendingPickup> mPendingPickups;
+public:
+    void PredictItemPickup(iLuxEntity* entity);
+private:
     void UpdateGameShot();
     bool mGameShotDone = false; int mGameShotCount = 0;
     std::chrono::steady_clock::time_point mGameShotAt;

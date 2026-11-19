@@ -342,6 +342,10 @@ public:
 	void FadeAspectMulTo(float afX, float afSpeed);
 	void FadeRollTo(float afX, float afSpeedMul, float afMaxSpeed);
 	void FadeLeanRollTo(float afX, float afSpeedMul, float afMaxSpeed);
+	float GetLeanRoll() const { return mfLeanRoll; }
+	// Client online: l'inclinazione della propria visuale calcolata qui, senza
+	// aspettare l'host (lean, rotazione e spostamento della testa).
+	void UpdateNetworkLocalLean(float afTimeStep);
 	void SetRoll(float afX);
 
 	bool GetNoFallDamage(){ return mbNoFallDamage;}

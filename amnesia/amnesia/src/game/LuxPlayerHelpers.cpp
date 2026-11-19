@@ -3425,7 +3425,7 @@ void cLuxPlayerLean::Update(float afTimeStep)
 		cVector3f vPos = vStartPos + pCam->GetRight() * mfMovement;
 
 		int lCount = 0;
-		while(pPhysicsWorld->CheckShapeWorldCollision(NULL,mpHeadShape, cMath::MatrixTranslate(vPos),NULL,false,true,NULL,false))
+		while(mpHeadShape && pPhysicsWorld->CheckShapeWorldCollision(NULL,mpHeadShape, cMath::MatrixTranslate(vPos),NULL,false,true,NULL,false))
 		{
 			mfMovement += fReverseMov;
 			mfRotation += fReverseRot;

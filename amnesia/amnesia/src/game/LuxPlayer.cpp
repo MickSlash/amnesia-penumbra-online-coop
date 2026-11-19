@@ -418,6 +418,7 @@ void cLuxPlayer::Update(float afTimeStep)
             if(mState == eLuxPlayerState_Normal || mState == eLuxPlayerState_UseItem) mvStates[mState]->Update(afTimeStep);
             if(mpLantern) mpLantern->Update(afTimeStep);
             if(mpHands) mpHands->Update(afTimeStep);
+            if(!IsPlayer2()) UpdateNetworkLocalLean(afTimeStep);
             // The local replica still needs the original eye adaptation. The
             // host owns sanity loss; remote ambient lights stay local to a view.
             if(!IsPlayer2()) {
@@ -1718,6 +1719,22 @@ void cLuxPlayer::RunHelperLuxMessage(eLuxUpdateableMessage aMessage, void *apDat
 		iLuxPlayerHelper *pHelper = mvHelpers[i];
 		pHelper->LuxRunMessage(aMessage, apData);
 	}
+}
+
+//-----------------------------------------------------------------------
+
+void cLuxPlayer::UpdateNetworkLocalLean(float afTimeStep)
+{
+	if(mpLean) mpLean->Update(afTimeStep);
+	if(mfLeanRoll != mfLeanRollGoal)
+	{
+		float fSpeed = (mfLeanRollGoal - mfLeanRoll) * mfLeanRollSpeedMul;
+		if(fSpeed > mfLeanRollMaxSpeed) fSpeed = mfLeanRollMaxSpeed;
+		if(fSpeed < -mfLeanRollMaxSpeed) fSpeed = -mfLeanRollMaxSpeed;
+		mfLeanRoll += afTimeStep * fSpeed;
+		if(cMath::Abs(mfLeanRollGoal - mfLeanRoll) < 0.004f) mfLeanRoll = mfLeanRollGoal;
+	}
+	UpdateHeadPosAdd(afTimeStep);
 }
 
 //-----------------------------------------------------------------------

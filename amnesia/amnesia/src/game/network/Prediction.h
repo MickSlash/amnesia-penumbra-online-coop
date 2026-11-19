@@ -6,7 +6,8 @@
 #include <array>
 #include <limits>
 namespace online {
-struct PredictedPosition { float x = 0, z = 0; };
+// y: piedi previsti in verticale (solo con il corpo del motore); NaN se manca.
+struct PredictedPosition { float x = 0, z = 0, y = std::numeric_limits<float>::quiet_NaN(); };
 struct PredictionContact { float x=0,y=0,z=0; };
 // Reachability at the authoritative height. Raising a complete capsule also
 // checks the ceiling; a wall or a step above the native limit remains blocked.
@@ -56,7 +57,7 @@ private:
 };
 class MovementPrediction {
 public:
-    void Clear() { commands_.clear(); hasPrevious_ = false; correction_ = {}; }
+    void Clear() { commands_.clear(); hasPrevious_ = false; correction_ = {}; correctionY_ = 0; lastAckedButtons_ = 0; }
     void Push(const PlayerInput& input, float dt) {
         if(!std::isfinite(dt) || dt <= 0) return;
         commands_.push_back({input,std::min(dt,1.0f/30)});
@@ -99,8 +100,12 @@ public:
     // host's simulation of the same commands.
     template<class Stepper>
     PredictedPosition ReplayWith(const PlayerState& state, uint32_t acknowledged, Stepper& stepper) {
-        while(!commands_.empty() && uint32_t(acknowledged - commands_.front().input.sequence) < 0x80000000u) commands_.pop_front();
-        PredictedPosition p = {state.x/1000.0f,state.z/1000.0f};
+        // I tasti dell'ultimo comando confermato servono a riconoscere il
+        // fronte del salto nel primo comando rieseguito.
+        while(!commands_.empty() && uint32_t(acknowledged - commands_.front().input.sequence) < 0x80000000u) {
+            lastAckedButtons_ = commands_.front().input.buttons; commands_.pop_front();
+        }
+        PredictedPosition p = {state.x/1000.0f,state.z/1000.0f,state.y/1000.0f};
         // Il corpo del motore ha già la forma e le velocità da accovacciato
         // dell'host; restano escluse solo morte, visuale guidata e scale.
         if(!(state.flags & 4) || (state.flags & (8|16|32|128))) { Clear(); return p; }
@@ -109,7 +114,7 @@ public:
             const float dt = std::min(command.dt,0.5f-age);
             if(dt <= 0) break;
             age += dt;
-            if(!begun) { stepper.Begin(state); begun = true; }
+            if(!begun) { stepper.Begin(state, lastAckedButtons_); begun = true; }
             p = stepper.Step(command.input, dt);
         }
         if(begun) stepper.End();
@@ -136,18 +141,24 @@ public:
             const float dx = before.x - raw.x, dz = before.z - raw.z;
             // Diagnostica: quanto la nuova posa autorevole sposta la previsione.
             poseCorrection_ = std::sqrt(dx*dx + dz*dz); hasPoseCorrection_ = true;
-            if(dx*dx + dz*dz > 1.0f || std::abs(int64_t(state.y) - previousState_.y) > 250) correction_ = {};
-            else { correction_.x += dx; correction_.z += dz; }
+            if(dx*dx + dz*dz > 1.0f || std::abs(int64_t(state.y) - previousState_.y) > 250) { correction_ = {}; correctionY_ = 0; }
+            else {
+                correction_.x += dx; correction_.z += dz;
+                if(std::isfinite(before.y) && std::isfinite(raw.y)) correctionY_ += before.y - raw.y;
+            }
         }
+        if(std::fabs(correctionY_) > 0.5f) correctionY_ = 0;
         const float correction2 = correction_.x*correction_.x + correction_.z*correction_.z;
         if(correction2 > 1.0f) correction_ = {};
         // Le correzioni grandi rientrano più in fretta.
         const float decay = std::exp(-std::min(dt,0.25f)/(correction2 > 0.0625f ? 0.05f : 0.08f));
-        correction_.x *= decay; correction_.z *= decay;
+        correction_.x *= decay; correction_.z *= decay; correctionY_ *= decay;
         PredictedPosition shown = raw;
+        if(std::isfinite(raw.y)) shown.y = raw.y + correctionY_;
         if(std::fabs(correction_.x) + std::fabs(correction_.z) > 0.0001f) {
+            const float shownY = shown.y;
             shown = collide(raw,{raw.x + correction_.x,raw.z + correction_.z});
-            correction_ = {shown.x - raw.x,shown.z - raw.z};
+            correction_ = {shown.x - raw.x,shown.z - raw.z}; shown.y = shownY;
         }
         previousState_ = state; previousAcknowledged_ = acknowledged; previousSequence_ = poseSequence; hasPrevious_ = true;
         return shown;
@@ -156,7 +167,8 @@ private:
     struct Command { PlayerInput input; float dt; };
     std::deque<Command> commands_;
     bool hasPrevious_ = false, hasPoseCorrection_ = false;
-    float poseCorrection_ = 0;
+    float poseCorrection_ = 0, correctionY_ = 0;
+    uint8_t lastAckedButtons_ = 0;
     PlayerState previousState_;
     uint32_t previousAcknowledged_ = 0, previousSequence_ = 0;
     PredictedPosition correction_;

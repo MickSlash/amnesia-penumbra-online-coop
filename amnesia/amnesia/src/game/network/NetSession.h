@@ -25,7 +25,9 @@ namespace online {
 //     (InputQueue), come in Penumbra. Prima l'host teneva solo l'ultimo input
 //     ricevuto (inviato a 30 Hz): comandi arrivati insieme non venivano mai
 //     simulati e la previsione del client veniva corretta.
-constexpr uint16_t ProtocolVersion = 17;
+// 18: lo snapshot porta l'inclinazione (Q/E) di ogni giocatore separata dal
+//     resto: il client la calcola da sé per la propria visuale.
+constexpr uint16_t ProtocolVersion = 18;
 constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
 // ENet timeout outside map loads. ENet drops a peer once an unacknowledged
@@ -78,6 +80,9 @@ struct PlayerState {
     // mille; 1000 da accovacciati o in aria) e corsa attiva (bit 0).
     uint16_t runForward = 1000, runBackward = 1000, runSide = 1000;
     uint8_t moveFlags = 0;
+    // Inclinazione: spostamento laterale della testa (mm) e rotazione (mrad),
+    // già compresi in cameraX/cameraZ e roll.
+    int16_t leanMove = 0, leanRoll = 0;
 };
 struct Snapshot {
     uint32_t epoch = 0, sequence = 0, acknowledgedInput = 0;

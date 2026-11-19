@@ -71,7 +71,7 @@ non esegue una seconda copia di AngelScript. Gli eventi di presentazione coprono
 solo i tipi elencati: questo non implica che ogni funzione script della campagna
 abbia già una replica. Una disconnessione conserva il mondo e P2, mette la campagna in pausa e avvia il recupero. Il client riprova lo stesso endpoint con identità persistente. Un checkpoint completo e validato consente di trasferire autorità e invertire i giocatori; il nuovo host aspetta il partner.
 
-## Protocollo (versione 17)
+## Protocollo (versione 18)
 
 Questa sezione è nata con il protocollo 7; dove il codice è cambiato fa fede
 `amnesia/src/game/network/NetSession.h`, che documenta ogni versione. Le ultime:
@@ -84,6 +84,7 @@ Questa sezione è nata con il protocollo 7; dove il codice è cambiato fa fede
 | 15 | Nessun cambio sul filo; rifiuta host con il difetto dei percorsi delle immagini degli oggetti. |
 | 16 | Nessun cambio sul filo; rifiuta host che inviano percorsi assoluti degli autori originali. |
 | 17 | Un comando di movimento per tick logico; ogni pacchetto (`InputBatch`) ripete gli ultimi 6 comandi e l'host ne simula uno per tick (`InputQueue`), con un buffer adattivo contro il jitter e il recupero degli arretrati. | Nella 0.6.0 lo snapshot passa a 151 byte: per giocatore i rapporti della velocità massima con e senza corsa, lo stato di corsa e il flag 128 (scala a pioli o arrampicata, senza previsione). `cameraX`/`cameraZ`/`eyeHeight` non contengono più il ritardo della media della telecamera (`CameraSmoothPosNum`): il client rifà la media sui piedi mostrati. Nuova azione 8 (rotellina). |
+| 18 | Lo snapshot porta l'inclinazione (Q/E) separata (`leanMove`, `leanRoll`): il client calcola la propria con `cLuxPlayerLean` e sostituisce quella dell'host. Il salto è rieseguito dal corpo del motore insieme al movimento (spinta, gravità ridotta per `MaxJumpCount`), senza la stima verticale separata. Le azioni si legano al comando già spedito nel tick. |
 
 ### Inviti Steam
 
@@ -107,15 +108,15 @@ trasmessa in memoria. Quattro canali:
 | Canale | Affidabilità | Contenuto |
 | --- | --- | --- |
 | 0 | Affidabile e ordinato | Hello/Welcome, Map/MapReady, Action, Peer lobby, CheckpointAck, Snapshot di riserva a 10 Hz e al cambio lanterna |
-| 1 | Ordinato, non affidabile | InputBatch a ogni tick logico, 60 Hz (gli ultimi 1–6 comandi, 10 + 21 byte per comando), Snapshot a 60 Hz (151 byte) |
-| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (151 byte), Media (115–627 byte), Journal |
+| 1 | Ordinato, non affidabile | InputBatch a ogni tick logico, 60 Hz (gli ultimi 1–6 comandi, 10 + 21 byte per comando), Snapshot a 60 Hz (159 byte) |
+| 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (159 byte), Media (115–627 byte), Journal |
 | 3 | Affidabile e ordinato | Checkpoint compresso, frammenti da 1 KiB, massimo un invio per tick a 60 Hz |
 
 Ogni stato gameplay include un'epoch di mappa. Sequenze obsolete o duplicate
 sono ignorate con aritmetica che supporta il wraparound. MapReady abilita snapshot
 e intenti; WorldReady e applicazione della baseline abilitano l'input client.
 
-Gli snapshot di riserva hanno lo stesso codec da 151 byte e lo stesso spazio di
+Gli snapshot di riserva hanno lo stesso codec da 159 byte e lo stesso spazio di
 sequenza degli snapshot ordinari. Il client accetta solo lo stato più recente,
 indipendentemente dal canale: un backup ritardato non sovrascrive una posa nuova.
 Il canale 0 li separa dalle code affidabili di entità/media sul canale 2. Entità,
