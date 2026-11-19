@@ -1669,6 +1669,8 @@ void __stdcall cLuxScriptHandler::UnlockAchievement(string& asName)
 
 void __stdcall cLuxScriptHandler::PlayGuiSound(string& asSoundEntFile, float afVolume)
 {
+    //Story sounds are for both players (they have their own network event).
+    cLuxSoundOwnerScope soundOwner(NULL);
     if(gpBase->mpNetwork) {
         online::Presentation event; event.kind = online::PresentationKind::GuiSound;
         event.text[0] = asSoundEntFile; event.values[0] = int32_t(afVolume * 1000);

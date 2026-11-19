@@ -18,6 +18,7 @@
  */
 
 #include "LuxHelpFuncs.h"
+#include "LuxNetwork.h"
 
 #include "LuxMapHandler.h"
 #include "LuxPlayer.h"
@@ -166,6 +167,19 @@ bool cLuxHelpFuncs::PlayGuiSoundData(const tString& asName,eSoundEntryType aDest
 	
 	cSoundEntityData *pSoundData = pResources->GetSoundEntityManager()->CreateSoundEntity(asName);
 	if(pSoundData == NULL) return false;
+
+	//Online: a player's own sound is played for that player, and the partner
+	//hears it in the world (see cLuxNetwork::RoutePlayerSound).
+	if(gpBase->mpNetwork && gpBase->mpNetwork->RoutePlayerSound(asName, aDestType, afVolMul))
+	{
+		if(apOutputData)
+		{
+			apOutputData->mfMinDistance = pSoundData->GetMinDistance();
+			apOutputData->mfMaxDistance = pSoundData->GetMaxDistance();
+			apOutputData->mfVolume = pSoundData->GetVolume();
+		}
+		return true;
+	}
 	
 	tString sSoundName = pSoundData->GetRandomSoundName(aSoundType, abSkipPreviousRandom);
 	cSoundEntry *pSound = pSoundHandler->PlayGui(sSoundName, false, pSoundData->GetVolume()*afVolMul,cVector3f(0,0,1),aDestType);

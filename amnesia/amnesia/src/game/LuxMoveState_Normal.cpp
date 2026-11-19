@@ -18,6 +18,7 @@
  */
 
 #include "LuxMoveState_Normal.h"
+#include "LuxNetwork.h"
 
 #include "LuxPlayer.h"
 #include "LuxMapHandler.h"
@@ -825,6 +826,8 @@ bool cLuxMoveState_Normal::UpdateLedgeCheck(float afTimeStep)
 
 void cLuxMoveState_Normal::FootSound(eLuxFootSound aType)
 {
+	//The landing comes from a physics callback, outside the player's update.
+	cLuxSoundOwnerScope soundOwner(mpPlayer);
 	///////////////////////
 	//Get Material
 	iCharacterBody *pCharBody = mpPlayer->GetCharacterBody();

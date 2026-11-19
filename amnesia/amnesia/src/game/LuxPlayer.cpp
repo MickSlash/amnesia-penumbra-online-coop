@@ -412,6 +412,7 @@ void cLuxPlayer::OnStart()
 
 void cLuxPlayer::Update(float afTimeStep)
 {
+	cLuxSoundOwnerScope soundOwner(this);
     if(gpBase->mpNetwork && (gpBase->mpNetwork->IsClientReplica() || gpBase->mpNetwork->WaitingForMap())) {
         if(mpAvatar) mpAvatar->Update(afTimeStep);
         if(gpBase->mpNetwork->IsClientReplica() && mpCharBody) {
@@ -477,6 +478,7 @@ void cLuxPlayer::Update(float afTimeStep)
 
 void cLuxPlayer::PostUpdate(float afTimeStep)
 {
+	cLuxSoundOwnerScope soundOwner(this);
     if(gpBase->mpNetwork && (gpBase->mpNetwork->IsClientReplica() || gpBase->mpNetwork->WaitingForMap())) {
         // Replica cameras move without physics; held objects still follow them.
         if(gpBase->mpNetwork->IsClientReplica() && mpCharBody && mpHands) mpHands->PostUpdate(afTimeStep);

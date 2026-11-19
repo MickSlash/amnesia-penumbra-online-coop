@@ -180,6 +180,7 @@ try {
                 foreach($notice in @('Client showed waiting for host notice','Client showed host loading notice')) { if(!$log.Contains($notice)) {throw "Missing client notice: $notice"} }
                 if($log.Contains('Connection lost; campaign paused for recovery')) {throw 'Client dropped the session during the host stall or load'}
             }
+            if($role -eq 'client' -and !$log.Contains('Arrival sound played: door_level_wood_close')) {throw 'Client did not hear the level door on arrival'}
             Write-Output "PASS: $role level door with authoring path reached 09_back_hall"
         }
         if($Flashback) {
@@ -314,6 +315,14 @@ try {
                 $deathIndex=$log.IndexOf($deathMarker); $revivalIndex=$log.IndexOf($revivalMarker)
                 if ($deathIndex -lt 0 -or $revivalIndex -le $deathIndex) { throw "$role failed ordered shared death/revival" }
             }
+            # Suoni dei giocatori: il client sente i propri passi; senza la campagna
+            # cammina anche l'host e ciascuno sente i passi dell'altro.
+            $sounds = [regex]::Match($log, 'Player sounds own_steps=(\d+) partner_steps=(\d+)')
+            if(!$sounds.Success) { throw "Missing $role player sound counts" }
+            $own = [int]$sounds.Groups[1].Value; $partner = [int]$sounds.Groups[2].Value
+            if($role -eq 'client' -and $own -lt 1) { throw 'Client did not hear its own footsteps' }
+            if(!$Campaign -and $partner -lt 1) { throw "$role did not hear the partner's footsteps" }
+            Write-Output "PASS: $role player sounds (own footsteps $own, partner footsteps $partner)"
             if ($log.Contains('Rejected:') -or $log.Contains('readiness timed out')) { throw "$role replication failed; inspect log" }
             Write-Output "PASS: $role gameplay replication"
         }

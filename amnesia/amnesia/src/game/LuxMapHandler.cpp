@@ -2378,7 +2378,12 @@ void cLuxMapHandler::ChangeMap(const tString& asMapName, const tString& asStartP
 	mMapChangeData.msStartPos = asStartPos;
     mMapChangeData.msSound = asEndSound;
 
-    gpBase->mpHelpFuncs->PlayGuiSoundData(asStartSound, eSoundEntryType_Gui);
+	//Online: the door is heard by both players, whoever opened it.
+	{
+		cLuxSoundOwnerScope soundOwner(NULL);
+		gpBase->mpHelpFuncs->PlayGuiSoundData(asStartSound, eSoundEntryType_Gui);
+	}
+	if(gpBase->mpNetwork) gpBase->mpNetwork->ShareMapChangeSounds(asStartSound, asEndSound);
 
 	//Coop: leaving the level -- both screens fade, and BOTH players stop. P2
 	//used to keep walking around during the fade because only P1 was

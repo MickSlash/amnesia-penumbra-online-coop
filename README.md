@@ -126,8 +126,10 @@ restarting**, and open an issue saying which map and what happened. Lines starti
   hand wheels and drawers for the client and its speed in flashbacks; a real game
   confirmed the rubber banding is mostly gone. v0.6.1 fixes the client's jump (it looked
   doubled), makes leaning with Q/E smooth and makes picking up items instant on the
-  client. These last fixes were measured in automated tests on one PC; please report
-  how they feel in a real game.
+  client. v0.6.2 lets the client hear its own footsteps, tinderbox, oil and other
+  player sounds, and each player hears the partner's footsteps where the partner is.
+  These last fixes were measured in automated tests on one PC; please report how they
+  feel in a real game.
 
 ### Known limits
 

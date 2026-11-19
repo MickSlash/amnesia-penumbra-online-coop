@@ -63,6 +63,62 @@ esterna, verificata sul codice prima di ogni modifica.
 
 ## Serie completa
 
-18 prove di gioco su 18 superate (anche l'inclinazione attraverso il relay),
-22 prove del protocollo, invito Steam e rientro con Steam finto. Nessuna prova
-su due PC con la 0.6.1.
+**Correzione (20 novembre):** qui c'era scritto «18 prove di gioco su 18». Erano
+16 su 18: le due prove delle leve (`-Levers`, anche con jitter) erano fallite,
+ma il conteggio le dava per superate perché la riga d'errore contiene il testo
+«PASS client pulled the lever» (la condizione mancante). 22 prove del
+protocollo, invito Steam e rientro con Steam finto superati. Nessuna prova su
+due PC con la 0.6.1. Causa del fallimento e correzione nella sezione 0.6.2.
+
+## 0.6.2: suoni del giocatore sul client
+
+Segnalazione: sul client mancano i passi e il suono dell'acciarino (la
+raccolta degli oggetti si sente), notati dopo il caricamento della mappa
+successiva.
+
+Causa: passi, acciarino, olio, pozioni, voce del salto, battito e respiro
+della sanità sono suoni GUI (`cLuxHelpFuncs::PlayGuiSoundData`), suonati sul
+PC che simula il giocatore: per il client sull'host, come suoni dell'host. La
+mod inoltrava solo la lanterna e i suoni degli script.
+
+Correzione: `cLuxSoundOwnerScope` indica di quale giocatore sono i suoni
+(aggiornamento del giocatore, azioni del client sull'host, passi e
+atterraggio). `cLuxNetwork::RoutePlayerSound`, chiamata da
+`PlayGuiSoundData`, manda il suono del giocatore del client al client (evento
+`GuiSound` per lui, spedito a ogni tick) e, se è un suono «nel mondo», lo
+suona sull'host nella posizione del compagno; i suoni nel mondo del giocatore
+dell'host arrivano al client nella posizione dell'host. I suoni degli script
+restano per entrambi; la raccolta prevista non si sente due volte. Nessun
+cambio di protocollo.
+
+Prove:
+- `-Replication`: il client riceve 39 dei propri passi, l'host li suona nel
+  mondo (39).
+- `-Campaign` con due cambi di mappa e un conteggio nuovo dei suoni del mondo
+  ogni 10 s: dopo il passaggio a `01_old_archives` host e client hanno gli
+  stessi suoni (16 presenti, 13 in riproduzione); i passi del client arrivano
+  anche dopo i cambi (76). Il cambio di mappa non perde suoni del mondo:
+  mancavano sempre i suoni personali.
+
+Porte verso un'altra mappa: il suono d'apertura (`ChangeMap`) e quello di
+chiusura all'arrivo suonavano solo sull'host. Ora l'host suona l'apertura
+per sé (chiunque abbia aperto la porta) e la manda al client; il suono d'arrivo
+viaggia prima del cambio di mappa e il client lo suona quando ha caricato la
+nuova mappa. Prova `-LevelDoor` (porta verso `09_back_hall` con i suoni di una
+porta di legno originale): «Arrival sound played: door_level_wood_close».
+
+Durante le prove è emerso un mio errore, corretto prima della pubblicazione:
+gli eventi `GuiSound` non accettano valori negativi e la posizione dei passi
+dell'host ne aveva; la coda si sarebbe bloccata appena l'host camminava. La
+posizione ora viaggia come testo, ogni evento è controllato prima di entrare
+in coda, e la prova `-Replication` fa camminare anche l'host e richiede che
+ciascuno senta i passi dell'altro (client: 39 propri, 7 dell'host).
+
+Leve nella 0.6.1 (regressione, corretta nella 0.6.2): con la previsione
+verticale nuova, se l'host è a terra su qualcosa che il client non ha uguale
+(nella prova la piattaforma creata solo sull'host; nel gioco un oggetto spostato
+o un appoggio creato da uno script), il corpo del client cadeva a ogni
+ricalcolo e il client si vedeva circa 10 cm più in basso (piedi a 29,904 m
+invece di 30,01 m). Ora, se all'inizio del ricalcolo l'host è a terra e sotto i
+piedi del client non c'è niente, il client tiene l'altezza dell'host fino a un
+salto. Le prove `-Levers`, `-Effects` e `-Stairs` (relay) passano.

@@ -83,6 +83,25 @@ private:
     static bool KinematicPrediction();
     static bool LegacyCamera();
     uint32_t mJumpPressSequence = 0;
+    cLuxPlayer* mSoundOwner = NULL;
+    float mLeverDriveWait = 0;
+    tString mArrivalSound;
+    std::chrono::steady_clock::time_point mSoundReportAt;
+    unsigned mTestOwnStepSounds = 0, mTestPartnerStepSounds = 0;
+    std::deque<online::Presentation> mPendingPlayerSounds;
+    std::chrono::steady_clock::time_point mPredictedPickupSoundAt;
+public:
+    // Suoni dei giocatori nella partita online (passi, voce, oggetti usati).
+    // Il gioco li suona come GUI sul PC che simula il giocatore, cioè per il
+    // client sull'host: chi li produce li deve sentire come GUI, il compagno
+    // nel mondo dove si trova (solo i suoni «nel mondo»). true: gestito qui.
+    bool RoutePlayerSound(const tString& sound, eSoundEntryType type, float volume);
+    void PlayWorldSound(const tString& sound, const cVector3f& position, float volume);
+    // Porta verso un'altra mappa: il suono d'apertura subito anche al client,
+    // quello d'arrivo quando il client ha caricato la nuova mappa.
+    void ShareMapChangeSounds(const tString& startSound, const tString& endSound);
+    cLuxPlayer* SetSoundOwner(cLuxPlayer* player) { cLuxPlayer* previous = mSoundOwner; mSoundOwner = player; return previous; }
+private:
     bool mReplicateWorldNow = false;
     float mTestLeanLatency = -1;
     int mTestPickupId = 0;
@@ -353,4 +372,14 @@ private:
     int mNextMediaID = 1000000000; // give unsaved runtime objects stable engine IDs
     bool ReplicateMedia(cLuxMap* map);
     void ApplyMedia(cLuxMap* map, const online::MediaState& state);
+};
+
+// Il giocatore a cui appartengono i suoni GUI suonati in questo blocco.
+class cLuxSoundOwnerScope
+{
+public:
+    explicit cLuxSoundOwnerScope(cLuxPlayer* apPlayer) : mpPrevious(gpBase->mpNetwork ? gpBase->mpNetwork->SetSoundOwner(apPlayer) : NULL) {}
+    ~cLuxSoundOwnerScope() { if(gpBase->mpNetwork) gpBase->mpNetwork->SetSoundOwner(mpPrevious); }
+private:
+    cLuxPlayer* mpPrevious;
 };

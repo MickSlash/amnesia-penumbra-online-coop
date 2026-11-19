@@ -311,6 +311,24 @@ void cLuxNetwork::Update(float timeStep) {
         gpBase->mpEngine->GetUpdater()->SetContainer("MainMenu");
         NetLog("[NET/CONNECTION] Client session ended; replica world unloaded");
     }
+    // QA -Replication: anche l'host cammina (i suoi passi devono arrivare al
+    // client nella sua posizione, mentre il client riceve i propri).
+    if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_PICKUP") && !TestFlag("AMNESIA_NET_TEST_CAMPAIGN") && mSession.GetRole() == online::Role::Host && gpBase->mpPlayer->GetCharacterBody()) {
+        const float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - mSmokeStart).count();
+        if(elapsed > 10 && elapsed < 14) gpBase->mpPlayer->GetCharacterBody()->Move(eCharDir_Forward, (int(elapsed) % 2) ? 1.0f : -1.0f);
+    }
+    // Diagnostica: suoni del mondo in riproduzione, ogni 10 s (host e client).
+    if(mSmokeSeconds && mSession.Connected() && gpBase->mpMapHandler->GetCurrentMap()) {
+        const auto soundNow = std::chrono::steady_clock::now();
+        if(soundNow - mSoundReportAt > std::chrono::seconds(10)) {
+            mSoundReportAt = soundNow;
+            unsigned playing = 0, total = 0;
+            auto it = gpBase->mpMapHandler->GetCurrentMap()->GetWorld()->GetSoundEntityIterator();
+            while(it.HasNext()) { cSoundEntity* sound = it.Next(); if(sound->GetName() == "net_partner_sound") continue; ++total; if(!sound->IsStopped()) ++playing; }
+            NetLog("[NET/MEDIA] World sounds epoch=" + std::to_string(mEpoch) + " total=" + std::to_string(total) + " playing=" + std::to_string(playing) +
+                " map=" + gpBase->mpMapHandler->GetCurrentMap()->GetName());
+        }
+    }
     const auto replicationStart = std::chrono::steady_clock::now();
     UpdateReplication(timeStep);
     // Gli snapshot di questo tick partono subito, non al Poll del tick dopo.
@@ -393,7 +411,7 @@ void cLuxNetwork::Update(float timeStep) {
             NetLog("[NET/TEST] Host game thread stalled 4 s without load notice");
             std::this_thread::sleep_for(std::chrono::seconds(4));
             NetLog("[NET/TEST] Host using level door map file C:/SVN/amnesia/redist/maps/main/ch01/09_back_hall.map");
-            gpBase->mpMapHandler->ChangeMap("C:/SVN/amnesia/redist/maps/main/ch01/09_back_hall.map", "", "", "");
+            gpBase->mpMapHandler->ChangeMap("C:/SVN/amnesia/redist/maps/main/ch01/09_back_hall.map", "", "door_level_wood_open", "door_level_wood_close");
         }
     }
     UpdateRecoveryTest();
@@ -468,6 +486,7 @@ void cLuxNetwork::Update(float timeStep) {
     }
     if (mSmokeSeconds && std::chrono::steady_clock::now() - mSmokeStart >= std::chrono::seconds(mSmokeSeconds)) {
         mSmokeSeconds = 0;
+        NetLog("[NET/TEST] Player sounds own_steps=" + std::to_string(mTestOwnStepSounds) + " partner_steps=" + std::to_string(mTestPartnerStepSounds));
         NetLog("[NET/TEST] Smoke test finished; exiting cleanly");
         mSession.CloseVoluntarily(); // QA timer completion is an intentional exit, not a simulated crash.
         gpBase->mpEngine->Exit();
@@ -725,9 +744,11 @@ struct NativeStepper {
     // Salto come in cLuxMoveState_Normal: spinta iniziale, poi per
     // MaxJumpCount secondi una parte della gravità viene tolta.
     float gravityY, maxJumpCount, jumpCount = 0;
-    bool jumping = false;
+    bool jumping = false, floorMissing = false, jumped = false;
+    float startY = 0;
     uint8_t previousButtons = 0;
-    NativeStepper(iCharacterBody* b, float gravity, float maxJump) : body(b), gravityY(gravity), maxJumpCount(maxJump) {}
+    iPhysicsWorld* world;
+    NativeStepper(iCharacterBody* b, float gravity, float maxJump, iPhysicsWorld* w) : body(b), gravityY(gravity), maxJumpCount(maxJump), world(w) {}
     void Begin(const online::PlayerState& s, uint8_t ackedButtons) {
         host = s; previousButtons = ackedButtons;
         saved = body->GetPredictionState();
@@ -749,6 +770,17 @@ struct NativeStepper {
         start.mfMoveDelayCount = 0;
         start.mpGravityAttachedBody = start.mpGravityLastAttachedBody = NULL; start.mlGravityAttachmentContacts = 0;
         body->SetPredictionState(start); body->SetPredicting(true);
+        // L'host è a terra ma qui sotto i piedi non c'è niente (un appoggio
+        // che il client non ha uguale: oggetto spostato, piattaforma di uno
+        // script): senza questo il corpo cadrebbe a ogni ricalcolo e il
+        // client si vedrebbe affondato. Si tiene l'altezza dell'host.
+        startY = start.mvPosition.y; jumped = false; floorMissing = false;
+        if(s.grounded && !jumping && world) {
+            cVector3f push;
+            floorMissing = !world->CheckShapeWorldCollision(&push, body->GetCurrentShape(),
+                cMath::MatrixTranslate(start.mvPosition - cVector3f(0, 0.06f, 0)), body->GetCurrentBody(), false, true, NULL, true, 0,
+                eFlagBit_All, false, body->GetIgnoreBody());
+        }
     }
     online::PredictedPosition Step(const online::PlayerInput& input, float dt) {
         body->SetYaw(input.yaw/1000.0f);
@@ -770,7 +802,7 @@ struct NativeStepper {
         // Salto: sul fronte del tasto, da terra, come cLuxMoveState_Normal::OnJump.
         if((input.buttons & 1) && !(previousButtons & 1) && !jumping && body->IsOnGround() && host.jumpSpeed) {
             body->AddForceVelocity(cVector3f(0, host.jumpSpeed/1000.0f, 0));
-            jumping = true; jumpCount = 0;
+            jumping = true; jumpCount = 0; jumped = true;
         }
         previousButtons = input.buttons;
         if(jumping) {
@@ -779,6 +811,12 @@ struct NativeStepper {
             else body->AddForceVelocity(cVector3f(0, -gravityY * (0.4f + 0.5f * (1 - jumpCount / maxJumpCount)) * dt, 0));
         }
         body->Update(dt);
+        if(floorMissing && !jumped) {
+            const cVector3f position = body->GetPosition();
+            body->SetPosition(cVector3f(position.x, startY, position.z), true);
+            const cVector3f velocity = body->GetForceVelocity();
+            body->SetForceVelocity(cVector3f(velocity.x, 0, velocity.z));
+        }
         const cVector3f feet = body->GetFeetPosition();
         return {feet.x, feet.z, feet.y};
     }
@@ -926,6 +964,7 @@ bool cLuxNetwork::ApplyRemotePlayerInput() {
     // Host networking owns the P2 input slot, including before/after connection.
     cLuxPlayer* player = gpBase->mpPlayer2;
     if (!player || !player->GetCharacterBody()) { mPreviousButtons = 0; return true; }
+    cLuxSoundOwnerScope soundOwner(player);
     // Un comando in coda per tick (protocollo 17); `repeated` ripete il
     // precedente mentre il buffer contro il jitter si riempie.
     online::PlayerInput input; bool repeated = false;
@@ -1075,7 +1114,50 @@ void cLuxNetwork::PredictItemPickup(iLuxEntity* entity) {
         static_cast<iLuxProp*>(entity)->GetPropType() != eLuxPropType_Item) return;
     entity->SetActive(false);
     gpBase->mpHelpFuncs->PlayGuiSoundData("ui/pick_" + static_cast<cLuxProp_Item*>(entity)->GetPickSound(), eSoundEntryType_World);
+    mPredictedPickupSoundAt = std::chrono::steady_clock::now();
     mPendingPickups.push_back({entity->GetID(), std::chrono::steady_clock::now()});
+}
+// Un evento che non si potrebbe spedire non entra in coda (bloccherebbe gli altri).
+static bool SendablePresentation(online::Presentation event) { event.epoch = 1; return !online::EncodePresentation(event).empty(); }
+bool cLuxNetwork::RoutePlayerSound(const tString& sound, eSoundEntryType type, float volume) {
+    static const bool disabled = std::getenv("AMNESIA_NET_NO_SOUND_ROUTING") != NULL; // solo per i confronti
+    if(disabled) return false;
+    if(mSession.GetRole() != online::Role::Host || !mSoundOwner || !HasNetworkPlayers() || !mSoundOwner->GetCharacterBody()) return false;
+    const cVector3f feet = mSoundOwner->GetCharacterBody()->GetFeetPosition();
+    online::Presentation event; event.kind = online::PresentationKind::GuiSound; event.target = 2;
+    event.text[0] = sound; event.values[0] = int32_t(std::max(0.0f, std::min(10.0f, volume)) * 1000);
+    const bool connected = mSession.IsWorldApplied(mEpoch);
+    if(OwnsPlayerInput(mSoundOwner)) {
+        // Suono del giocatore del client: lo sente lui, l'host nel mondo.
+        if(connected && SendablePresentation(event)) mPendingPlayerSounds.push_back(event);
+        if(type == eSoundEntryType_World) PlayWorldSound(sound, feet, volume);
+        return true;
+    }
+    // Suono del giocatore dell'host: lo suona l'host; il client lo sente nel mondo.
+    if(type == eSoundEntryType_World && connected) {
+        // Posizione come testo: i valori di GuiSound non possono essere negativi.
+        char position[96];
+        std::snprintf(position, sizeof(position), "%.3f %.3f %.3f", feet.x, feet.y, feet.z);
+        event.text[1] = position; event.values[4] = 1;
+        if(SendablePresentation(event)) mPendingPlayerSounds.push_back(event);
+    }
+    return false;
+}
+void cLuxNetwork::ShareMapChangeSounds(const tString& startSound, const tString& endSound) {
+    if(mSession.GetRole() != online::Role::Host || !HasNetworkPlayers() || !mSession.IsWorldApplied(mEpoch)) return;
+    online::Presentation event; event.kind = online::PresentationKind::GuiSound; event.target = 2; event.values[0] = 1000;
+    if(!startSound.empty()) { event.text[0] = startSound; mPendingPlayerSounds.push_back(event); }
+    if(!endSound.empty()) { event.text[0] = endSound; event.values[5] = 1; mPendingPlayerSounds.push_back(event); }
+}
+void cLuxNetwork::PlayWorldSound(const tString& sound, const cVector3f& position, float volume) {
+    cLuxMap* map = gpBase->mpMapHandler->GetCurrentMap();
+    if(!map || sound.empty()) return;
+    // Nome riservato: ReplicateMedia non lo manda al client (lo sente già).
+    cSoundEntity* entity = map->GetWorld()->CreateSoundEntity("net_partner_sound", sound, true);
+    if(!entity) return;
+    entity->SetPosition(position + cVector3f(0, 0.1f, 0));
+    if(volume < 0.999f) entity->SetVolume(entity->GetVolume() * volume);
+    if(mSession.GetRole() == online::Role::Host && sound.compare(0, 5, "step_") == 0) ++mTestPartnerStepSounds;
 }
 bool cLuxNetwork::LegacyCamera() {
     static const bool legacy = [] { const char* v = std::getenv("AMNESIA_NET_CAMERA"); return v && std::string(v) == "legacy"; }();
@@ -1644,6 +1726,11 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             mSession.IsWorldReady(mEpoch) && !mSession.IsWorldApplied(mEpoch)) {
             if(!mSession.SendWorldApplied(mEpoch)) { NetLog("[NET/MAP] Cannot confirm applied world; closing session"); mSession.Stop(); return; }
             NetLog("[NET/MAP] Full replica world acknowledged epoch=" + std::to_string(mEpoch));
+            if(!mArrivalSound.empty()) {
+                gpBase->mpHelpFuncs->PlayGuiSoundData(mArrivalSound, eSoundEntryType_Gui);
+                NetLog("[NET/MAP] Arrival sound played: " + mArrivalSound);
+                mArrivalSound.clear();
+            }
         }
         mClientSharedIntro = mSession.IsWorldApplied(mEpoch) && (local.flags & 64) != 0;
         if(mClientSharedIntro) { mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0; }
@@ -1668,7 +1755,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             // cinematico resta per i confronti (AMNESIA_NET_PREDICTION=kinematic).
             auto* moveState = static_cast<cLuxMoveState_Normal*>(gpBase->mpPlayer->GetMoveStateData(eLuxMoveState_Normal));
             const float gravityY = body->GetCustomGravityActive() ? body->GetCustomGravity().y : map->GetPhysicsWorld()->GetGravity().y;
-            NativeStepper stepper(body, gravityY, moveState ? moveState->GetMaxJumpCount() : 0);
+            NativeStepper stepper(body, gravityY, moveState ? moveState->GetMaxJumpCount() : 0, map->GetPhysicsWorld());
             const auto predicted = KinematicPrediction() ?
                 mPrediction.ReconcileSmoothed(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,collide) :
                 mPrediction.ReconcileSmoothedWith(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,stepper,collide);
@@ -2025,6 +2112,13 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             NetLog("[NET/TEST] Sent remote life snapshot dead=" + std::to_string(dead ? 1 : 0) + " sequence=" + std::to_string(snapshot.sequence));
         }
     }
+    // I suoni dei giocatori partono a ogni tick, non al turno a 20 Hz.
+    while(!mPendingPlayerSounds.empty() && mSession.IsWorldApplied(mEpoch)) {
+        auto event = mPendingPlayerSounds.front(); event.epoch = mEpoch;
+        if(!mSession.SendPresentation(event)) break;
+        mPendingPlayerSounds.pop_front();
+    }
+    while(mPendingPlayerSounds.size() > 32) mPendingPlayerSounds.pop_front();
     if(mWorldReplicationAccumulator < 1.0f / 20.0f && !mReplicateWorldNow) return;
     mReplicateWorldNow = false;
     mWorldReplicationAccumulator = std::fmod(mWorldReplicationAccumulator, 1.0f / 20.0f);
@@ -2388,6 +2482,7 @@ bool cLuxNetwork::ReplicateMedia(cLuxMap* map) {
     auto sounds = world->GetSoundEntityIterator();
     while(sounds.HasNext()) {
         cSoundEntity* sound = sounds.Next();
+        if(sound->GetName() == "net_partner_sound") continue;
         online::MediaState s; s.epoch = mEpoch; s.id = uint32_t(sound->GetUniqueID()) + 1; s.kind = online::MediaKind::Sound;
         s.name = sound->GetName(); s.file = MediaAssetName(sound->GetData()->GetName());
         s.transform = PackTransform(sound->GetWorldMatrix());
@@ -2659,6 +2754,18 @@ void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& ev
     }
     switch(event.kind) {
     case online::PresentationKind::GuiSound: {
+        if(event.values[5] == 1) { mArrivalSound = event.text[0]; break; } // suono d'arrivo nella prossima mappa
+        if(event.text[0].compare(0, 5, "step_") == 0) ++(event.values[4] == 1 ? mTestPartnerStepSounds : mTestOwnStepSounds);
+        if(event.values[4] == 1) {
+            float x = 0, y = 0, z = 0;
+            if(std::sscanf(event.text[1].c_str(), "%f %f %f", &x, &y, &z) == 3)
+                PlayWorldSound(event.text[0], cVector3f(x, y, z), event.values[0] / 1000.0f);
+            break;
+        }
+        if(event.text[0].compare(0, 8, "ui/pick_") == 0 && std::chrono::steady_clock::now() - mPredictedPickupSoundAt < std::chrono::seconds(2)) {
+            mPredictedPickupSoundAt = std::chrono::steady_clock::time_point(); // già suonato alla raccolta prevista
+            break;
+        }
         cLuxSoundExtraData sound = {};
         if(cString::GetFileExt(event.text[0]).empty() || cString::GetFileExt(event.text[0]) == "snt")
             gpBase->mpHelpFuncs->PlayGuiSoundData(event.text[0], eSoundEntryType_Gui, event.values[0] / 1000.0f,
@@ -2927,7 +3034,12 @@ bool cLuxNetwork::UpdateLeverDrive(float timeStep) {
             // Come un giocatore fermo davanti all'oggetto: dopo il
             // teletrasporto il corpo deve essere arrivato anche in altezza.
             const cVector3f spot = target == 1 ? kLeverSpot : kWheelSpot;
-            if(!prop || !prop->GetBodyNum() || (feet - spot).Length() > .1f) { mLeverDriveTime = 0; }
+            if(!prop || !prop->GetBodyNum() || (feet - spot).Length() > .1f) {
+                mLeverDriveTime = 0;
+                mLeverDriveWait += timeStep;
+                if(mLeverDriveWait > 1) { mLeverDriveWait = 0; NetLog("[NET/TEST] Lever drive waiting feet=" + std::to_string(feet.x) + "," + std::to_string(feet.y) + "," + std::to_string(feet.z) +
+                    " spot=" + std::to_string(spot.x) + "," + std::to_string(spot.y) + "," + std::to_string(spot.z) + " prop=" + std::to_string(prop ? 1 : 0)); }
+            }
             else {
                 // Al centro della maniglia (l'ultimo corpo): l'origine del corpo
                 // è sul perno, vicino alla base fissa.
