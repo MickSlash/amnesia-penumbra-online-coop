@@ -84,6 +84,8 @@ public:
 
 	bool IsRunning(){ return mbRunning;}
 	float GetMaxJumpCount() const { return mfMaxJumpCount; }
+	// Client online: velocità da accovacciato per la previsione del movimento.
+	void GetCrouchSpeedMuls(float &afForward, float &afBackward, float &afSide) const { afForward = mfCrouchForwardMul; afBackward = mfCrouchBackwardMul; afSide = mfCrouchSidewayMul; }
 	bool IsCrouching(){ return mbCrouching;}
 	float GetJumpStartForce() const { return mfJumpStartForce; }
 	float GetJumpGravityMultiplier() const { return mbJumping && mfMaxJumpCount>0 ? .1f+.5f*mfJumpCount/mfMaxJumpCount : 1.0f; }

@@ -70,6 +70,13 @@ public:
 	void SetupLoadText(const tString& asCat, const tString& asEntry, int alRandomNum, const tString& asImage);
 	
 	const tString& GetLoadTextCat(){ return msLoadTextCat;}
+	// Co-op online: la citazione e l'immagine scelte da DrawGameScreen.
+	const tString& GetCurrentGameScreenTextEntry(){ return msCurrentGameScreenTextEntry;}
+	const tString& GetCurrentGameScreenImage(){ return msCurrentGameScreenImage;}
+	// Client online: mostra la schermata scelta dall'host e la tiene finché la
+	// rete non la lascia chiudere (cLuxNetwork::HoldLoadScreen).
+	void ShowNetworkScreen(const tString& asCat, const tString& asEntry, const tString& asImage);
+	void SetGameScreenEndSound(const tString& asSound){ msGameScreenEndSound = asSound;}
 	const tString& GetLoadTextEntry(){ return msLoadTextEntry;}
 	const tString& GetLoadTextImage(){ return msLoadTextImage;}
 	int GetLoadTextEntryRandomNum(){ return mlTextRandomNum; }
@@ -130,6 +137,7 @@ private:
 	float mfLoadingAlpha;
     float mfAlpha;
 	float mfExtraTime;
+	bool mbFadeStarted;
 	eLuxLoadScreenState mState;
 	tString msCurrentGameScreenTextEntry;
 	tString msCurrentGameScreenImage;

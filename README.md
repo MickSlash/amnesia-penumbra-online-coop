@@ -128,6 +128,10 @@ restarting**, and open an issue saying which map and what happened. Lines starti
   doubled), makes leaning with Q/E smooth and makes picking up items instant on the
   client. v0.6.2 lets the client hear its own footsteps, tinderbox, oil and other
   player sounds, and each player hears the partner's footsteps where the partner is.
+  v0.6.3 removes the light flicker on the client in the final boss fight (Orb Chamber),
+  smooths the client's view when crouching and when scripts turn the camera, and shows
+  the client the same loading screen and quote as the host; both leave it together once
+  both have loaded.
   These last fixes were measured in automated tests on one PC; please report how they
   feel in a real game.
 

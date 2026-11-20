@@ -1465,7 +1465,10 @@ void cLuxInputHandler::UpdateGamePlayerInput()
             const float pitchAdd = (mbInvertMouse ? 1.0f : -1.0f) * mouse.y * scale;
             input.lookYaw = int16_t(cMath::Clamp(yawAdd * 10000, -31420.0f, 31420.0f));
             input.lookPitch = int16_t(cMath::Clamp(pitchAdd * 10000, -31420.0f, 31420.0f));
-            if(!gpBase->mpNetwork->ClientObjectControlsLook()) { mpPlayer->AddYaw(yawAdd); mpPlayer->AddPitch(pitchAdd); }
+            // Durante un LookAt degli script la visuale la guida l'host: il
+            // mouse va solo all'host (come nel gioco originale), senza ruotare
+            // qui una visuale che lo snapshot riporterebbe indietro.
+            if(!gpBase->mpNetwork->ClientObjectControlsLook() && !gpBase->mpNetwork->ClientScriptControlsLook()) { mpPlayer->AddYaw(yawAdd); mpPlayer->AddPitch(pitchAdd); }
 			input.forward = (P1IsTriggerd(eLuxAction_Forward) ? 1000 : 0) - (P1IsTriggerd(eLuxAction_Backward) ? 1000 : 0);
 			input.strafe = (P1IsTriggerd(eLuxAction_Right) ? 1000 : 0) - (P1IsTriggerd(eLuxAction_Left) ? 1000 : 0);
             input.buttons = (P1IsTriggerd(eLuxAction_Jump) ? 1 : 0) | (P1IsTriggerd(eLuxAction_Crouch) ? 2 : 0) |

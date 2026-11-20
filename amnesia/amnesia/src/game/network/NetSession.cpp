@@ -188,6 +188,30 @@ bool DecodeMedia(const uint8_t* p, size_t n, MediaState& s) {
         cursor != n || !ValidMedia(value)) return false;
     s = std::move(value); return true;
 }
+namespace {
+bool ValidLoadScreenText(const std::string& text, bool path) {
+    if(text.size() > 256) return false;
+    for(unsigned char c : text) if(c < 32 || c == 127) return false;
+    return !path || (text.find("..") == std::string::npos && text.find(':') == std::string::npos &&
+        (text.empty() || (text[0] != '/' && text[0] != '\\')));
+}
+}
+std::vector<uint8_t> EncodeLoadScreen(const LoadScreenInfo& info) {
+    if((info.kind != 1 && info.kind != 2) || !ValidLoadScreenText(info.category, false) ||
+       !ValidLoadScreenText(info.entry, false) || !ValidLoadScreenText(info.image, true)) return {};
+    auto out = Header(Message::LoadScreen); out.push_back(info.kind);
+    String(out, info.category); String(out, info.entry); String(out, info.image);
+    return out;
+}
+bool DecodeLoadScreen(const uint8_t* p, size_t n, LoadScreenInfo& info) {
+    if(!ValidHeader(p, n) || n < 12 || p[4] != uint8_t(Message::LoadScreen)) return false;
+    LoadScreenInfo value; value.kind = p[5]; size_t cursor = 6;
+    if(value.kind != 1 && value.kind != 2) return false;
+    if(!ReadString(p, n, cursor, value.category, 256) || !ReadString(p, n, cursor, value.entry, 256) ||
+       !ReadString(p, n, cursor, value.image, 256) || cursor != n) return false;
+    if(!ValidLoadScreenText(value.category, false) || !ValidLoadScreenText(value.entry, false) || !ValidLoadScreenText(value.image, true)) return false;
+    info = std::move(value); return true;
+}
 std::vector<uint8_t> EncodePresentation(const Presentation& event) {
     if(!ValidPresentation(event)) return {};
     auto out = Header(Message::Presentation); U32(out, event.epoch); out.push_back(uint8_t(event.kind)); out.push_back(event.target);
@@ -418,7 +442,7 @@ void Session::Stop() {
     lastPoll_ = lastPacket_ = lastDiagnostic_ = 0;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = snapshotBackups_ = 0; map_ = MapState();
     entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
-    presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+    presentation_.clear(); loadScreen_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
     closing_ = partnerLeftVoluntarily_ = false;
     loading_ = false; loadingStarted_ = worldAppliedEpoch_ = mapReadyAt_ = oldestBulkQueue_ = oldestBulkAt_ = lastSocketError_ = 0;
 }
@@ -495,7 +519,7 @@ void Session::ClearPeerState() {
     peer_ = nullptr; ready_ = hasInput_ = false; inputQueue_.Clear(); sentInputs_.clear();
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
     entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
-    presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+    presentation_.clear(); loadScreen_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
     loading_ = false; worldAppliedEpoch_ = mapReadyAt_ = oldestBulkQueue_ = oldestBulkAt_ = 0;
 }
 void Session::Reject(const char* why) { fatal_ = true;
@@ -528,6 +552,12 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
     }
     if(ready_ && channel == 0 && n == 8 && p[4] == uint8_t(Message::Peer) && p[5] <= 1 && R16(p + 6)) {
         remoteReady_ = p[5] != 0; remotePort_ = R16(p + 6); return;
+    }
+    if(ready_ && role_ == Role::Client && channel == 0 && n > 5 && p[4] == uint8_t(Message::LoadScreen)) {
+        LoadScreenInfo info;
+        if(!DecodeLoadScreen(p, n, info)) { Reject("invalid load screen"); return; }
+        if(loadScreen_.size() >= 8) loadScreen_.pop_front();
+        loadScreen_.push_back(std::move(info)); return;
     }
     if(ready_ && role_ == Role::Client && channel == 0 && n == 5 && p[4] == uint8_t(Message::Loading)) {
         SetLoading(true); return;
@@ -662,7 +692,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         if (!DecodeMap(p, n, map)) { Reject("invalid map path or epoch"); return; }
         if (!hasMap_ || (map.epoch - map_.epoch != 0 && map.epoch - map_.epoch < 0x80000000u)) {
             map_ = map; hasMap_ = true; hasSnapshot_ = false; entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
-            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+            presentation_.clear(); loadScreen_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
             worldAppliedEpoch_ = 0; SetLoading(true);
         }
         return;
@@ -723,7 +753,7 @@ void Session::Poll() {
             peer_ = e.peer; ready_ = hasInput_ = hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; started_ = enet_time_get(); inputQueue_.Clear(); sentInputs_.clear();
             loading_ = false; worldAppliedEpoch_ = mapReadyAt_ = 0;
             entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
-            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+            presentation_.clear(); loadScreen_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
             rttWindowMin_ = rttPreviousMin_ = rttWindowAt_ = 0;
             enet_peer_timeout(peer_, 8, OrdinaryTimeoutMinMs, OrdinaryTimeoutMaxMs);
             // BulkReady regulates the large reliable stream. RTT spikes during
@@ -747,7 +777,7 @@ void Session::Poll() {
             hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
             loading_ = false; worldAppliedEpoch_ = 0;
             entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
-            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+            presentation_.clear(); loadScreen_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
         }
     }
     if (peer_ && !ready_ && uint32_t(enet_time_get() - started_) > 5000) { Reject("handshake timeout"); fatal_ = false; }
@@ -933,6 +963,15 @@ bool Session::IsWorldApplied(uint32_t epoch) const { return ready_ && hasMap_ &&
 bool Session::SendInventory(const InventoryState& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeInventory(s), 2, true); }
 bool Session::ReadInventory(InventoryState& s) const { if(!ready_ || !hasInventory_) return false; s = inventory_; return true; }
 bool Session::SendPresentation(const Presentation& event) { return role_ == Role::Host && IsMapReady(event.epoch) && Send(EncodePresentation(event), 2, true, true); }
+bool Session::SendLoadScreen(const LoadScreenInfo& info) {
+    if(role_ != Role::Host || !ready_) return false;
+    const auto bytes = EncodeLoadScreen(info);
+    if(bytes.empty() || !Send(bytes, 0, true)) return false;
+    // Subito: dopo la richiesta di mostrarla l'host entra nel caricamento.
+    if(host_) enet_host_flush(host_);
+    return true;
+}
+bool Session::ReadLoadScreen(LoadScreenInfo& info) { if(loadScreen_.empty()) return false; info = std::move(loadScreen_.front()); loadScreen_.pop_front(); return true; }
 bool Session::ReadPresentation(Presentation& event) { if(presentation_.empty()) return false; event = std::move(presentation_.front()); presentation_.pop_front(); return true; }
 bool Session::SendMedia(const MediaState& s) { return role_ == Role::Host && IsMapReady(s.epoch) && Send(EncodeMedia(s), 2, true, true); }
 bool Session::ReadMedia(MediaState& s) { if(media_.empty()) return false; s = std::move(media_.front()); media_.pop_front(); return true; }

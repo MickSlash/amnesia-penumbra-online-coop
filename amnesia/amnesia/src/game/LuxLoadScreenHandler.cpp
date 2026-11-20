@@ -22,6 +22,7 @@
 #include "LuxHelpFuncs.h"
 #include "LuxInputHandler.h"
 #include "LuxMapHandler.h"
+#include "LuxNetwork.h"
 
 //-----------------------------------------------------------------------
 
@@ -122,6 +123,7 @@ void cLuxLoadScreenHandler::Reset()
 	mfLoadingAlpha = 1.0f;
 	mfAlpha =0;
 	mfExtraTime=0;
+	mbFadeStarted = false;
 	mState = eLuxLoadScreenState_LastEnum;
 
 	msCurrentGameScreenTextEntry = "";
@@ -213,6 +215,7 @@ void cLuxLoadScreenHandler::GameScreenLoadDone(const tString& asEndSound ,float 
 	mfAlpha =1;
 	mfExtraTime = 0;
 	mfLoadingAlpha = 1.0f;
+	mbFadeStarted = false;
 	mState = eLuxLoadScreenState_Game;
 	msGameScreenEndSound = asEndSound;
 
@@ -265,6 +268,24 @@ void cLuxLoadScreenHandler::DrawGameScreen()
 
 	gpBase->mpHelpFuncs->DrawSetToScreen();
 
+}
+
+//-----------------------------------------------------------------------
+
+void cLuxLoadScreenHandler::ShowNetworkScreen(const tString& asCat, const tString& asEntry, const tString& asImage)
+{
+	msLoadTextCat = asCat;
+	msCurrentGameScreenTextEntry = asEntry;
+	msCurrentGameScreenImage = asImage;
+
+	mfAlpha = 1;
+	mfExtraTime = 0;
+	mfLoadingAlpha = 1.0f;
+	mbFadeStarted = false;
+	mState = eLuxLoadScreenState_Game;
+	msGameScreenEndSound = "";
+
+	gpBase->mpEngine->GetUpdater()->SetContainer("LoadScreen");
 }
 
 //-----------------------------------------------------------------------
@@ -407,6 +428,15 @@ void cLuxLoadScreenHandler::UpdateGameState(float afTimeStep)
 	{
 		mfExtraTime -= afTimeStep;
 		return;
+	}
+
+	////////////////////////////
+	// Co-op online: si esce insieme, quando entrambi i giocatori hanno caricato
+	if(gpBase->mpNetwork && gpBase->mpNetwork->HoldLoadScreen()) return;
+	if(!mbFadeStarted)
+	{
+		mbFadeStarted = true;
+		if(gpBase->mpNetwork) gpBase->mpNetwork->LoadScreenFading();
 	}
 	
 	////////////////////////////

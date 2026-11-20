@@ -177,10 +177,15 @@ try {
             $marker = if($role -eq 'host') { 'Announced epoch=2 file=maps/main/09_back_hall.map' } else { 'Replica loaded epoch=2 file=maps/main/09_back_hall.map' }
             if(!$log.Contains($marker) -or $log.Contains('Cannot announce map')) {throw "Missing $role level door proof: $marker"}
             if($role -eq 'client') {
-                foreach($notice in @('Client showed waiting for host notice','Client showed host loading notice')) { if(!$log.Contains($notice)) {throw "Missing client notice: $notice"} }
+                if(!$log.Contains('Client showed waiting for host notice')) {throw 'Missing client notice: Client showed waiting for host notice'}
+                # Durante il caricamento la schermata condivisa sostituisce la scritta dell'host.
+                if(!$log.Contains('Client showed host loading notice') -and !$log.Contains('Shared load screen shown')) {throw 'Missing client notice: host loading'}
                 if($log.Contains('Connection lost; campaign paused for recovery')) {throw 'Client dropped the session during the host stall or load'}
             }
-            if($role -eq 'client' -and !$log.Contains('Arrival sound played: door_level_wood_close')) {throw 'Client did not hear the level door on arrival'}
+            # La porta si sente alla chiusura della schermata di caricamento condivisa.
+            if($role -eq 'client' -and (!$log.Contains('Arrival sound kept for the end of the load screen: door_level_wood_close') -or !$log.Contains('Shared load screen closed released=1'))) {throw 'Client did not keep the level door for the end of the shared load screen'}
+            if($role -eq 'client' -and !$log.Contains('Shared load screen shown entry=Ch01_Diary01_')) {throw 'Client did not show the host load screen quote'}
+            if($role -eq 'host' -and !$log.Contains('Load screen closed on both players sent=1')) {throw 'Host did not close the shared load screen'}
             Write-Output "PASS: $role level door with authoring path reached 09_back_hall"
         }
         if($Flashback) {

@@ -27,7 +27,7 @@ namespace online {
 //     simulati e la previsione del client veniva corretta.
 // 18: lo snapshot porta l'inclinazione (Q/E) di ogni giocatore separata dal
 //     resto: il client la calcola da sé per la propria visuale.
-constexpr uint16_t ProtocolVersion = 18;
+constexpr uint16_t ProtocolVersion = 19;
 constexpr uint32_t VoluntaryDisconnectReason = 0x414f0001;
 constexpr uint16_t DefaultPort = 27020;
 // ENet timeout outside map loads. ENet drops a peer once an unacknowledged
@@ -41,7 +41,7 @@ constexpr uint32_t ConservativeDatagramBytes = 576;
 // reliable packet. A 256 KiB cap can reject the very retransmit that drains it.
 constexpr uint32_t TransportWaitingDataBytes = 4 * 1024 * 1024;
 enum class Role { Offline, Host, Client };
-enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17, Loading = 18, WorldApplied = 19, InputBatch = 20 };
+enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17, Loading = 18, WorldApplied = 19, InputBatch = 20, LoadScreen = 21 };
 struct JournalEntry {
     uint8_t kind = 0; // note, diary, quest
     bool active = true;
@@ -62,6 +62,16 @@ struct Presentation {
 };
 std::vector<uint8_t> EncodePresentation(const Presentation& event);
 bool DecodePresentation(const uint8_t* data, size_t size, Presentation& event);
+// Schermata di caricamento fra due mappe (protocollo 19): l'host manda la
+// citazione già scelta (categoria e voce della lingua, così ognuno la legge
+// nella propria lingua) e l'immagine; poi la chiusura, quando entrambi i
+// giocatori hanno caricato e l'host ha finito il tempo di lettura.
+struct LoadScreenInfo {
+    uint8_t kind = 0; // 1 = mostra, 2 = chiudi
+    std::string category, entry, image;
+};
+std::vector<uint8_t> EncodeLoadScreen(const LoadScreenInfo& info);
+bool DecodeLoadScreen(const uint8_t* data, size_t size, LoadScreenInfo& info);
 struct PlayerState {
     int32_t x = 0, y = 0, z = 0; // feet position, millimetres
     int16_t yaw = 0, pitch = 0;
@@ -195,6 +205,8 @@ public:
     bool ReadInventory(InventoryState& inventory) const;
     bool SendPresentation(const Presentation& event);
     bool ReadPresentation(Presentation& event);
+    bool SendLoadScreen(const LoadScreenInfo& info);
+    bool ReadLoadScreen(LoadScreenInfo& info);
     bool SendMedia(const MediaState& state);
     bool ReadMedia(MediaState& state);
     bool SendJournal(const JournalState& state);
@@ -265,6 +277,7 @@ private:
     InventoryState inventory_;
     bool hasInventory_ = false;
     std::deque<Presentation> presentation_;
+    std::deque<LoadScreenInfo> loadScreen_;
     std::deque<MediaState> media_;
     std::deque<Snapshot> life_;
     bool hasLife_ = false;

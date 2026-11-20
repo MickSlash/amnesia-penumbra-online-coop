@@ -29,6 +29,7 @@
 #include "LuxHintHandler.h"
 #include "LuxMusicHandler.h"
 #include "LuxHelpFuncs.h"
+#include "LuxLoadScreenHandler.h"
 #include "LuxSavedGameTypes.h"
 #include "LuxSavedGame.h"
 #include "impl/tinyXML/tinyxml.h"
@@ -411,6 +412,8 @@ void cLuxNetwork::Update(float timeStep) {
             NetLog("[NET/TEST] Host game thread stalled 4 s without load notice");
             std::this_thread::sleep_for(std::chrono::seconds(4));
             NetLog("[NET/TEST] Host using level door map file C:/SVN/amnesia/redist/maps/main/ch01/09_back_hall.map");
+            // Una citazione vera della campagna per la schermata condivisa.
+            gpBase->mpLoadScreenHandler->SetupLoadText("LoadingText", "Ch01_Diary01_", 6, "game_loading_catacombs.jpg");
             gpBase->mpMapHandler->ChangeMap("C:/SVN/amnesia/redist/maps/main/ch01/09_back_hall.map", "", "door_level_wood_open", "door_level_wood_close");
         }
     }
@@ -748,9 +751,13 @@ struct NativeStepper {
     float startY = 0;
     uint8_t previousButtons = 0;
     iPhysicsWorld* world;
+    // Moltiplicatori di velocità da accovacciato (avanti, indietro, lato) e
+    // stato previsto: il tasto alterna come cLuxMoveState_Normal::OnCrouch.
+    float crouchMul[3] = {1, 1, 1};
+    bool crouched = false;
     NativeStepper(iCharacterBody* b, float gravity, float maxJump, iPhysicsWorld* w) : body(b), gravityY(gravity), maxJumpCount(maxJump), world(w) {}
     void Begin(const online::PlayerState& s, uint8_t ackedButtons) {
-        host = s; previousButtons = ackedButtons;
+        host = s; previousButtons = ackedButtons; crouched = (s.flags & 1) != 0;
         saved = body->GetPredictionState();
         auto start = saved;
         start.mvPosition = start.mvLastPosition = cVector3f(s.x/1000.0f, s.y/1000.0f, s.z/1000.0f) + cVector3f(0, body->GetSize().y/2, 0);
@@ -786,12 +793,19 @@ struct NativeStepper {
         body->SetYaw(input.yaw/1000.0f);
         // Corsa premuta o lasciata dopo l'ultima posa dell'host: la stessa
         // velocità massima che l'host userà con questo comando.
+        // Accovacciarsi o rialzarsi dopo l'ultima posa dell'host cambia la
+        // velocità subito, non un RTT dopo (da accovacciati la corsa non conta).
         const bool run = (input.buttons & 4) != 0, hostRun = (host.moveFlags & 1) != 0;
-        float forward = 1, backward = 1, side = 1;
-        if(run != hostRun) {
-            forward = host.runForward/1000.0f; backward = host.runBackward/1000.0f; side = host.runSide/1000.0f;
-            if(!run) { forward = 1/forward; backward = 1/backward; side = 1/side; }
-        }
+        if((input.buttons & 2) && !(previousButtons & 2)) crouched = !crouched;
+        const bool hostCrouched = (host.flags & 1) != 0;
+        auto speedMul = [&](bool crouch, bool running, int axis) {
+            if(crouch) return std::max(0.01f, crouchMul[axis]);
+            if(running) return (axis == 0 ? host.runForward : axis == 1 ? host.runBackward : host.runSide) / 1000.0f;
+            return 1.0f;
+        };
+        const float forward = speedMul(crouched, run, 0) / speedMul(hostCrouched, hostRun, 0);
+        const float backward = speedMul(crouched, run, 1) / speedMul(hostCrouched, hostRun, 1);
+        const float side = speedMul(crouched, run, 2) / speedMul(hostCrouched, hostRun, 2);
         body->SetMaxPositiveMoveSpeed(eCharDir_Forward, host.forwardMax/1000.0f*forward);
         body->SetMaxNegativeMoveSpeed(eCharDir_Forward, -host.backwardMax/1000.0f*backward);
         body->SetMaxPositiveMoveSpeed(eCharDir_Right, host.sideMax/1000.0f*side);
@@ -828,6 +842,7 @@ void cLuxNetwork::Reset() {
     mPendingLookYaw = mPendingLookPitch = 0; mHasLookSequence = false;
     mHasLastLocalFeet = false;
     mClientObjectLook = mClientScriptLook = mRemoteRotate = mClientSharedIntro = false;
+    mHostLoadScreenPending = mClientLoadScreen = mClientLoadScreenReleased = false;
     mSnapshots.clear(); mReceivedSnapshot = false; mReceivedSequence = 0; mLastSnapshotAt = {};
     mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0; mDeferredActions.clear();
     mEntityBytes.clear(); mEntityStates.clear(); mReplicaIDs.clear(); mLoggedWorldReplica = false;
@@ -1259,6 +1274,38 @@ void cLuxNetwork::QueuePresentation(online::Presentation event) {
 void cLuxNetwork::MusicChanged(int priority, float fadeTime) {
     if(mSession.GetRole() == online::Role::Host) mMusicFadeTimes[priority] = std::max(0.0f, fadeTime);
 }
+void cLuxNetwork::HostLoadScreenShown() {
+    if(mSession.GetRole() != online::Role::Host || !mSession.Connected() || !HasNetworkPlayers()) return;
+    online::LoadScreenInfo info; info.kind = 1;
+    info.category = gpBase->mpLoadScreenHandler->GetLoadTextCat();
+    info.entry = gpBase->mpLoadScreenHandler->GetCurrentGameScreenTextEntry();
+    info.image = gpBase->mpLoadScreenHandler->GetCurrentGameScreenImage();
+    mHostLoadScreenPending = mSession.SendLoadScreen(info);
+    NetLog("[NET/MAP] Load screen shared: " + std::to_string(mHostLoadScreenPending) + " entry=" + info.entry + " image=" + info.image);
+}
+bool cLuxNetwork::HoldLoadScreen() const {
+    // Host: finché il client non ha applicato il nuovo mondo (barriera di
+    // caricamento); il tempo di lettura della citazione scorre intanto.
+    if(mSession.GetRole() == online::Role::Host)
+        return mHostLoadScreenPending && mSession.Connected() && HasNetworkPlayers() && (mSession.Loading() || WaitingForMap());
+    // Client: finché l'host non dà la chiusura (al più 2 minuti, o fino a una disconnessione).
+    if(IsClientReplica() && mClientLoadScreen)
+        return !mClientLoadScreenReleased && mSession.Connected() &&
+            std::chrono::steady_clock::now() - mClientLoadScreenAt < std::chrono::seconds(120);
+    return false;
+}
+void cLuxNetwork::LoadScreenFading() {
+    if(mSession.GetRole() == online::Role::Host && mHostLoadScreenPending) {
+        mHostLoadScreenPending = false;
+        online::LoadScreenInfo info; info.kind = 2;
+        const bool sent = mSession.Connected() && mSession.SendLoadScreen(info);
+        NetLog("[NET/MAP] Load screen closed on both players sent=" + std::to_string(sent));
+    }
+    if(mClientLoadScreen) {
+        NetLog("[NET/MAP] Shared load screen closed released=" + std::to_string(mClientLoadScreenReleased));
+        mClientLoadScreen = mClientLoadScreenReleased = false;
+    }
+}
 bool cLuxNetwork::WaitingForMap() const {
     if(mRecovering || mInputLeasePaused) return true;
     return mSession.GetRole() == online::Role::Host && mSession.Connected() &&
@@ -1438,8 +1485,12 @@ void cLuxNetwork::LoadReplicaMap(const online::MapState& state) {
         gpBase->SetProfile(gpBase->msDefaultProfileName);
         gpBase->InitUserConfig();
     }
-    gpBase->mpEngine->GetUpdater()->SetContainer("Default");
-    gpBase->mpInputHandler->ChangeState(eLuxInputState_Game);
+    // Con la schermata condivisa la mappa si carica sotto di essa; la partita
+    // riprende quando l'host la chiude (cLuxLoadScreenHandler::Exit).
+    if(!mClientLoadScreen) {
+        gpBase->mpEngine->GetUpdater()->SetContainer("Default");
+        gpBase->mpInputHandler->ChangeState(eLuxInputState_Game);
+    }
     if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_CAMPAIGN_START")) {
         NetLog("[NET/TEST] Simulating six-second synchronous client map load");
         std::this_thread::sleep_for(std::chrono::seconds(6));
@@ -1542,6 +1593,19 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
         return;
     }
     if(IsClientReplica()) {
+        // Schermata di caricamento dell'host: prima del caricamento della
+        // mappa (la richiesta parte prima che l'host carichi).
+        online::LoadScreenInfo screen;
+        while(mSession.ReadLoadScreen(screen)) {
+            if(screen.kind == 1 && map) {
+                gpBase->mpLoadScreenHandler->ShowNetworkScreen(screen.category, screen.entry, screen.image);
+                mClientLoadScreen = true; mClientLoadScreenReleased = false; mClientLoadScreenAt = now;
+                NetLog("[NET/MAP] Shared load screen shown entry=" + screen.entry + " image=" + screen.image);
+            } else if(screen.kind == 2 && mClientLoadScreen) {
+                mClientLoadScreenReleased = true;
+                NetLog("[NET/MAP] Host closed the shared load screen");
+            }
+        }
         online::MapState state;
         if(mSession.ReadMap(state) && (state.epoch != mEpoch || !map)) {
             LoadReplicaMap(state);
@@ -1707,8 +1771,8 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                 p.flags = q.flags; p.tinderboxes = q.tinderboxes;
                 { const float from = p.roll / 1000.0f, delta = (q.roll - p.roll) / 1000.0f;
                   p.roll = int16_t((from + std::atan2(std::sin(delta), std::cos(delta)) * alpha) * 1000); }
-                p.leanMove += int16_t((q.leanMove - p.leanMove) * alpha); p.leanRoll = q.leanRoll;
-                p.fov = q.fov; p.aspect = q.aspect; p.lookSpeed = q.lookSpeed;
+                p.leanMove += int16_t((q.leanMove - p.leanMove) * alpha); p.leanRoll += int16_t((q.leanRoll - p.leanRoll) * alpha);
+                p.fov += int16_t((q.fov - p.fov) * alpha); p.aspect += int16_t((q.aspect - p.aspect) * alpha); p.lookSpeed = q.lookSpeed;
                 p.cameraX += int16_t((q.cameraX - p.cameraX) * alpha);
                 p.cameraZ += int16_t((q.cameraZ - p.cameraZ) * alpha);
             }
@@ -1727,13 +1791,23 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             if(!mSession.SendWorldApplied(mEpoch)) { NetLog("[NET/MAP] Cannot confirm applied world; closing session"); mSession.Stop(); return; }
             NetLog("[NET/MAP] Full replica world acknowledged epoch=" + std::to_string(mEpoch));
             if(!mArrivalSound.empty()) {
-                gpBase->mpHelpFuncs->PlayGuiSoundData(mArrivalSound, eSoundEntryType_Gui);
-                NetLog("[NET/MAP] Arrival sound played: " + mArrivalSound);
+                // Con la schermata condivisa il suono (la porta) arriva alla
+                // sua chiusura, come sull'host, e una volta sola.
+                if(mClientLoadScreen) {
+                    gpBase->mpLoadScreenHandler->SetGameScreenEndSound(mArrivalSound);
+                    NetLog("[NET/MAP] Arrival sound kept for the end of the load screen: " + mArrivalSound);
+                } else {
+                    gpBase->mpHelpFuncs->PlayGuiSoundData(mArrivalSound, eSoundEntryType_Gui);
+                    NetLog("[NET/MAP] Arrival sound played: " + mArrivalSound);
+                }
                 mArrivalSound.clear();
             }
         }
         mClientSharedIntro = mSession.IsWorldApplied(mEpoch) && (local.flags & 64) != 0;
         if(mClientSharedIntro) { mPrediction.Clear(); mVerticalPrediction.Clear(); mLocalInputButtons=0; }
+        // La capsula dell'ultimo snapshot (in piedi o accovacciata) prima della
+        // previsione, non un fotogramma dopo in ApplyReplica.
+        if(body) body->SetActiveSize((local.flags & 1) ? 1 : 0);
         if(body && mBaselineApplied && !mClientSharedIntro) {
             const auto predictionStart = std::chrono::steady_clock::now();
             online::PredictionCollisionCache collisionCache;
@@ -1756,6 +1830,7 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
             auto* moveState = static_cast<cLuxMoveState_Normal*>(gpBase->mpPlayer->GetMoveStateData(eLuxMoveState_Normal));
             const float gravityY = body->GetCustomGravityActive() ? body->GetCustomGravity().y : map->GetPhysicsWorld()->GetGravity().y;
             NativeStepper stepper(body, gravityY, moveState ? moveState->GetMaxJumpCount() : 0, map->GetPhysicsWorld());
+            if(moveState) moveState->GetCrouchSpeedMuls(stepper.crouchMul[0], stepper.crouchMul[1], stepper.crouchMul[2]);
             const auto predicted = KinematicPrediction() ?
                 mPrediction.ReconcileSmoothed(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,collide) :
                 mPrediction.ReconcileSmoothedWith(local,mSnapshots.back().state.acknowledgedInput,mSnapshots.back().state.sequence,timeStep,stepper,collide);
@@ -1808,6 +1883,24 @@ void cLuxNetwork::UpdateReplication(float timeStep) {
                 (std::abs(local.x-mSnapshots.back().state.players[1].x) + std::abs(local.z-mSnapshots.back().state.players[1].z) > 5)) {
                 mPredictionTestObserved = true; NetLog("[NET/TEST] Local movement prediction applied before host acknowledgement with world collision checks");
             }
+        }
+        // Visuale del giocatore locale: altezza degli occhi, scostamenti della
+        // testa, rotazione, FOV e proporzioni dalla timeline interpolata, come
+        // per il compagno. Dall'ultimo pacchetto arrivavano a scatti (un
+        // fotogramma fermo, poi un salto doppio): accovacciarsi, oscillazione
+        // dei passi, dissolvenze del FOV degli script. Il lean resta locale
+        // (la sua parte dell'host si toglie con valori dello stesso istante).
+        if(!mClientDead) {
+            const auto& view = interpolated.players[1];
+            local.eyeHeight = view.eyeHeight; local.cameraX = view.cameraX; local.cameraZ = view.cameraZ;
+            local.roll = view.roll; local.leanMove = view.leanMove; local.leanRoll = view.leanRoll;
+            local.fov = view.fov; local.aspect = view.aspect;
+            // LookAt degli script, visuale bloccata o guidata da un oggetto:
+            // anche gli angoli seguono la timeline invece del pacchetto grezzo.
+            if(!(local.flags & 4) || (local.flags & 48)) { local.yaw = view.yaw; local.pitch = view.pitch; }
+            // Durante un LookAt la previsione del movimento è spenta: la
+            // posizione interpolata evita gli stessi scatti.
+            if((local.flags & 16) && (local.flags & 4) && !(local.flags & (8|32|128))) { local.x = view.x; local.y = view.y; local.z = view.z; }
         }
         if(mSmokeSeconds && TestFlag("AMNESIA_NET_TEST_MEDIA") && !mTestLanternDisabled) {
             // Reproduce stale local save permissions. Only the host may veto use.
@@ -2730,19 +2823,26 @@ void cLuxNetwork::ReplicateLights(cLuxMap* map) {
         if(!bytes.empty() && bytes != mFogBytes[i] && mSession.SendPresentation(fog[i])) mFogBytes[i] = std::move(bytes);
     }
     unsigned sent = 0;
+    // Alcune mappe hanno più luci con lo stesso nome (29_orb_chamber: 22
+    // nomi doppi). Le successive alla prima si identificano con "nome#n", in
+    // ordine di caricamento, uguale su host e client; prima il client le
+    // applicava tutte alla prima luce, che saltava fra i colori a ogni tick.
+    std::map<tString, int> seen;
     cLightListIterator it = map->GetWorld()->GetLightIterator();
     while(it.HasNext()) {
         iLight* light = it.Next();
         if((light->GetName().find("PlayerLantern") == 0 || light->GetName().find("PlayerDarknessAmbient") == 0)) continue; // ownership is swapped on the client
-        online::Presentation event; event.epoch = mEpoch; event.kind = online::PresentationKind::Light; event.text[0] = light->GetName();
+        const int duplicate = seen[light->GetName()]++;
+        online::Presentation event; event.epoch = mEpoch; event.kind = online::PresentationKind::Light;
+        event.text[0] = duplicate ? light->GetName() + "#" + std::to_string(duplicate) : light->GetName();
         const cColor& color = light->GetDiffuseColor(); const float values[] = {color.r, color.g, color.b, color.a};
         for(int i = 0; i < 4; ++i) event.values[i] = int32_t(std::max(0.0f, std::min(65.0f, values[i])) * 1000);
         event.values[4] = int32_t(std::max(0.0f, std::min(100000.0f, light->GetRadius())) * 1000);
         event.values[5] = (light->IsVisible() ? 1 : 0) | (light->IsActive() ? 2 : 0);
         auto bytes = online::EncodePresentation(event);
-        auto old = mLightBytes.find(light->GetName());
+        auto old = mLightBytes.find(event.text[0]);
         if(sent < 64 && !bytes.empty() && (old == mLightBytes.end() || old->second != bytes) && mSession.SendPresentation(event)) {
-            mLightBytes[light->GetName()] = std::move(bytes); ++sent;
+            mLightBytes[event.text[0]] = std::move(bytes); ++sent;
         }
     }
 }
@@ -2846,6 +2946,14 @@ void cLuxNetwork::ApplyPresentation(cLuxMap* map, const online::Presentation& ev
         map->GetWorld()->SetFogCulling((event.values[3] & 2) != 0); break;
     case online::PresentationKind::Light: {
         iLight* light = map->GetWorld()->GetLight(event.text[0]);
+        // "nome#n": la n-esima luce successiva con quel nome (vedi ReplicateLights).
+        const size_t hash = event.text[0].find_last_of('#');
+        if(!light && hash != tString::npos && hash + 1 < event.text[0].size() &&
+           event.text[0].find_first_not_of("0123456789", hash + 1) == tString::npos && event.text[0].size() - hash <= 4) {
+            const tString name = event.text[0].substr(0, hash); int wanted = std::atoi(event.text[0].c_str() + hash + 1);
+            cLightListIterator lights = map->GetWorld()->GetLightIterator();
+            while(lights.HasNext()) { iLight* candidate = lights.Next(); if(candidate->GetName() == name && wanted-- == 0) { light = candidate; break; } }
+        }
         if(!light || (event.text[0].find("PlayerLantern") == 0 || event.text[0].find("PlayerDarknessAmbient") == 0)) break;
         light->SetFlickerActive(false); // replicate the host's actual flicker rather than a second random timer
         light->SetDiffuseColor(cColor(event.values[0] / 1000.0f, event.values[1] / 1000.0f, event.values[2] / 1000.0f, event.values[3] / 1000.0f));
@@ -3313,7 +3421,7 @@ void cLuxNetwork::DiagnoseLocalReplica(const online::PlayerState& local, std::ch
 // still picture that looks like a crash. Also covers a host that stopped
 // sending without a load notice. The client's own load has its load screen.
 void cLuxNetwork::OnDraw(float afFrameTime) {
-    if(!IsClientReplica() || !mSession.Connected() || !gpBase->mpGameHudSet || !gpBase->mpDefaultFont ||
+    if(!IsClientReplica() || mClientLoadScreen || !mSession.Connected() || !gpBase->mpGameHudSet || !gpBase->mpDefaultFont ||
         !gpBase->mpMapHandler->GetCurrentMap()) return;
     const wchar_t* text = NULL;
     const bool italian = ItalianText();

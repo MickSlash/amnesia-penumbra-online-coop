@@ -29,11 +29,17 @@ public:
     bool UpdateQADrive(float timeStep);
     bool IsClientReplica() const { return mSession.GetRole() == online::Role::Client; }
     bool ClientObjectControlsLook() const { return IsClientReplica() && mClientObjectLook; }
+    // LookAt degli script o visuale bloccata: comanda l'host.
+    bool ClientScriptControlsLook() const { return IsClientReplica() && mClientScriptLook; }
     bool SharedIntroView() const { return mSession.IsWorldApplied(mEpoch) && (IsClientReplica() ? mClientSharedIntro : mSession.GetRole() == online::Role::Host && mHasHostLife && (mHostLife.players[1].flags & 64)); }
     bool OwnsPlayerInput(const cLuxPlayer* player) const { return mSession.GetRole() == online::Role::Host && mRemotePlayer2 && player == mRemotePlayer2; }
     bool RemoteRotateHeld() const { return mRemoteRotate; }
     bool HasNetworkPlayers() const { return mSession.GetRole() != online::Role::Offline && OwnsRemotePlayer2(); }
     bool WaitingForMap() const;
+    // Schermata di caricamento condivisa fra due mappe.
+    void HostLoadScreenShown();
+    bool HoldLoadScreen() const;
+    void LoadScreenFading();
     bool UsesSharedInventory() const { return mSession.GetRole() != online::Role::Offline; }
     void SendLocalAction(online::PlayerAction action, bool pressed);
     void SendInventoryAction(online::PlayerAction action, const std::string& item, const std::string& secondItem = "");
@@ -146,6 +152,8 @@ private:
     uint32_t mAppliedLookSequence = 0;
     bool mHasLookSequence = false, mClientObjectLook = false, mClientScriptLook = false;
     bool mClientSharedIntro = false, mIntroCameraTestObserved = false;
+    bool mHostLoadScreenPending = false, mClientLoadScreen = false, mClientLoadScreenReleased = false;
+    std::chrono::steady_clock::time_point mClientLoadScreenAt;
     online::MovementPrediction mPrediction;
     online::VerticalPrediction mVerticalPrediction;
     uint8_t mLocalInputButtons = 0;

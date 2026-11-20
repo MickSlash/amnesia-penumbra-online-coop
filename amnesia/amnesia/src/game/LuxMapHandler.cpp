@@ -2860,6 +2860,8 @@ void cLuxMapHandler::CheckMapChange(float afTimeStep)
 		// Draw loading screen
 		unsigned long lLoadStartTime = cPlatform::GetApplicationTime();
 		gpBase->mpLoadScreenHandler->DrawGameScreen();
+		// Co-op online: la stessa schermata anche sul client.
+		if(gpBase->mpNetwork) gpBase->mpNetwork->HostLoadScreenShown();
 
 		//////////////////////
 		// Save old map

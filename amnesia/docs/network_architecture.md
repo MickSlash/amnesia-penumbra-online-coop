@@ -85,6 +85,7 @@ Questa sezione è nata con il protocollo 7; dove il codice è cambiato fa fede
 | 16 | Nessun cambio sul filo; rifiuta host che inviano percorsi assoluti degli autori originali. |
 | 17 | Un comando di movimento per tick logico; ogni pacchetto (`InputBatch`) ripete gli ultimi 6 comandi e l'host ne simula uno per tick (`InputQueue`), con un buffer adattivo contro il jitter e il recupero degli arretrati. | Nella 0.6.0 lo snapshot passa a 151 byte: per giocatore i rapporti della velocità massima con e senza corsa, lo stato di corsa e il flag 128 (scala a pioli o arrampicata, senza previsione). `cameraX`/`cameraZ`/`eyeHeight` non contengono più il ritardo della media della telecamera (`CameraSmoothPosNum`): il client rifà la media sui piedi mostrati. Nuova azione 8 (rotellina). |
 | 18 | Lo snapshot porta l'inclinazione (Q/E) separata (`leanMove`, `leanRoll`): il client calcola la propria con `cLuxPlayerLean` e sostituisce quella dell'host. Il salto è rieseguito dal corpo del motore insieme al movimento (spinta, gravità ridotta per `MaxJumpCount`), senza la stima verticale separata. Le azioni si legano al comando già spedito nel tick. |
+| 19 | Messaggio `LoadScreen` sul canale 0: fra due mappe l'host manda categoria, voce della citazione e immagine della propria schermata di caricamento; il client la mostra (nella propria lingua) e carica la mappa sotto di essa. L'host tiene la schermata finché il client non ha applicato il nuovo mondo, poi manda la chiusura e la dissolvenza parte su entrambi. Le luci con lo stesso nome nella stessa mappa si identificano con `nome#n`. |
 
 ### Inviti Steam
 
@@ -107,7 +108,7 @@ trasmessa in memoria. Quattro canali:
 
 | Canale | Affidabilità | Contenuto |
 | --- | --- | --- |
-| 0 | Affidabile e ordinato | Hello/Welcome, Map/MapReady, Action, Peer lobby, CheckpointAck, Snapshot di riserva a 10 Hz e al cambio lanterna |
+| 0 | Affidabile e ordinato | Hello/Welcome, Map/MapReady, LoadScreen, Action, Peer lobby, CheckpointAck, Snapshot di riserva a 10 Hz e al cambio lanterna |
 | 1 | Ordinato, non affidabile | InputBatch a ogni tick logico, 60 Hz (gli ultimi 1–6 comandi, 10 + 21 byte per comando), Snapshot a 60 Hz (159 byte) |
 | 2 | Affidabile e ordinato | Entity, WorldReady, Inventory, Presentation, Life (159 byte), Media (115–627 byte), Journal |
 | 3 | Affidabile e ordinato | Checkpoint compresso, frammenti da 1 KiB, massimo un invio per tick a 60 Hz |

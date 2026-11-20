@@ -66,6 +66,19 @@ static void MalformedInputStressTest() {
     Presentation event; event.epoch = 1; event.text[0] = "Story"; StressCodec(event, EncodePresentation, DecodePresentation);
     MediaState media; media.epoch = 1; media.id = 1; media.name = "rain"; media.file = "rain.snt";
     StressCodec(media, EncodeMedia, DecodeMedia);
+    LoadScreenInfo screen; screen.kind = 1; screen.category = "LoadingText"; screen.entry = "Ch01_Load01"; screen.image = "loading_screen_rose.jpg";
+    StressCodec(screen, EncodeLoadScreen, DecodeLoadScreen);
+    { // Schermata di caricamento condivisa: andata e ritorno, percorsi e tipi non validi.
+        LoadScreenInfo read; const auto bytes = EncodeLoadScreen(screen);
+        Check(DecodeLoadScreen(bytes.data(), bytes.size(), read) && read.kind == 1 && read.category == screen.category &&
+            read.entry == screen.entry && read.image == screen.image, "load screen roundtrip");
+        for(size_t n = 0; n < bytes.size(); ++n) Check(!DecodeLoadScreen(bytes.data(), n, read), "truncated load screen");
+        LoadScreenInfo bad = screen; bad.image = "../secret.jpg"; Check(EncodeLoadScreen(bad).empty(), "load screen image outside the game");
+        bad = screen; bad.image = "C:/x.jpg"; Check(EncodeLoadScreen(bad).empty(), "load screen absolute image");
+        bad = screen; bad.kind = 3; Check(EncodeLoadScreen(bad).empty(), "load screen kind");
+        LoadScreenInfo close; close.kind = 2; const auto closeBytes = EncodeLoadScreen(close);
+        Check(DecodeLoadScreen(closeBytes.data(), closeBytes.size(), read) && read.kind == 2 && read.entry.empty(), "load screen close roundtrip");
+    }
     std::cout << "PASS: 80000 deterministic malformed-input codec stress cases\n";
 }
 static void MediaCodecTest() {
