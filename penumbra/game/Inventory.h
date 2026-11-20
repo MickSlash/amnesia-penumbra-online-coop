@@ -360,6 +360,15 @@ public:
 
 	void ClearCallbacks();
 
+	// Co-op: gli inventari degli ospiti (sull'host) inoltrano le callback degli
+	// script a quello dell'host, così una raccolta dell'ospite fa scattare gli
+	// stessi eventi della storia.
+	void SetCallbackOwner(cInventory *apOwner){ mpCallbackOwner = apOwner ? apOwner : this; }
+	cInventory* GetCallbackOwner(){ return mpCallbackOwner; }
+	// Co-op: aggiunte che non fanno scattare le callback di raccolta (copie
+	// degli oggetti di gruppo per gli altri giocatori).
+	void SetSilent(bool abX){ mbSilent = abX; }
+
 	void CheckPickupCallback(const tString &asItem);
 	bool CheckUseCallback(const tString &asItem, const tString &asObject);
 	bool CheckCombineCallback(const tString &asItem1,const tString &asItem2,int alSlotIndex);
@@ -405,6 +414,8 @@ private:
 	bool mbCheckingCombineItems;
 
 	bool mbNoteBookIsActive;
+	cInventory *mpCallbackOwner;
+	bool mbSilent;
 
 	iFontData *mpFont;
 

@@ -563,3 +563,61 @@ Prova `party` completa (camminata, nemico, checkpoint, riconnessione):
 | 4 | PASS 2/2 | sì | 0,000 m | 51,6 / 53,2 |
 
 La salute dopo il rientro cresce di 1,6 per la rigenerazione naturale.
+
+## 15. Aggiornamento 20 novembre — inventari per giocatore (Fase 3)
+
+### Modifiche
+
+- **Inventario per ospite:**
+  - sull'host ogni ospite ha il proprio `cInventory`;
+  - `PlayerScope` lo rende `init->mpInventory` durante le azioni dell'ospite;
+  - il client riceve solo il proprio inventario. Il formato di rete non cambia.
+- **Oggetti di gruppo:** torcia, glowstick, armi, taccuino e mappa vanno a tutti i giocatori, sia alla raccolta sia all'ingresso in partita. Tutto il resto resta a chi lo raccoglie.
+- **Script:**
+  - le callback di raccolta, uso e combinazione restano in comune;
+  - `HasItem` e `RemoveItem` cercano anche negli inventari dei compagni.
+- **Salvataggi:** inventari degli ospiti 2-4 nel checkpoint. Un salvataggio vecchio dà agli ospiti gli oggetti di gruppo dell'host.
+- **Prova `full`:** la chiave del lucchetto passa dall'host all'ospite con `TransferItem`. Inventari registrati: host `[]`, ospite `[padlock]`.
+- **Prova `campaign`:** il client controlla il checkpoint 15 s dopo il primo ricaricamento (cambio di epoca), non a 85 s dall'avvio. Le fasi dell'host durano un tempo variabile.
+
+### Errori trovati e corretti (MISURATO)
+
+1. **Snapshot d'inventario rifiutato dopo il ricaricamento:**
+   - `LoadFromGlobal` aggiunge gli oggetti senza svuotare l'inventario;
+   - l'ospite si ritrovava con torcia e martello doppi;
+   - il client rifiuta i nomi duplicati ("Rejected: invalid inventory snapshot") e chiudeva la connessione.
+
+   Correzioni:
+   - `Reset()` prima del caricamento;
+   - la replica salta comunque i nomi doppi.
+2. **Crash dell'host (0xc0000005), intermittente:**
+   - `cSavedGame::ResetGlobalData` svuotava solo l'inventario dell'host, quindi ogni salvataggio accodava oggetti e slot a `mInventory2..4`;
+   - con più di 33 slot salvati, `LoadFromGlobal` leggeva oltre la fine della lista. A volte andava in crash subito (`LoadFromGlobal` ← `LoadPartner` ← `LoadCheckpoint`, risolto con il file `.map`), a volte corrompeva la memoria e il crash arrivava all'uscita, nei distruttori dei font (stack da una build RelWithDebInfo).
+
+   Correzioni:
+   - svuotamento degli inventari degli ospiti in `ResetGlobalData`;
+   - controllo dei limiti in `LoadFromGlobal`.
+
+   Dopo la correzione il checkpoint contiene 33 slot per l'host e 33 per l'ospite.
+
+### Misure
+
+Build Release, una macchina, istanze native su loopback. Un esito conta come PASS solo se tutti i processi passano ed escono senza crash.
+
+| Prova | Esito | Note |
+| --- | --- | --- |
+| `campaign` | PASS 3/3 | nessun crash dump; inventario dell'ospite ricaricato |
+| `resume` | PASS | processi nuovi dal checkpoint della `campaign` |
+| `full` | PASS | passaggio della chiave all'ospite |
+| `hammer` | PASS | martello e torcia anche al compagno |
+| `party -Players 3` | PASS | |
+| `party -Players 4` | PASS | |
+| `maps` | PASS | 25/25 mappe pronte su host e client, nessuna disconnessione |
+| `ctest` (ProtocolValidation) | PASS | |
+
+Prima della correzione del crash, 3 esecuzioni `campaign` su 5 erano finite con un crash dell'host: 2 al ricaricamento, 1 all'uscita.
+
+Non sono state provate:
+- una partita reale su più PC;
+- la rete degradata con 3-4 giocatori;
+- l'intera campagna con oggetti consumabili divisi fra i giocatori.

@@ -40,8 +40,8 @@ Niente push senza autorizzazione esplicita.
 | --- | --- | --- |
 | 1 | Analisi del progetto esistente | ✅ |
 | 2 | Stabilità: movimento, fisica, autorità, interazioni | in corso |
-| 3 | Campagna completa di Overture, inventari, consumabili, oggetti unici, spettatore | da fare |
-| 4 | Da 2 a 4 giocatori | in corso: rete, movimento, silhouette, nemici e checkpoint fatti; scelta nel launcher fatta; inventari per giocatore da fare |
+| 3 | Campagna completa di Overture, inventari, consumabili, oggetti unici, spettatore | in corso: inventari per giocatore fatti |
+| 4 | Da 2 a 4 giocatori | in corso: rete, movimento, silhouette, nemici, checkpoint, scelta nel launcher e inventari per giocatore fatti |
 | 5 | Presentazione e accesso: modelli, animazioni, audio, menu nel gioco, Steam | da fare |
 | 6 | Validazione completa: automatica per ogni livello e reale su due PC | da fare |
 | 7 | Black Plague, poi Requiem | non iniziato (su richiesta) |
@@ -50,14 +50,12 @@ Niente push senza autorizzazione esplicita.
 
 Fase 4 (da 2 a 4 giocatori): fatti i passi 1-7 di `COOP_ARCHITECTURE.md`. Restano da provare la rete degradata con 3-4 giocatori e una partita reale su più PC.
 
-Prossimo: Fase 3 per più giocatori, con il progetto già indicato:
-- inventari separati;
-- consumabili per giocatore (batterie, bende);
-- oggetti unici della storia tracciati, da passare o lasciare;
+Fase 3: fatti gli inventari per giocatore (passi 1-5 di `COOP_ARCHITECTURE.md`, inventario per giocatore).
+
+Prossimo:
+- comando nel gioco per passare un oggetto a un compagno (la funzione c'è già);
 - diario personale;
 - spettatore per chi è a terra.
-
-Il primo passo è progettare l'inventario per giocatore (protocollo, salvataggi, script che controllano gli oggetti) in `COOP_ARCHITECTURE.md`, poi implementarlo.
 
 ### Rimandato, con motivo
 
@@ -69,6 +67,13 @@ Il primo passo è progettare l'inventario per giocatore (protocollo, salvataggi,
 
 ## Fatto di recente
 
+- Inventari per giocatore:
+  - un inventario per ospite sull'host, scambiato da `PlayerScope`;
+  - oggetti di gruppo dati a tutti, consumabili e oggetti della storia a chi li raccoglie;
+  - callback degli script in comune; `HasItem` e `RemoveItem` cercano in tutto il gruppo;
+  - inventari degli ospiti nei salvataggi.
+
+  Corretto un crash dell'host al ricaricamento del checkpoint, dovuto all'accumulo degli inventari degli ospiti nel salvataggio. Tutte le prove native passano.
 - Da 2 a 4 giocatori, passi 1-4:
   - protocollo 7 con gli ID dei giocatori;
   - `HostTransport` con una `Session` per ospite;

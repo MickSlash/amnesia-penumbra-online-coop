@@ -1,6 +1,6 @@
 # COOP_STATUS — stato del progetto co-op della trilogia Penumbra
 
-Ultimo aggiornamento: 18 novembre 2026. Il documento tiene traccia di cosa funziona, dei bug noti e del lavoro rimasto rispetto all'obiettivo finale: co-op da 2 a 4 giocatori per Overture, Black Plague e Requiem.
+Ultimo aggiornamento: 20 novembre 2026. Il documento tiene traccia di cosa funziona, dei bug noti e del lavoro rimasto rispetto all'obiettivo finale: co-op da 2 a 4 giocatori per Overture, Black Plague e Requiem.
 
 **Legenda**
 
@@ -63,9 +63,10 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
 | Funzione | Stato | Note |
 | --- | --- | --- |
 | Salute, batteria ed equipaggiamento per giocatore | ✅ | |
-| Inventari separati | ❌ | oggi l'inventario è condiviso |
-| Una copia dei consumabili per ogni giocatore | ❌ | |
-| Oggetti unici tracciati, dare e lasciare oggetti | ❌ | |
+| Inventari separati | ✅ | uno per giocatore; torcia, glowstick, armi, taccuino e mappa a tutti, il resto a chi lo raccoglie (`COOP_ARCHITECTURE.md`) |
+| Consumabili per giocatore | ✅ | batterie, antidolorifici, razzi, oggetti da lanciare e cibo restano a chi li raccoglie |
+| Oggetti unici tracciati | ✅ | chiavi e oggetti della storia restano a chi li trova; gli script li cercano in tutto il gruppo |
+| Dare e lasciare oggetti | 🟡 | il passaggio esiste nel codice ed è provato da `full`; manca il comando nel gioco |
 | Note e diario per giocatore | 🟡 | ricostruiti sul client; le note lette non sono salvate per giocatore |
 
 ### Morte e transizioni
@@ -102,7 +103,7 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
 | Checkpoint co-op separato, scrittura atomica, controllo d'integrità | ✅ | |
 | Ripresa con processi nuovi, rientro dello stesso partner | ✅ | |
 | Copia del salvataggio sul client | ❌ | |
-| Stato per giocatore (inventari) | ❌ | |
+| Stato per giocatore (inventari) | ✅ | prove `campaign` e `resume` |
 
 ## Black Plague e Requiem
 

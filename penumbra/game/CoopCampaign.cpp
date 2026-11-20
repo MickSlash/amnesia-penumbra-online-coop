@@ -73,8 +73,15 @@ void cCoopNetwork::RunCampaignQA(float dt) {
             }
         }
         if(local->IsDead()) qaRespawned=true;
-        if(campaignTime>85 && campaignStage==0 && Ready()) { qaLoaded=savedState(); campaignStage=1; }
-        if(campaignTime>90) {
+        // Tempi agganciati al primo ricaricamento del checkpoint (nuova epoca),
+        // non all'avvio: la durata delle fasi dell'host varia. Dopo ~9 s l'host
+        // fa morire tutti e ricarica di nuovo nella stessa epoca; il controllo
+        // segue quello, e il client resta connesso per il controllo finale
+        // dell'host (~21 s dopo il ricaricamento).
+        if(!qaStartEpoch) qaStartEpoch=g->map.epoch;
+        if(g->map.epoch>qaStartEpoch) qaReloadWait+=dt;
+        if(campaignStage==0 && Ready() && qaReloadWait>15) { qaLoaded=savedState(); campaignStage=1; }
+        if(qaReloadWait>28 || campaignTime>140) {
             const bool ok=qaClientAttacked && qaHostAttacked && qaEnemySeen && qaRespawned && qaLoaded;
             Log("[COOP/QA] %s enemy replica, both damaged, death and checkpoint baseline role=client\n",ok?"PASS":"FAIL"); init->mpGame->Exit();
         }

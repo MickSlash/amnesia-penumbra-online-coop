@@ -27,6 +27,7 @@
 #include "EffectHandler.h"
 #include "RadioHandler.h"
 #include "Notebook.h"
+#include "CoopNetwork.h"
 #include "HapticGameCamera.h"
 
 #include "GlobalInit.h"
@@ -40,6 +41,8 @@
 cInventory::cInventory(cInit *apInit)  : iUpdateable("Inventory")
 {
 	mpInit = apInit;
+	mpCallbackOwner = this;
+	mbSilent = false;
 	mpDrawer = apInit->mpGame->GetGraphics()->GetDrawer();
 
 	mpGfxBackground = mpDrawer->CreateGfxObject("inventory_background.bmp","diffalpha2d");
@@ -1257,6 +1260,7 @@ void cInventory::AddItem(cGameItem *apGameItem)
 		{
 			pSlot->SetItem(pItem);
 			CheckPickupCallback(pItem->GetName());
+			if(mpInit->mpCoop) mpInit->mpCoop->ShareGroupItem(this, pItem);
 			return;
 		}
 	}
@@ -1268,6 +1272,7 @@ void cInventory::AddItem(cGameItem *apGameItem)
 
 void cInventory::AddItemFromFile(const tString &asName,const tString &asFile, int alSlotIndex)
 {
+	struct ShareOnExit { cInit *init; cInventory *inv; tString name; ~ShareOnExit(){ if(init->mpCoop) init->mpCoop->ShareGroupItem(inv, inv->GetItem(name)); } } shareOnExit = { mpInit, this, asName };
 	/////////////////////////////////
 	//Create Item	
 	cInventoryItem *pItem = hplNew( cInventoryItem, (mpInit) );
@@ -1558,6 +1563,7 @@ void cInventory::SetMessage(const tWString &asMessage)
 
 void cInventory::AddPickupCallback(const tString &asItem, const tString &asFunction)
 {
+	if(mpCallbackOwner != this){ mpCallbackOwner->AddPickupCallback(asItem,asFunction); return; }
 	//Log("Adding callback %s %s\n",asItem.c_str(),asFunction.c_str());
 
 	cInventoryPickupCallback *pCallback = hplNew( cInventoryPickupCallback, () );
@@ -1571,6 +1577,7 @@ void cInventory::AddPickupCallback(const tString &asItem, const tString &asFunct
 
 void cInventory::AddUseCallback(const tString &asItem, const tString &asObject, const tString &asFunction)
 {
+	if(mpCallbackOwner != this){ mpCallbackOwner->AddUseCallback(asItem,asObject,asFunction); return; }
 	//Check if the item - object combo already exist.
 	tInventoryUseCallbackMapIt it = m_mapUseCallbacks.find(asItem);
 	if(it != m_mapUseCallbacks.end())
@@ -1600,6 +1607,7 @@ void cInventory::AddUseCallback(const tString &asItem, const tString &asObject, 
 
 void cInventory::AddCombineCallback(const tString &asItem1,const tString &asItem2, const tString &asFunction)
 {
+	if(mpCallbackOwner != this){ mpCallbackOwner->AddCombineCallback(asItem1,asItem2,asFunction); return; }
 	cInventoryCombineCallback *pCallback = hplNew( cInventoryCombineCallback, () );
 	pCallback->msFunction = asFunction;
 	pCallback->msItem1 = asItem1;
@@ -1613,6 +1621,7 @@ void cInventory::AddCombineCallback(const tString &asItem1,const tString &asItem
 
 void cInventory::RemovePickupCallback(const tString &asFunction)
 {
+	if(mpCallbackOwner != this){ mpCallbackOwner->RemovePickupCallback(asFunction); return; }
 	tInventoryPickupCallbackMapIt it = m_mapPickupCallbacks.begin();
 	for(; it != m_mapPickupCallbacks.end(); )
 	{
@@ -1631,6 +1640,7 @@ void cInventory::RemovePickupCallback(const tString &asFunction)
 
 void cInventory::RemoveUseCallback(const tString &asFunction)
 {
+	if(mpCallbackOwner != this){ mpCallbackOwner->RemoveUseCallback(asFunction); return; }
 	tInventoryUseCallbackMapIt it = m_mapUseCallbacks.begin();
 	for(; it != m_mapUseCallbacks.end(); )
 	{
@@ -1648,6 +1658,7 @@ void cInventory::RemoveUseCallback(const tString &asFunction)
 }
 void cInventory::RemoveCombineCallback(const tString &asFunction)
 {
+	if(mpCallbackOwner != this){ mpCallbackOwner->RemoveCombineCallback(asFunction); return; }
 	tInventoryCombineCallbackListIt it = mlstCombineCallbacks.begin();
 	for(; it != mlstCombineCallbacks.end(); ++it)
 	{
@@ -1673,6 +1684,8 @@ void cInventory::RemoveCombineCallback(const tString &asFunction)
 
 void cInventory::CheckPickupCallback(const tString &asItem)
 {
+	if(mpCallbackOwner != this){ mpCallbackOwner->CheckPickupCallback(asItem); return; }
+	if(mbSilent) return;
 	tInventoryPickupCallbackMapIt it = m_mapPickupCallbacks.find(asItem);
 	if(it== m_mapPickupCallbacks.end()) return;
 	cInventoryPickupCallback *pCallback = it->second;
@@ -1685,6 +1698,7 @@ void cInventory::CheckPickupCallback(const tString &asItem)
 
 bool cInventory::CheckUseCallback(const tString &asItem, const tString &asObject)
 {
+	if(mpCallbackOwner != this) return mpCallbackOwner->CheckUseCallback(asItem,asObject);
 	tInventoryUseCallbackMapIt it = m_mapUseCallbacks.find(asItem);
 	if(it== m_mapUseCallbacks.end()) return false;
 	
@@ -1715,6 +1729,7 @@ bool cInventory::CheckUseCallback(const tString &asItem, const tString &asObject
 
 bool cInventory::CheckCombineCallback(const tString &asItem1,const tString &asItem2, int alSlotIndex)
 {
+	if(mpCallbackOwner != this) return mpCallbackOwner->CheckCombineCallback(asItem1,asItem2,alSlotIndex);
 	cInventoryCombineCallback *pFinalCallback=NULL;
 
 	mbCheckingCombineItems = true;
@@ -1881,7 +1896,7 @@ void cInventory::LoadFromGlobal(cInventory_GlobalSave *apSave)
 
 	////////////////////////////
 	//Equip slots
-	for(size_t i=0; i<mvEquipSlots.size(); i++)
+	for(size_t i=0; i<mvEquipSlots.size() && i<apSave->mvEquipSlots.Size(); i++)
 	{	
 		if(apSave->mvEquipSlots[i].msItemName!="")
 			mvEquipSlots[i]->mpItem = GetItem(apSave->mvEquipSlots[i].msItemName);
@@ -1893,7 +1908,7 @@ void cInventory::LoadFromGlobal(cInventory_GlobalSave *apSave)
 	//Normal slots
 	cContainerListIterator<cInventorySlot_GlobalSave> SlotIt = apSave->mlstSlots.GetIterator();
 	tInventorySlotListIt SlotListIt = mlstSlots.begin();
-	while(SlotIt.HasNext())
+	while(SlotIt.HasNext() && SlotListIt != mlstSlots.end())
 	{
 		cInventorySlot *pSlot = *SlotListIt;
 		cInventorySlot_GlobalSave saveSlot = SlotIt.Next();

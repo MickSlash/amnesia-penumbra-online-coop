@@ -349,6 +349,11 @@ public:
     bool mbPlayer3 = false, mbPlayer4 = false;
     cPlayer_GlobalSave mPlayer3, mPlayer4;
     tString msPlayer3Weapon, msPlayer4Weapon;
+    // Inventario per giocatore: quelli degli ospiti 2..4. Assenti nei
+    // salvataggi precedenti (mbCoopInventories false): gli ospiti ricevono
+    // allora gli oggetti di gruppo dell'host.
+    bool mbCoopInventories = false;
+    cInventory_GlobalSave mInventory2, mInventory3, mInventory4;
     cPlayer_GlobalSave mPlayer;
 	cMapHandler_GlobalSave mMapHandler;
 	cInventory_GlobalSave mInventory;

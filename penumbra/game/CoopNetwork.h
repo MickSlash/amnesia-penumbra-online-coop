@@ -8,6 +8,8 @@
 #include "network/Interpolation.h"
 #include "scene/SoundEntity.h"
 #include "CoopSteam.h"
+class cInventory;
+class cInventoryItem;
 #include <map>
 #include <memory>
 #include <vector>
@@ -80,6 +82,8 @@ public:
         std::map<std::string, online::EntityState> published;
         online::InventoryState inventory;
         std::vector<uint8_t> inventoryBytes, journalBytes;
+        // Sull'host: l'inventario di questo ospite (vedi InventoryFor).
+        cInventory* ownInventory = nullptr;
         std::map<std::string, std::vector<uint8_t>> mediaBytes;
         std::vector<online::Presentation> pendingPresentation;
         std::vector<online::MediaState> pendingMedia;
@@ -101,6 +105,22 @@ public:
         uint8_t teleportCount = 0;
     };
     Guest* GuestFor(const cPlayer* player) const;
+    // Inventario per giocatore: sull'host quello dell'ospite o dell'host,
+    // altrove quello del gioco. PlayerScope lo rende init->mpInventory.
+    cInventory* InventoryFor(const cPlayer* player) const;
+    cInventory* MainInventory() const { return mainInventory; }
+    // Torcia, glowstick, armi, taccuino e mappa: uno per giocatore (vedi
+    // COOP_ARCHITECTURE.md, inventario per giocatore).
+    static bool GroupItemType(int type);
+    void ShareGroupItem(cInventory* source, cInventoryItem* item);
+    void GiveGroupItems(cPlayer* player, cPlayerHands* hands);
+    // Script: un oggetto nell'inventario di qualcuno del gruppo.
+    bool PartyHasItem(const std::string& name) const;
+    bool PartyRemoveItem(const std::string& name);
+    // Host: passa un oggetto (tutta la pila) da un giocatore a un altro, senza
+    // far scattare le callback di raccolta.
+    bool TransferItem(const std::string& name, cPlayer* from, cPlayer* to);
+    void Reset();
     cPlayerHands* HandsFor(const cPlayer* player) const;
 private:
     // Silhouette di un altro giocatore, per ID: sull'host gli ospiti, sul
@@ -126,6 +146,7 @@ private:
     void Present(const online::Presentation& event);
     std::vector<std::unique_ptr<Guest>> guests;
     Guest* g = nullptr;
+    cInventory* mainInventory = nullptr; // quello dell'host (init->mpInventory fuori dagli scope)
     // Dopo `guests`: viene distrutto prima delle Session che usa.
     online::HostTransport transport;
     bool hosting = false;
@@ -269,6 +290,7 @@ private:
     uint32_t receivedJournal = 0;
     float campaignTime = 0;
     int campaignStage = 0;
+    uint32_t qaStartEpoch = 0; float qaReloadWait = 0; // client: attesa del ricaricamento del checkpoint
     bool qaHostAttacked = false, qaClientAttacked = false, qaEnemySeen = false;
     bool qaRespawned = false, qaSaved = false, qaLoaded = false, qaSpiderHit = false;
 };

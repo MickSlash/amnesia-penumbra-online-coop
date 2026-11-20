@@ -122,12 +122,14 @@ void DriveBody(iPhysicsBody* body,const cMatrixf& target,bool resting,cCoopNetwo
 }
 bool KinematicPrediction() { const char* mode=getenv("PENUMBRA_COOP_PREDICTION"); return mode && std::string(mode)=="kinematic"; }
 struct PlayerScope {
-    cInit* init; cPlayer* player; cPlayerHands* hands; bool simple;
-    PlayerScope(cInit* i, cPlayer* p, cPlayerHands* h) : init(i), player(i->mpPlayer), hands(i->mpPlayerHands), simple(i->mbSimpleWeaponSwing) {
+    cInit* init; cPlayer* player; cPlayerHands* hands; bool simple; cInventory* inventory;
+    PlayerScope(cInit* i, cPlayer* p, cPlayerHands* h) : init(i), player(i->mpPlayer), hands(i->mpPlayerHands), simple(i->mbSimpleWeaponSwing), inventory(i->mpInventory) {
         init->mpPlayer = p; init->mpPlayerHands = h;
         if(p && p->IsNetworkRemote() && i->mpCoop) init->mbSimpleWeaponSwing=i->mpCoop->RemoteSimpleSwing();
+        // Inventario per giocatore: chi agisce usa il proprio.
+        if(i->mpCoop) init->mpInventory=i->mpCoop->InventoryFor(p);
     }
-    ~PlayerScope() { init->mpPlayer = player; init->mpPlayerHands = hands; init->mbSimpleWeaponSwing=simple; }
+    ~PlayerScope() { init->mpPlayer = player; init->mpPlayerHands = hands; init->mbSimpleWeaponSwing=simple; init->mpInventory=inventory; }
 };
 float Wrapped(float angle) { while(angle > kPif) angle -= k2Pif; while(angle < -kPif) angle += k2Pif; return angle; }
 cVector3f AimAngles(const cVector3f& from,const cVector3f& target) {
@@ -182,7 +184,7 @@ online::PlayerState Capture(cPlayer* p,cPlayerHands* hands,uint8_t id) {
 }
 
 cCoopNetwork::cCoopNetwork(cInit* i) : iUpdateable("OvertureOnline"), init(i), transport([](const std::string& s){ Log("[COOP] %s\n",s.c_str()); }) {
-    hostPlayer=init->mpPlayer; hostHands=init->mpPlayerHands;
+    hostPlayer=init->mpPlayer; hostHands=init->mpPlayerHands; mainInventory=init->mpInventory;
     auto logger=[](uint8_t id) {
         // Il primo ospite mantiene il prefisso storico, che le prove leggono.
         const std::string prefix=id<=2?"[COOP]":"[COOP/P"+std::to_string(id)+"]";
@@ -227,16 +229,96 @@ cCoopNetwork::~cCoopNetwork() {
         guest->player=nullptr; guest->hands=nullptr;
     }
     remotePlayer=nullptr; remoteHands=nullptr;
+    for(auto& guest:guests) if(guest->ownInventory) { hplDelete(guest->ownInventory); guest->ownInventory=nullptr; }
     hpl::gbGameScriptExecution=true;
 }
 void cCoopNetwork::CreateRemote(Guest& guest) {
     guest.hands=new cPlayerHands(init);
     { PlayerScope scope(init,init->mpPlayer,guest.hands); guest.player=new cPlayer(init); guest.player->SetNetworkRemote(true); }
+    // Il proprio inventario; le callback degli script restano quelle dell'host.
+    if(!guest.ownInventory) { guest.ownInventory=hplNew(cInventory,(init)); guest.ownInventory->SetCallbackOwner(mainInventory); }
+    GiveGroupItems(guest.player,guest.hands);
     init->mpGame->GetScene()->SetCamera(init->mpPlayer->GetCamera());
 }
 cPlayerHands* cCoopNetwork::HandsFor(const cPlayer* player) const {
     if(auto* guest=GuestFor(player)) return guest->hands;
     return hostHands;
+}
+bool cCoopNetwork::GroupItemType(int type) {
+    return type==eGameItemType_Flashlight || type==eGameItemType_GlowStick || type==eGameItemType_WeaponMelee ||
+        type==eGameItemType_Notebook || type==eGameItemType_Map;
+}
+void cCoopNetwork::ShareGroupItem(cInventory* source, cInventoryItem* item) {
+    static bool sharing=false;
+    if(!hosting || sharing || !item || !GroupItemType(item->GetItemType())) return;
+    sharing=true;
+    std::vector<std::pair<cPlayer*,cPlayerHands*>> players{{hostPlayer,hostHands}};
+    for(auto& guest:guests) if(guest->player && guest->ownInventory) players.push_back({guest->player,guest->hands});
+    for(auto& p:players) {
+        cInventory* target=InventoryFor(p.first);
+        if(target==source || target->GetItem(item->GetName())) continue;
+        PlayerScope scope(init,p.first,p.second);
+        mainInventory->SetSilent(true);
+        target->AddItemFromFile(item->GetName(),item->GetEntityFile(),-1);
+        mainInventory->SetSilent(false);
+        Log("[COOP/INVENTORY] Group item %s given to player %s\n",item->GetName().c_str(),p.first==hostPlayer?"host":"guest");
+    }
+    sharing=false;
+}
+void cCoopNetwork::GiveGroupItems(cPlayer* player, cPlayerHands* hands) {
+    if(!hosting || !player || !mainInventory) return;
+    cInventory* target=InventoryFor(player);
+    if(target==mainInventory) return;
+    for(const auto& pair:mainInventory->NetworkItems()) {
+        auto* item=pair.second;
+        if(!GroupItemType(item->GetItemType()) || target->GetItem(item->GetName())) continue;
+        PlayerScope scope(init,player,hands);
+        mainInventory->SetSilent(true);
+        target->AddItemFromFile(item->GetName(),item->GetEntityFile(),-1);
+        mainInventory->SetSilent(false);
+    }
+}
+bool cCoopNetwork::PartyHasItem(const std::string& name) const {
+    if(!hosting) return false;
+    if(mainInventory && mainInventory->GetItem(name)) return true;
+    for(const auto& guest:guests) if(guest->ownInventory && guest->ownInventory->GetItem(name)) return true;
+    return false;
+}
+bool cCoopNetwork::PartyRemoveItem(const std::string& name) {
+    if(!hosting) return false;
+    std::vector<std::pair<cPlayer*,cPlayerHands*>> players{{hostPlayer,hostHands}};
+    for(auto& guest:guests) if(guest->player && guest->ownInventory) players.push_back({guest->player,guest->hands});
+    for(auto& p:players) {
+        cInventory* inventory=InventoryFor(p.first);
+        if(auto* item=inventory->GetItem(name)) { PlayerScope scope(init,p.first,p.second); inventory->RemoveItem(item); return true; }
+    }
+    return false;
+}
+bool cCoopNetwork::TransferItem(const std::string& name, cPlayer* from, cPlayer* to) {
+    if(!hosting || !from || !to || from==to) return false;
+    cInventory* source=InventoryFor(from); cInventory* target=InventoryFor(to);
+    auto* item=source->GetItem(name);
+    if(!item || source==target) return false;
+    const tString file=item->GetEntityFile(); const int count=item->GetCount(); const bool counted=item->HasCount();
+    { PlayerScope scope(init,from,HandsFor(from)); source->RemoveItem(item); }
+    {
+        PlayerScope scope(init,to,HandsFor(to));
+        mainInventory->SetSilent(true);
+        target->AddItemFromFile(name,file,-1);
+        mainInventory->SetSilent(false);
+        if(counted) if(auto* added=target->GetItem(name)) added->SetCount(std::max(1,count));
+    }
+    Log("[COOP/INVENTORY] Item %s passed to player %s\n",name.c_str(),to==hostPlayer?"host":"guest");
+    return target->GetItem(name)!=nullptr;
+}
+void cCoopNetwork::Reset() {
+    // Nuova partita: anche gli inventari degli ospiti si svuotano (quello
+    // dell'host è un modulo del gioco e viene azzerato dal motore).
+    for(auto& guest:guests) if(guest->ownInventory) guest->ownInventory->Reset();
+}
+cInventory* cCoopNetwork::InventoryFor(const cPlayer* player) const {
+    if(auto* guest=GuestFor(player)) if(guest->ownInventory) return guest->ownInventory;
+    return mainInventory ? mainInventory : init->mpInventory;
 }
 cCoopNetwork::Guest* cCoopNetwork::GuestFor(const cPlayer* player) const {
     if(!hosting || !player) return nullptr;
@@ -436,6 +518,9 @@ void cCoopNetwork::PrepareSave() {
 }
 void cCoopNetwork::SavePartner(cSavedGame* save) {
     save->mlCoopVersion=1;
+    save->mbCoopInventories=true;
+    for(size_t n=0;n<guests.size() && n<3;++n) if(guests[n]->ownInventory)
+        guests[n]->ownInventory->SaveToGlobal(n==0?&save->mInventory2:n==1?&save->mInventory3:&save->mInventory4);
     save->msHostWeapon=init->mpPlayerHands->GetCurrentModel(1)?init->mpPlayerHands->GetCurrentModel(1)->msName:"";
     PlayerScope scope(init,remotePlayer,remoteHands);
     remotePlayer->SaveToGlobal(&save->mPlayer2);
@@ -472,6 +557,18 @@ void cCoopNetwork::RestoreWeapon(const std::string& model) {
     }
 }
 void cCoopNetwork::LoadPartner(cSavedGame* save) {
+    // Inventari degli ospiti (l'host ha già caricato il proprio).
+    for(size_t n=0;n<guests.size() && n<3;++n) {
+        auto& guest=*guests[n];
+        if(!guest.ownInventory || !guest.player) continue;
+        PlayerScope scope(init,guest.player,guest.hands);
+        // LoadFromGlobal aggiunge senza svuotare: senza Reset gli oggetti
+        // di gruppo dati all'ingresso restano doppi.
+        guest.ownInventory->Reset();
+        if(save->mbCoopInventories) guest.ownInventory->LoadFromGlobal(n==0?&save->mInventory2:n==1?&save->mInventory3:&save->mInventory4);
+        else { GiveGroupItems(guest.player,guest.hands); }
+    }
+    Log("[COOP/SAVE] Guest inventories restored=%d\n",save->mbCoopInventories?1:0);
     RestoreWeapon(save->msHostWeapon); Log("[COOP/SAVE] Host weapon restored state=%d\n",int(init->mpPlayer->GetState()));
     {
         PlayerScope scope(init,remotePlayer,remoteHands);
@@ -825,7 +922,9 @@ void cCoopNetwork::UpdateGuest(float dt) {
         PublishMedia();
         g->journalTime+=dt; if(g->journalTime>=.5f || g->journalBytes.empty()) { g->journalTime=0; PublishJournal(); }
         online::InventoryState next; next.epoch=g->map.epoch;
-        for(const auto& pair:init->mpInventory->NetworkItems()) {
+        std::set<std::string> sentNames; // il client rifiuta i nomi doppi
+        for(const auto& pair:InventoryFor(remotePlayer)->NetworkItems()) {
+            if(!sentNames.insert(pair.second->GetName()).second) continue;
             auto* item=pair.second; online::InventoryItem value; value.name=item->GetName(); value.image=item->GetEntityFile(); value.count=uint16_t(std::max(1,item->GetCount())); next.items.push_back(value);
         }
         auto bytes=online::EncodeInventory(next);
@@ -1474,6 +1573,8 @@ void cCoopNetwork::RunQA(float dt) {
             Log("[COOP/QA] Native grabbed object maximum_distance=%.3f broken=%d released_state=%d\n",qaObjectMaxDistance,e?0:1,int(remotePlayer->GetState())); qaStage=4;
         }
         if(full && qaStage==4 && qaTime>15) {
+            // Inventari per giocatore: la chiave è dell'host, che la passa al client.
+            if(mainInventory->GetItem("padlock_key")) Log("[COOP/QA] Key passed to the client=%d\n",TransferItem("padlock_key",hostPlayer,remotePlayer)?1:0);
             auto* locker=init->mpMapHandler->GetGameEntity("padlockarea",false);
             if(!locker || !locker->GetBodyNum()) FatalError("[COOP/QA] Missing locker fixture\n");
             auto target=locker->GetBody(0)->GetLocalPosition();
@@ -1486,6 +1587,9 @@ void cCoopNetwork::RunQA(float dt) {
             auto* lock=init->mpMapHandler->GetGameEntity("lock1",false);
             qaPuzzle=init->mpInventory->GetItem("padlock_key")==nullptr && lock && !lock->IsActive();
             Log("[COOP/QA] Native client key puzzle=%d\n",qaPuzzle?1:0); qaStage=6;
+            { std::string hostItems, guestItems; for(const auto& pair:mainInventory->NetworkItems()) hostItems+=pair.first+" ";
+              for(const auto& pair:InventoryFor(remotePlayer)->NetworkItems()) guestItems+=pair.first+" ";
+              Log("[COOP/QA] Inventories host=[%s] guest=[%s]\n",hostItems.c_str(),guestItems.c_str()); }
         }
         if(full && qaStage==6 && qaTime>24) {
             auto* locker=init->mpMapHandler->GetGameEntity("locker1",false);

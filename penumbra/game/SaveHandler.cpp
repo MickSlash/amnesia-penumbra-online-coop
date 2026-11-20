@@ -178,6 +178,15 @@ void cSavedGame::ResetGlobalData()
 	mInventory.mlstItems.Clear();
 	mInventory.mlstSlots.Clear();
 	mInventory.mvEquipSlots.Clear();
+	// Co-op: anche gli inventari degli ospiti, altrimenti ogni salvataggio o
+	// caricamento accoda oggetti e slot alle copie precedenti.
+	for(cInventory_GlobalSave *pInv : {&mInventory2, &mInventory3, &mInventory4})
+	{
+		pInv->mlstItems.Clear();
+		pInv->mlstSlots.Clear();
+		pInv->mvEquipSlots.Clear();
+	}
+	mbCoopInventories = false;
 
 	mNotebook.mlstNotes.Clear();
 	mNotebook.mlstTasks.Clear();
@@ -1078,6 +1087,10 @@ kSerializeVar(mPlayer3,eSerializeType_Class)
 kSerializeVar(mPlayer4,eSerializeType_Class)
 kSerializeVar(msPlayer3Weapon,eSerializeType_String)
 kSerializeVar(msPlayer4Weapon,eSerializeType_String)
+kSerializeVar(mbCoopInventories,eSerializeType_Bool)
+kSerializeVar(mInventory2,eSerializeType_Class)
+kSerializeVar(mInventory3,eSerializeType_Class)
+kSerializeVar(mInventory4,eSerializeType_Class)
 kSerializeVar(mPlayer,eSerializeType_Class)
 kSerializeVar(mMapHandler,eSerializeType_Class)
 kSerializeVar(mInventory,eSerializeType_Class)

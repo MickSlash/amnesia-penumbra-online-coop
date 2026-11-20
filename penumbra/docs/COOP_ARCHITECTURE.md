@@ -85,3 +85,54 @@ Passi:
 5. ✅ Nemici e vita per ogni giocatore.
 6. ✅ Checkpoint per ogni giocatore.
 7. ✅ Prove native con 3 e 4 istanze: `RunNativeTest.ps1 -Mode party -Players 2|3|4` (camminata, nemico sull'ultimo ospite, checkpoint salvato e ricaricato).
+
+## Inventario per giocatore (Fase 3)
+
+Ogni giocatore ha il proprio inventario. Sull'host c'è un `cInventory` per ogni
+ospite (`Guest::ownInventory`), oltre a quello dell'host (`init->mpInventory`).
+`PlayerScope`, che durante le azioni di un ospite rende suo `init->mpPlayer`,
+scambia anche `init->mpInventory`: raccolta, uso, combinazioni, conteggi e
+funzioni degli script lavorano così sull'inventario di chi agisce, senza
+modificare il codice originale dei singoli oggetti.
+
+Regole per tipo (`eGameItemType_`):
+
+| Tipo | Regola | Motivo |
+| --- | --- | --- |
+| Flashlight, GlowStick, WeaponMelee, Notebook, Map | **Di gruppo:** chi lo raccoglie lo riceve, e anche tutti gli altri giocatori senza quell'oggetto ne ricevono uno | Nel mondo ce n'è uno solo, ma serve a tutti: senza torcia un compagno resterebbe al buio, senza arma indifeso |
+| Note | Diario comune (`cNotebook`), come prima | Informazione della storia |
+| Battery, Painkillers, Flare, Throw, Food | **Personale:** solo chi lo raccoglie | Consumabili, da dividere fra i giocatori |
+| Normal (chiavi e oggetti della storia) | **Personale** | Oggetti unici: li tiene chi li ha trovati |
+
+Script:
+- `HasItem`: vero se lo ha il giocatore di contesto; fuori contesto, o se
+  non lo ha, vero se lo ha **qualcuno** nel gruppo (gli script controllano
+  porte e condizioni senza sapere chi gioca).
+- `RemoveItem`: lo toglie al giocatore di contesto se lo ha, altrimenti al
+  primo che lo ha.
+- `GiveItem`: al giocatore di contesto.
+- Le callback di raccolta, uso e combinazione restano **in comune**: gli
+  inventari degli ospiti le inoltrano a quello dell'host
+  (`cInventory::SetCallbackOwner`), quindi una raccolta dell'ospite fa
+  scattare gli stessi eventi della storia.
+
+Rete: ogni ospite riceve il **proprio** inventario (`InventoryState`, come
+prima ma dall'inventario dell'ospite). Nessun cambio di formato.
+
+Salvataggi: `cSavedGame` aggiunge gli inventari degli ospiti 2..4. Da un
+salvataggio precedente ogni ospite riceve gli oggetti di gruppo che ha l'host.
+Un ospite che entra in partita riceve gli oggetti di gruppo che ha l'host.
+
+Gli inventari degli ospiti vanno svuotati in `cSavedGame::ResetGlobalData`
+come quello dell'host, e prima di `LoadFromGlobal`, che aggiunge senza
+svuotare: altrimenti ogni salvataggio accoda oggetti e slot alle copie
+precedenti.
+
+Passi:
+1. ✅ Callback in comune e scambio dell'inventario in `PlayerScope`.
+2. ✅ Inventario per ospite sull'host, replica dell'inventario proprio.
+3. ✅ Oggetti di gruppo (raccolta, ingresso in partita, salvataggi vecchi).
+4. ✅ Regole degli script (`HasItem`, `RemoveItem`, `GiveItem`).
+5. ✅ Salvataggi (`mInventory2..4`, `mbCoopInventories`).
+6. 🟡 Passare un oggetto a un compagno: `cCoopNetwork::TransferItem` esiste
+   ed è usata dalla prova `full`; manca il comando nell'interfaccia.
