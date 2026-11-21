@@ -17,6 +17,9 @@
  * along with Penumbra Overture.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "MainMenu.h"
+#include <algorithm>
+#include <vector>
+#include <SDL/SDL.h>
 #include "CoopNetwork.h"
 
 #include "Init.h"
@@ -1444,14 +1447,51 @@ cMainMenuWidget_Text *gpGammaText2=NULL;
 cMainMenuWidget_Text *gpFSAAText=NULL;
 cMainMenuWidget_Text *gpDoFText=NULL;
 
-cVector2l gvResolutions[] = {cVector2l(640,480), cVector2l(800,600), cVector2l(1024, 768),
+cVector2l gvClassicResolutions[] = {cVector2l(640,480), cVector2l(800,600), cVector2l(1024, 768),
 							cVector2l(1152,864),cVector2l(1280,720),cVector2l(1280,768),
 							cVector2l(1280,800),cVector2l(1280,960),cVector2l(1280,1024),
 							cVector2l(1360,768),cVector2l(1360,1024),cVector2l(1400,1050),
 							cVector2l(1440,900),cVector2l(1680,1050),cVector2l(1600,1200), 
 							cVector2l(1920,1080),cVector2l(1920,1200)
 						};
-int glResolutionNum = 17;
+int glClassicResolutionNum = 17;
+
+// Risoluzioni del menu: i modi a schermo intero che la scheda e il monitor
+// supportano davvero (SDL_ListModes, ultrawide comprese), più le classiche del
+// gioco che ci stanno e quella in uso. Prima era solo la lista fissa qui sopra.
+static const std::vector<cVector2l>& MenuResolutions(const cVector2l& avCurrent)
+{
+	static std::vector<cVector2l> vModes;
+	if(vModes.empty())
+	{
+		cVector2l vMax(0,0);
+		SDL_Rect** pModes = SDL_ListModes(NULL, SDL_FULLSCREEN | SDL_OPENGL);
+		if(pModes != NULL && pModes != (SDL_Rect**)-1)
+		{
+			for(int i=0; pModes[i]; ++i)
+			{
+				if(pModes[i]->w < 640 || pModes[i]->h < 480) continue;
+				vModes.push_back(cVector2l(pModes[i]->w, pModes[i]->h));
+				vMax.x = cMath::Max(vMax.x, (int)pModes[i]->w);
+				vMax.y = cMath::Max(vMax.y, (int)pModes[i]->h);
+			}
+		}
+		for(int i=0; i<glClassicResolutionNum; ++i)
+		{
+			const cVector2l& vRes = gvClassicResolutions[i];
+			if(vMax.x == 0 || (vRes.x <= vMax.x && vRes.y <= vMax.y)) vModes.push_back(vRes);
+		}
+		std::sort(vModes.begin(), vModes.end(), [](const cVector2l& a, const cVector2l& b) { return a.x != b.x ? a.x < b.x : a.y < b.y; });
+		vModes.erase(std::unique(vModes.begin(), vModes.end()), vModes.end());
+		Log(" Menu resolutions: %d (largest %d x %d)\n", (int)vModes.size(), vModes.empty() ? 0 : vModes.back().x, vModes.empty() ? 0 : vModes.back().y);
+	}
+	if(std::find(vModes.begin(), vModes.end(), avCurrent) == vModes.end())
+	{
+		vModes.push_back(avCurrent);
+		std::sort(vModes.begin(), vModes.end(), [](const cVector2l& a, const cVector2l& b) { return a.x != b.x ? a.x < b.x : a.y < b.y; });
+	}
+	return vModes;
+}
 
 tString gvTextureQuality[] = {"High","Medium","Low"};
 int glTextureQualityNum = 3;
@@ -1785,11 +1825,13 @@ public:
 	void OnMouseDown(eMButton aButton)
 	{
 		int lCurrentNum =0;
+		const std::vector<cVector2l>& vResolutions = MenuResolutions(mpInit->mvScreenSize);
+		const int glResolutionNum = (int)vResolutions.size();
 
 		//get current num
         for(int i=0; i<glResolutionNum; ++i)
 		{
-			if(gvResolutions[i] == mpInit->mvScreenSize)
+			if(vResolutions[i] == mpInit->mvScreenSize)
 			{
 				lCurrentNum = i;
 				break;
@@ -1807,7 +1849,7 @@ public:
 			if(lCurrentNum < 0) lCurrentNum =glResolutionNum-1;
 		}
 
-		mpInit->mvScreenSize = gvResolutions[lCurrentNum];
+		mpInit->mvScreenSize = vResolutions[lCurrentNum];
 
 		char sTempVec[256];
 		sprintf(sTempVec,"%d x %d",mpInit->mvScreenSize.x, mpInit->mvScreenSize.y);
@@ -2032,6 +2074,7 @@ private:
 cMainMenu::cMainMenu(cInit *apInit)  : iUpdateable("MainMenu")
 {
 	mState = eMainMenuState_Start;
+	MenuResolutions(apInit->mvScreenSize); // modi video supportati, scritti nel log
 
 	mpLogo = NULL;
 	mpBackground = NULL;
