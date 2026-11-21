@@ -354,6 +354,10 @@ public:
     // allora gli oggetti di gruppo dell'host.
     bool mbCoopInventories = false;
     cInventory_GlobalSave mInventory2, mInventory3, mInventory4;
+    // Note del diario già lette dagli ospiti 2..4, una chiave per riga.
+    // Assenti nei salvataggi precedenti: le note già trovate sono lette.
+    bool mbCoopNotesRead = false;
+    tString msNotesRead2, msNotesRead3, msNotesRead4;
     cPlayer_GlobalSave mPlayer;
 	cMapHandler_GlobalSave mMapHandler;
 	cInventory_GlobalSave mInventory;

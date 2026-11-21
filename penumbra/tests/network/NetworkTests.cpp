@@ -506,10 +506,11 @@ static void RecoveryTests() {
     JournalState journal; journal.epoch = 7; journal.revision = 42;
     for(unsigned i = 0; i < 5; ++i) {
         JournalEntry e; e.kind = uint8_t(i%3); e.name = "quest"; e.group = "Daniel"; e.nameEntry = "name";
-        e.textEntry = "text"; e.icon = "graphics/note_icon.tga"; e.active = i != 2; journal.entries.push_back(e);
+        e.textEntry = "text"; e.icon = "graphics/note_icon.tga"; e.active = i != 2; e.read = i == 3; journal.entries.push_back(e);
     }
     auto bytes = EncodeJournal(journal); JournalState restored;
     Check(DecodeJournal(bytes.data(),bytes.size(),restored) && restored.entries.size() == 5 && !restored.entries[2].active, "full journal chronology and completed quest roundtrip");
+    Check(restored.entries[3].read && restored.entries[3].active && !restored.entries[0].read && !restored.entries[2].read, "journal read flag per recipient roundtrip");
     for(size_t i = 0; i < bytes.size(); ++i) Check(!DecodeJournal(bytes.data(),i,restored), "journal truncation");
     journal.entries[0].image = "../secret"; Check(EncodeJournal(journal).empty(), "journal traversal rejected"); journal.entries[0].image.clear();
     StressCodec(journal,EncodeJournal,DecodeJournal);

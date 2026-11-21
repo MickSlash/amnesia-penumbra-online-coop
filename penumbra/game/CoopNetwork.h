@@ -19,6 +19,7 @@ class iGameEnemy;
 class cGameTrigger;
 class cSavedGame;
 class cPlayer_GlobalSave;
+class cNotebook_Note;
 
 class cCoopNetwork : public hpl::iUpdateable, public hpl::iSoundEntityGlobalCallback {
 public:
@@ -84,6 +85,8 @@ public:
         std::vector<uint8_t> inventoryBytes, journalBytes;
         // Sull'host: l'inventario di questo ospite (vedi InventoryFor).
         cInventory* ownInventory = nullptr;
+        // Sull'host: le note del diario che questo ospite ha già letto (NoteKey).
+        std::set<std::string> readNotes;
         std::map<std::string, std::vector<uint8_t>> mediaBytes;
         std::vector<online::Presentation> pendingPresentation;
         std::vector<online::MediaState> pendingMedia;
@@ -129,11 +132,30 @@ public:
     // Host: un ospite usa un oggetto del proprio inventario (azione del
     // client); va chiamata dentro il suo PlayerScope.
     void UseItemAction(cPlayer* player, const std::string& name);
+    // Diario personale (vedi COOP_ARCHITECTURE.md): le note sono di tutti,
+    // ma si aprono a chi le raccoglie e ognuno ha le proprie da leggere.
+    static std::string NoteKey(const std::string& group, const std::string& entry) { return group+"/"+entry; }
+    // Host: una nota appena raccolta. Falso se a raccoglierla è un ospite:
+    // allora si apre sul suo client, non sull'host.
+    bool NoteFound(cNotebook_Note* note);
+    // Il giocatore di questo PC apre una nota del proprio diario.
+    void NoteOpened(cNotebook_Note* note);
     void Reset();
     cPlayerHands* HandsFor(const cPlayer* player) const;
 private:
     // Sottotitolo per un solo giocatore (sull'host o inviato al suo client).
     void PlayerHint(cPlayer* player, const std::string& text);
+    // Note lette dagli ospiti nel salvataggio (una chiave per riga).
+    void SaveNotesRead(cSavedGame* save) const;
+    void LoadNotesRead(cSavedGame* save);
+    bool HostHasNote(const std::string& key) const;
+    // Client: note aperte qui e non ancora confermate dall'host; la nota
+    // raccolta da aprire appena arriva nel diario.
+    std::set<std::string> clientReadNotes;
+    std::string pendingNote;
+    // Client: messaggi arrivati mentre il taccuino è aperto (li mostra alla chiusura).
+    std::vector<hpl::tWString> deferredMessages;
+    float pendingNoteTime = 0;
     // Silhouette di un altro giocatore, per ID: sull'host gli ospiti, sul
     // client l'host (e, dal passo 4, gli altri ospiti).
     struct AvatarView {
@@ -187,6 +209,9 @@ private:
     void RunCampaignQA(float dt);
     void RunMapsQA(float dt);
     void RunPartyQA(float dt);
+    // QA: mette `body` fermo in un punto libero vicino a `of` (0.9-1.5 m,
+    // davanti se possibile); restituisce i piedi.
+    hpl::cVector3f QAPlaceInFront(cPlayer* of, hpl::iCharacterBody* body);
     // QA "party": host e 1-3 ospiti (vedi RunPartyQA).
     bool qaPartyStarted = false, qaPartyWalking = false, qaPartyDone = false, qaPartyMap = false;
     bool qaPartyMoved = false, qaPartyTargeted = false, qaPartyBitten = false;
@@ -304,4 +329,7 @@ private:
     uint32_t qaStartEpoch = 0; float qaReloadWait = 0; // client: attesa del ricaricamento del checkpoint
     bool qaHostAttacked = false, qaClientAttacked = false, qaEnemySeen = false;
     bool qaRespawned = false, qaSaved = false, qaLoaded = false, qaSpiderHit = false;
+    // QA (full): diario personale, dopo il cambio di mappa.
+    float qaDiaryAt = 0, qaDiaryOpenedAt = 0;
+    bool qaDiary = false, qaDiaryOpened = false, qaDiaryHeld = false, qaDiaryDeferred = false, qaDiaryHostClosed = false;
 };

@@ -147,7 +147,7 @@ std::vector<uint8_t> EncodeJournal(const JournalState& s) {
     auto out = Header(Message::Journal); U32(out, s.epoch); U32(out, s.revision); U16(out, uint16_t(s.entries.size()));
     for(const auto& e : s.entries) {
         if(e.kind > 2) return {};
-        out.push_back(e.kind); out.push_back(e.active ? 1 : 0);
+        out.push_back(e.kind); out.push_back(uint8_t((e.active ? 1 : 0) | (e.read ? 2 : 0)));
         for(const auto* value : {&e.group, &e.name, &e.nameEntry, &e.textEntry, &e.icon, &e.image}) {
             if(value->size() > 256 || value->find('\0') != std::string::npos) return {};
             String(out, *value);
@@ -163,8 +163,8 @@ bool DecodeJournal(const uint8_t* p, size_t n, JournalState& s) {
     JournalState value; value.epoch = R32(p + 5); value.revision = R32(p + 9);
     size_t cursor = 15;
     for(unsigned i = 0; i < R16(p + 13); ++i) {
-        if(n - cursor < 2 || p[cursor] > 2 || p[cursor + 1] > 1) return false;
-        JournalEntry e; e.kind = p[cursor++]; e.active = p[cursor++] != 0;
+        if(n - cursor < 2 || p[cursor] > 2 || p[cursor + 1] > 3) return false;
+        JournalEntry e; e.kind = p[cursor++]; e.active = (p[cursor] & 1) != 0; e.read = (p[cursor++] & 2) != 0;
         for(auto* text : {&e.group, &e.name, &e.nameEntry, &e.textEntry, &e.icon, &e.image})
             if(!ReadString(p, n, cursor, *text, 256)) return false;
         value.entries.push_back(std::move(e));
@@ -595,7 +595,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         return;
     }
     if(ready_ && role_ == Role::Host && channel == 0 && n >= 23 && p[4] == uint8_t(Message::Action)) {
-        if(p[13] < 1 || p[13] > 8 || p[14] > 1) { Reject("invalid player action"); return; }
+        if(p[13] < 1 || p[13] > 9 || p[14] > 1) { Reject("invalid player action"); return; }
         ActionRequest action; action.epoch = R32(p + 5); action.sequence = R32(p + 9);
         action.action = PlayerAction(p[13]); action.pressed = p[14] != 0;
         size_t cursor = 15;
@@ -909,7 +909,7 @@ bool Session::ReadEntity(EntityState& e) {
     return true;
 }
 bool Session::SendAction(const ActionRequest& a) {
-    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 8 || a.item.size() > 128 || a.secondItem.size() > 128 || std::abs(int(a.lookYaw))>31420 || std::abs(int(a.lookPitch))>31420) return false;
+    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 9 || a.item.size() > 128 || a.secondItem.size() > 128 || std::abs(int(a.lookYaw))>31420 || std::abs(int(a.lookPitch))>31420) return false;
     auto out = Header(Message::Action); U32(out, a.epoch); U32(out, a.sequence); out.push_back(uint8_t(a.action)); out.push_back(a.pressed ? 1 : 0);
     String(out, a.item); String(out, a.secondItem);
     U16(out,uint16_t(a.lookYaw)); U16(out,uint16_t(a.lookPitch));

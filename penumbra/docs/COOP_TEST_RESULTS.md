@@ -656,3 +656,46 @@ Prova `full`, PASS su entrambi i ruoli:
 Suite completa dopo la modifica, tutto PASS e nessun crash dump: `full`, `hammer`, `campaign`, `resume`, `party -Players 3`, `party -Players 4`, `maps` (25/25 mappe su host e client) e `ctest`.
 
 Non provato: il gesto fatto a mano su due PC reali.
+
+## 17. Aggiornamento 21 novembre — diario personale (protocollo 8)
+
+### Modifiche
+
+- **Raccolta di una nota da parte di un ospite:** la nota si apre sul suo
+  client e non più sull'host. Prima il taccuino si apriva all'host, con il
+  giocatore dell'ospite nel contesto, e l'ospite non vedeva nulla.
+- **Note da leggere:** ogni giocatore ha le sue. Sono in rosso nell'elenco e
+  salvate per giocatore.
+- **Taccuino del client aperto:**
+  - prima ogni revisione del diario lo chiudeva e lo ricostruiva, anche
+    solo per un nuovo compito;
+  - ora l'aggiornamento aspetta la chiusura, e i messaggi del gioco sono
+    mostrati dopo.
+- **Prova `full`, sulla seconda mappa:**
+  - l'ospite raccoglie una nota con `OnPickUp`, come nel mondo;
+  - mentre legge, l'host aggiunge un compito;
+  - si controllano il taccuino dell'host, lo stato di lettura e il
+    salvataggio.
+- **Prova `full`, correzione:**
+  - il passaggio di oggetti metteva l'ospite 1,2 m davanti all'host senza
+    controllare lo spazio;
+  - a volte finiva dentro un ostacolo, rimbalzava e i colpi a terra
+    (`OnHitGround`, 20 per colpo) lo mandavano a terra; rinasceva lontano
+    dall'armadietto e quella prova falliva;
+  - ora il punto viene scelto libero (`QAPlaceInFront`) e il corpo viene
+    fermato.
+- La durata massima della prova `full` passa da 65 a 80 s.
+
+### Misure
+
+Prova `full`, 4 esecuzioni di fila, tutte PASS su entrambi i ruoli:
+- `Native diary host_notebook_closed=1 unread_for_host=1 read_by_guest=1 save_roundtrip=1`
+- `Replica diary note_opened=1 stayed_open=1 update_deferred=1 task_after_close=1 read_kept=1`
+- il messaggio d'ingresso della mappa, arrivato mentre il client leggeva, è
+  stato rimandato alla chiusura;
+- armadietto: `door dragged=1 changed=1` in tutte e 4; nessun `Player down`.
+
+Suite completa dopo la modifica, tutto PASS e nessun crash dump: `hammer`, `campaign`, `resume`, `party -Players 3`, `party -Players 4`, `maps` (25/25 mappe su host e client) e `ctest`, con il nuovo controllo del flag `read` del diario. Nei salvataggi della campagna: `Guest read notes restored=1`.
+
+Non provato: la raccolta di una nota vera nel mondo e la lettura fatta a mano
+su due PC reali.

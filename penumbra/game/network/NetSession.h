@@ -22,7 +22,7 @@ namespace online {
 // counts intentional teleports (respawn, scripts) so they are never eased.
 // 7: ID dei giocatori (1 = host, 2..4 = ospiti). Welcome assegna l'ID
 // all'ospite; gli snapshot hanno da 2 a 4 giocatori, ognuno con il suo ID.
-constexpr uint16_t ProtocolVersion = 7;
+constexpr uint16_t ProtocolVersion = 8;
 constexpr size_t MaxPlayers = 4;
 constexpr uint8_t HostPlayerId = 1;
 // Intestazione 22 byte (con il numero di giocatori) + 61 byte per giocatore.
@@ -42,6 +42,7 @@ enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, 
 struct JournalEntry {
     uint8_t kind = 0; // note, diary, quest
     bool active = true;
+    bool read = false; // nota: già letta da chi riceve il diario
     std::string group, name, nameEntry, textEntry, icon, image;
 };
 struct JournalState { uint32_t epoch = 0, revision = 0; std::vector<JournalEntry> entries; };
@@ -90,7 +91,7 @@ struct Snapshot {
     Snapshot() { for(size_t i = 0; i < MaxPlayers; ++i) players[i].id = uint8_t(i + 1); }
 };
 struct MapState { uint32_t epoch = 0; uint64_t fingerprint = 0; std::string file; };
-enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, WeaponLook = 7, Checkpoint = 8 };
+enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, WeaponLook = 7, Checkpoint = 8, NoteRead = 9 };
 struct ActionRequest { uint32_t epoch = 0, sequence = 0; PlayerAction action = PlayerAction::Interact; bool pressed = false; std::string item, secondItem; int16_t lookYaw = 0, lookPitch = 0; };
 struct InventoryItem {
     std::string name, subtype, image, value, extraValue, nameEntry, descriptionEntry;

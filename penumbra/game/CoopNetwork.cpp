@@ -34,6 +34,20 @@ namespace hpl { extern bool (*gGameGuiSoundCallback)(const tString&,float); }
 namespace {
 cCoopNetwork* activeNetwork=nullptr;
 uint64_t Milliseconds() { return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); }
+// Solo ASCII: i testi del motore passano per mbstowcs con la locale "C".
+std::string AsciiText(const tWString& text) {
+    std::string shown;
+    for(wchar_t c:text) {
+        if(c<128) shown+=char(c);
+        else if(c>=0xE0 && c<=0xE4) shown+='a'; else if(c>=0xE8 && c<=0xEB) shown+='e';
+        else if(c>=0xEC && c<=0xEF) shown+='i'; else if(c>=0xF2 && c<=0xF6) shown+='o';
+        else if(c>=0xF9 && c<=0xFC) shown+='u'; else if(c>=0xC0 && c<=0xC4) shown+='A';
+        else if(c>=0xC8 && c<=0xCB) shown+='E'; else shown+='?';
+    }
+    return shown;
+}
+// Avvisi nella lingua del gioco dell'host (come i nomi di oggetti e note).
+bool ItalianGame(cInit* init) { return cString::ToLowerCase(init->msLanguageFile).find("italian")!=tString::npos; }
 bool ScriptSound(const tString& name,float volume) {
     if(!activeNetwork) return false;
     activeNetwork->RelayGuiSound(name,volume);
@@ -330,7 +344,7 @@ cPlayer* cCoopNetwork::ItemPartnerInFront(cPlayer* giver, float pickedDistance) 
     return best;
 }
 void cCoopNetwork::PlayerHint(cPlayer* player, const std::string& text) {
-    Log("[COOP/INVENTORY] Hint to %s: %s\n",player==hostPlayer?"host":"guest",text.c_str());
+    Log("[COOP/HINT] Hint to %s: %s\n",player==hostPlayer?"host":"guest",text.c_str());
     if(player==hostPlayer) { init->mpEffectHandler->GetSubTitle()->Add(cString::To16Char(text),3,false); return; }
     if(auto* guest=GuestFor(player)) {
         online::Presentation e; e.kind=online::PresentationKind::Hint; e.target=guest->session.GuestPlayerId(); e.text[0]=text; Present(e);
@@ -341,17 +355,8 @@ bool cCoopNetwork::GiveItem(cPlayer* giver, cPlayer* to, cInventoryItem* item) {
     cInventory* source=InventoryFor(giver); cInventory* target=InventoryFor(to);
     if(source==target || source->GetItem(item->GetName())!=item) return false;
     const tString name=item->GetName(), file=item->GetEntityFile();
-    // Solo ASCII: i testi del motore passano per mbstowcs con la locale "C".
-    std::string shown;
-    for(wchar_t c:item->GetGameName()) {
-        if(c<128) shown+=char(c);
-        else if(c>=0xE0 && c<=0xE4) shown+='a'; else if(c>=0xE8 && c<=0xEB) shown+='e';
-        else if(c>=0xEC && c<=0xEF) shown+='i'; else if(c>=0xF2 && c<=0xF6) shown+='o';
-        else if(c>=0xF9 && c<=0xFC) shown+='u'; else if(c>=0xC0 && c<=0xC4) shown+='A';
-        else if(c>=0xC8 && c<=0xCB) shown+='E'; else shown+='?';
-    }
-    // Avvisi nella lingua del gioco dell'host (come il nome dell'oggetto).
-    const bool italian=cString::ToLowerCase(init->msLanguageFile).find("italian")!=tString::npos;
+    const std::string shown=AsciiText(item->GetGameName());
+    const bool italian=ItalianGame(init);
     const std::string alreadyHas=italian?"Il compagno ha gia': ":"Your partner already has: ";
     // Torcia, glowstick, armi, taccuino e mappa: li ha già ogni giocatore.
     if(GroupItemType(item->GetItemType())) { PlayerHint(giver,alreadyHas+shown); return true; }
@@ -397,7 +402,53 @@ void cCoopNetwork::UseItemAction(cPlayer* player, const std::string& name) {
 void cCoopNetwork::Reset() {
     // Nuova partita: anche gli inventari degli ospiti si svuotano (quello
     // dell'host è un modulo del gioco e viene azzerato dal motore).
-    for(auto& guest:guests) if(guest->ownInventory) guest->ownInventory->Reset();
+    for(auto& guest:guests) { if(guest->ownInventory) guest->ownInventory->Reset(); guest->readNotes.clear(); }
+}
+bool cCoopNetwork::HostHasNote(const std::string& key) const {
+    auto it=init->mpNotebook->GetNoteIterator();
+    while(it.HasNext()) { auto* note=it.Next(); if(NoteKey(note->msTextCat,note->msTextEntry)==key) return true; }
+    return false;
+}
+bool cCoopNetwork::NoteFound(cNotebook_Note* note) {
+    if(!hosting || !note) return true;
+    const std::string key=NoteKey(note->msTextCat,note->msTextEntry);
+    Guest* finder=GuestFor(init->mpPlayer);
+    // Agli altri giocatori in partita: un avviso. La nota è già nel diario di tutti.
+    const std::string found=(ItalianGame(init)?"Il compagno ha trovato una nota: ":"Your partner found a note: ")+AsciiText(note->msName);
+    if(finder) PlayerHint(hostPlayer,found);
+    for(auto& guest:guests) if(guest.get()!=finder && guest->player && guest->session.Connected()) PlayerHint(guest->player,found);
+    Log("[COOP/JOURNAL] Note %s found by player %u\n",key.c_str(),finder?unsigned(finder->session.GuestPlayerId()):unsigned(online::HostPlayerId));
+    if(!finder) return true;
+    // Si apre sul client di chi l'ha raccolta, appena il diario la contiene.
+    online::Presentation e; e.kind=online::PresentationKind::Note; e.target=finder->session.GuestPlayerId(); e.text[0]=key; Present(e);
+    return false;
+}
+void cCoopNetwork::NoteOpened(cNotebook_Note* note) {
+    if(!note || !IsClient()) return;
+    const std::string key=NoteKey(note->msTextCat,note->msTextEntry);
+    if(key.size()<=128 && clientReadNotes.insert(key).second) ClientAction(online::PlayerAction::NoteRead,true,key);
+}
+void cCoopNetwork::SaveNotesRead(cSavedGame* save) const {
+    save->mbCoopNotesRead=true;
+    for(size_t n=0;n<3;++n) {
+        tString& out=n==0?save->msNotesRead2:n==1?save->msNotesRead3:save->msNotesRead4; out.clear();
+        if(n<guests.size()) for(const auto& key:guests[n]->readNotes) out+=key+"\n";
+    }
+}
+void cCoopNetwork::LoadNotesRead(cSavedGame* save) {
+    for(size_t n=0;n<guests.size() && n<3;++n) {
+        auto& read=guests[n]->readNotes; read.clear();
+        if(save->mbCoopNotesRead) {
+            const tString& in=n==0?save->msNotesRead2:n==1?save->msNotesRead3:save->msNotesRead4;
+            size_t start=0;
+            for(size_t end=in.find('\n');end!=tString::npos;start=end+1,end=in.find('\n',start)) if(end>start && HostHasNote(in.substr(start,end-start))) read.insert(in.substr(start,end-start));
+        } else {
+            // Salvataggio precedente al diario personale: le note già trovate sono lette.
+            auto it=init->mpNotebook->GetNoteIterator();
+            while(it.HasNext()) { auto* note=it.Next(); read.insert(NoteKey(note->msTextCat,note->msTextEntry)); }
+        }
+    }
+    if(!save->mbCoopNotesRead) { auto it=init->mpNotebook->GetNoteIterator(); while(it.HasNext()) it.Next()->mbRead=true; }
 }
 cInventory* cCoopNetwork::InventoryFor(const cPlayer* player) const {
     if(auto* guest=GuestFor(player)) if(guest->ownInventory) return guest->ownInventory;
@@ -437,12 +488,34 @@ void cCoopNetwork::BeforeMapLoad() {
     positioned=false; hasClientPosition=false; snapshotAge=0;
     prediction.Clear(); ResetPlayback();
     for(auto& guest:guests) { ResetGuestMap(*guest); guest->pendingSave.reset(); guest->pendingWeapon.clear(); }
-    restoredEquipment=false; baselineNames.clear(); receivedJournal=0;
+    restoredEquipment=false; baselineNames.clear(); receivedJournal=0; pendingNote.clear(); deferredMessages.clear();
     currentMusic.clear(); currentSkybox.clear();
 }
 // Punto libero vicino a `center` per il corpo `body`: prima le posizioni
 // storiche (a destra a 0,6 m, poi sinistra, dietro, davanti), poi anelli più
 // larghi; mai dentro muri o arredi, né a meno di 0,5 m da un altro giocatore.
+cVector3f cCoopNetwork::QAPlaceInFront(cPlayer* of, iCharacterBody* body) {
+    // Un punto dentro un ostacolo fa rimbalzare il corpo: i colpi a terra
+    // (OnHitGround) lo ferivano fino a terra e la prova dell'armadietto falliva.
+    auto* physics=init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld();
+    // Prima davanti a `of`, poi tutto intorno (davanti può esserci un muro):
+    // chi chiama orienta poi lo sguardo verso il punto scelto.
+    const float yaw=std::atan2(of->GetCamera()->GetForward().x,of->GetCamera()->GetForward().z);
+    const cVector3f origin=of->GetCharacterBody()->GetFeetPosition();
+    cVector3f feet=origin+cVector3f(std::sin(yaw),0,std::cos(yaw))*1.2f;
+    bool found=false;
+    for(float distance:{1.2f,1.5f,0.9f}) for(int step=0;step<12;++step) {
+        if(found) break;
+        const float angle=yaw+(step%2?1:-1)*((step+1)/2)*k2Pif/12;
+        const cVector3f spot=origin+cVector3f(std::sin(angle),0,std::cos(angle))*distance;
+        const auto matrix=cMath::MatrixTranslate(spot+cVector3f(0,.1f+body->GetSize().y/2,0));
+        if(!physics->CheckShapeWorldCollision(nullptr,body->GetShape(),matrix,body->GetBody(),false,true,nullptr,false)) { feet=spot; found=true; }
+    }
+    body->SetForce(cVector3f(0)); body->SetForceVelocity(cVector3f(0)); body->SetMoveSpeed(eCharDir_Forward,0); body->SetMoveSpeed(eCharDir_Right,0);
+    body->SetFeetPosition(feet);
+    if(!found) Log("[COOP/QA] No free spot in front; using %.2f/%.2f/%.2f\n",feet.x,feet.y,feet.z);
+    return feet;
+}
 cVector3f cCoopNetwork::FreeSpot(iCharacterBody* body,const cVector3f& center,const std::vector<cVector3f>& taken) {
     auto* physics=init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld();
     std::vector<cVector3f> candidates={cVector3f(0.6f,0,0),cVector3f(-0.6f,0,0),cVector3f(0,0,0.6f),cVector3f(0,0,-0.6f)};
@@ -602,6 +675,7 @@ void cCoopNetwork::PrepareSave() {
 void cCoopNetwork::SavePartner(cSavedGame* save) {
     save->mlCoopVersion=1;
     save->mbCoopInventories=true;
+    SaveNotesRead(save);
     for(size_t n=0;n<guests.size() && n<3;++n) if(guests[n]->ownInventory)
         guests[n]->ownInventory->SaveToGlobal(n==0?&save->mInventory2:n==1?&save->mInventory3:&save->mInventory4);
     save->msHostWeapon=init->mpPlayerHands->GetCurrentModel(1)?init->mpPlayerHands->GetCurrentModel(1)->msName:"";
@@ -652,6 +726,8 @@ void cCoopNetwork::LoadPartner(cSavedGame* save) {
         else { GiveGroupItems(guest.player,guest.hands); }
     }
     Log("[COOP/SAVE] Guest inventories restored=%d\n",save->mbCoopInventories?1:0);
+    LoadNotesRead(save);
+    Log("[COOP/SAVE] Guest read notes restored=%d first=%u\n",save->mbCoopNotesRead?1:0,guests.empty()?0u:unsigned(guests[0]->readNotes.size()));
     RestoreWeapon(save->msHostWeapon); Log("[COOP/SAVE] Host weapon restored state=%d\n",int(init->mpPlayer->GetState()));
     {
         PlayerScope scope(init,remotePlayer,remoteHands);
@@ -730,7 +806,7 @@ void cCoopNetwork::PublishJournal() {
     cNotebook_GlobalSave saved; init->mpNotebook->SaveToGlobal(&saved);
     online::JournalState next; next.epoch=g->map.epoch;
     auto notes=saved.mlstNotes.GetIterator();
-    while(notes.HasNext()) { const auto& n=notes.Next(); online::JournalEntry e; e.kind=0; e.name=cString::To8Char(n.msName); e.group=n.msTextCat; e.textEntry=n.msTextEntry; next.entries.push_back(e); }
+    while(notes.HasNext()) { const auto& n=notes.Next(); online::JournalEntry e; e.kind=0; e.name=cString::To8Char(n.msName); e.group=n.msTextCat; e.textEntry=n.msTextEntry; e.read=g->readNotes.count(NoteKey(e.group,e.textEntry))>0; next.entries.push_back(e); }
     auto tasks=saved.mlstTasks.GetIterator();
     while(tasks.HasNext()) { const auto& t=tasks.Next(); online::JournalEntry e; e.kind=2; e.name=t.msName; e.textEntry=cString::To8Char(t.msText); next.entries.push_back(e); }
     const auto bytes=online::EncodeJournal(next);
@@ -960,6 +1036,11 @@ void cCoopNetwork::UpdateGuest(float dt) {
     }
     online::ActionRequest action;
     while(g->session.ReadAction(action)) {
+        if(action.action==online::PlayerAction::NoteRead) {
+            if(action.epoch==g->map.epoch && g->readNotes.size()<1024 && HostHasNote(action.item) && g->readNotes.insert(action.item).second)
+                Log("[COOP/JOURNAL] Note %s read by player %u\n",action.item.c_str(),unsigned(g->session.GuestPlayerId()));
+            continue;
+        }
         if(action.epoch!=g->map.epoch || !canPlay || remotePlayer->IsDead()) continue;
         if(action.action==online::PlayerAction::Checkpoint) { checkpointRequested=true; continue; }
         if(action.action==online::PlayerAction::Interact && action.pressed && init->mpGameMessageHandler->HasMessage()) { init->mpGameMessageHandler->ShowNext(); continue; }
@@ -1167,7 +1248,12 @@ void cCoopNetwork::UpdateClient(float dt) {
     while(g->session.ReadPresentation(event)) {
         if(event.epoch!=g->map.epoch || (event.target && event.target!=g->session.GuestPlayerId())) continue;
         if(event.kind==online::PresentationKind::Hint) init->mpEffectHandler->GetSubTitle()->Add(cString::To16Char(event.text[0]),3,false);
-        if(event.kind==online::PresentationKind::Message) init->mpGameMessageHandler->Add(cString::To16Char(event.text[0]));
+        if(event.kind==online::PresentationKind::Note) { pendingNote=event.text[0]; pendingNoteTime=0; }
+        if(event.kind==online::PresentationKind::Message) {
+            // Un messaggio chiude il taccuino: chi sta leggendo lo vede dopo.
+            if(init->mpNotebook->IsActive() && deferredMessages.size()<16) { deferredMessages.push_back(cString::To16Char(event.text[0])); Log("[COOP/JOURNAL] Message deferred while reading: %s\n",event.text[0].c_str()); }
+            else init->mpGameMessageHandler->Add(cString::To16Char(event.text[0]));
+        }
         if(event.kind==online::PresentationKind::Fade) { if(event.values[0]) init->mpFadeHandler->FadeOut(event.values[1]/1000.0f); else init->mpFadeHandler->FadeIn(event.values[1]/1000.0f); }
         if(event.kind==online::PresentationKind::GuiSound) init->mpGame->GetSound()->GetSoundHandler()->PlayGui(event.text[0],false,event.values[0]/1000.0f);
         auto* renderer=init->mpGame->GetGraphics()->GetRenderer3D();
@@ -1208,14 +1294,40 @@ void cCoopNetwork::UpdateClient(float dt) {
     }
     // Confirm only after every baseline presentation queued in this poll was applied.
     online::JournalState book;
-    if(g->session.ReadJournal(book) && book.epoch==g->map.epoch && book.revision!=receivedJournal) {
+    // Il taccuino aperto non si ricostruisce sotto gli occhi di chi legge:
+    // l'aggiornamento aspetta che si chiuda (il primo della mappa no).
+    const bool reading=init->mpNotebook->IsActive() && receivedJournal;
+    if(!reading && g->session.ReadJournal(book) && book.epoch==g->map.epoch && book.revision!=receivedJournal) {
         cNotebook_GlobalSave saved;
         for(const auto& e:book.entries) {
-            if(e.kind==0) { cNotebookNote_GlobalSave n; n.msName=cString::To16Char(e.name); n.msTextCat=e.group; n.msTextEntry=e.textEntry; n.mbRead=false; saved.mlstNotes.Add(n); }
+            if(e.kind==0) {
+                const std::string key=NoteKey(e.group,e.textEntry);
+                // Letta qui ma non ancora confermata: l'host la riceve di nuovo.
+                if(e.read) clientReadNotes.erase(key);
+                else if(clientReadNotes.count(key)) ClientAction(online::PlayerAction::NoteRead,true,key);
+                cNotebookNote_GlobalSave n; n.msName=cString::To16Char(e.name); n.msTextCat=e.group; n.msTextEntry=e.textEntry; n.mbRead=e.read || clientReadNotes.count(key); saved.mlstNotes.Add(n);
+            }
             if(e.kind==2) { cNotebookTask_GlobalSave t; t.msName=e.name; t.msText=cString::To16Char(e.textEntry); saved.mlstTasks.Add(t); }
         }
         if(init->mpNotebook->IsActive()) init->mpNotebook->SetActive(false);
         init->mpNotebook->Reset(); init->mpNotebook->LoadFromGlobal(&saved); receivedJournal=book.revision;
+    }
+    if(reading && getenv("PENUMBRA_COOP_QA") && g->session.ReadJournal(book) && book.epoch==g->map.epoch && book.revision!=receivedJournal) qaDiaryDeferred=true;
+    // Messaggi arrivati durante la lettura: ora che il taccuino è chiuso.
+    if(!deferredMessages.empty() && !init->mpNotebook->IsActive()) {
+        for(const auto& text:deferredMessages) init->mpGameMessageHandler->Add(text);
+        deferredMessages.clear();
+    }
+    // La nota raccolta da questo giocatore si apre appena è nel diario.
+    if(!pendingNote.empty()) {
+        cNotebook_Note* found=nullptr;
+        auto notes=init->mpNotebook->GetNoteIterator();
+        while(notes.HasNext() && !found) { auto* note=notes.Next(); if(NoteKey(note->msTextCat,note->msTextEntry)==pendingNote) found=note; }
+        if(found && !init->mpNotebook->IsActive()) {
+            init->mpNotebook->SetActive(true); init->mpNotebook->SetSelectedNote(found);
+            init->mpNotebook->GetStateMachine()->ChangeState(eNotebookState_Note);
+            Log("[COOP/JOURNAL] Picked-up note opened %s\n",pendingNote.c_str()); pendingNote.clear();
+        } else if((pendingNoteTime+=dt)>5) { Log("[COOP/JOURNAL] Picked-up note %s not in the journal\n",pendingNote.c_str()); pendingNote.clear(); }
     }
     // Diagnostica: cosa manca ancora per confermare il mondo di questa mappa.
     if(!g->session.IsWorldApplied(g->map.epoch)) {
@@ -1654,9 +1766,7 @@ void cCoopNetwork::RunQA(float dt) {
             // client col gesto del gioco (oggetto scelto, mira, clic).
             if(auto* key=mainInventory->GetItem("padlock_key")) {
                 const cVector3f eye=init->mpPlayer->GetCamera()->GetPosition();
-                cVector3f forward=init->mpPlayer->GetCamera()->GetForward(); forward.y=0; forward.Normalise();
-                cVector3f feet=init->mpPlayer->GetCharacterBody()->GetFeetPosition()+forward*1.2f;
-                remotePlayer->GetCharacterBody()->SetFeetPosition(feet);
+                const cVector3f feet=QAPlaceInFront(init->mpPlayer,remotePlayer->GetCharacterBody());
                 const auto aim=AimAngles(eye,feet+cVector3f(0,remotePlayer->GetCharacterBody()->GetSize().y*.5f,0));
                 init->mpPlayer->GetCamera()->SetYaw(aim.y); init->mpPlayer->GetCamera()->SetPitch(aim.x);
                 init->mpPlayer->SetCurrentItem(key); init->mpPlayer->ChangeState(ePlayerState_UseItem); init->mpPlayer->StartInteract();
@@ -1687,9 +1797,7 @@ void cCoopNetwork::RunQA(float dt) {
                   guestInventory->AddItemFromFile("qa_flashlight","item_flashlight.ent",-1); // di gruppo: arriva anche all'host
                   mainInventory->SetSilent(false); }
                 const cVector3f eye=init->mpPlayer->GetCamera()->GetPosition();
-                cVector3f forward=init->mpPlayer->GetCamera()->GetForward(); forward.y=0; forward.Normalise();
-                const cVector3f feet=init->mpPlayer->GetCharacterBody()->GetFeetPosition()+forward*1.2f;
-                remotePlayer->GetCharacterBody()->SetFeetPosition(feet);
+                const cVector3f feet=QAPlaceInFront(init->mpPlayer,remotePlayer->GetCharacterBody());
                 const cVector3f guestEye=feet+cVector3f(0,remotePlayer->GetSize().y+remotePlayer->GetCameraHeightAdd(),0);
                 const auto aim=AimAngles(guestEye,init->mpPlayer->GetCharacterBody()->GetFeetPosition()+cVector3f(0,init->mpPlayer->GetCharacterBody()->GetSize().y*.5f,0));
                 remotePlayer->GetCamera()->SetPosition(guestEye); remotePlayer->GetCamera()->SetYaw(aim.y); remotePlayer->GetCamera()->SetPitch(aim.x);
@@ -1726,7 +1834,30 @@ void cCoopNetwork::RunQA(float dt) {
             init->mpMapHandler->ChangeMap("level01_01_outside.dae","link1","","",.1f,.1f,"",""); qaStage=9;
         }
         if(full && qaStage==9 && g->map.file=="maps/level01_01_outside.dae" && Ready()) {
-            qaTransition=true; Log("[COOP/QA] Native second-map barrier PASS epoch=%u\n",g->map.epoch); qaStage=10;
+            qaTransition=true; qaDiaryAt=qaTime; Log("[COOP/QA] Native second-map barrier PASS epoch=%u\n",g->map.epoch); qaStage=10;
+        }
+        // Diario personale: l'ospite raccoglie una nota con la stessa funzione
+        // della raccolta nel mondo (OnPickUp nel suo contesto).
+        if(full && qaStage==10 && qaTime>qaDiaryAt+1) {
+            auto* note=hplNew(cInventoryItem,(init)); note->SetName("qa_note"); note->InitFromFile("item_note.ent");
+            bool kept=false;
+            { PlayerScope scope(init,remotePlayer,remoteHands); kept=init->mpInventory->GetItemType(note->GetItemType())->OnPickUp(note,true); }
+            if(!kept) hplDelete(note);
+            qaDiaryHostClosed=!init->mpNotebook->IsActive() && HostHasNote(NoteKey("Notes","qa_note"));
+            qaStage=11;
+        }
+        // Mentre l'ospite legge, il diario cambia: il suo taccuino resta aperto.
+        if(full && qaStage==11 && qaTime>qaDiaryAt+3.5f) { init->mpNotebook->AddTask("qa_diary_task",_W("QA diary task")); qaStage=12; }
+        if(full && qaStage==12 && qaTime>qaDiaryAt+7) {
+            const std::string key=NoteKey("Notes","qa_note");
+            bool hostUnread=false; auto it=init->mpNotebook->GetNoteIterator();
+            while(it.HasNext()) { auto* n=it.Next(); if(NoteKey(n->msTextCat,n->msTextEntry)==key) hostUnread=!n->mbRead; }
+            const bool guestRead=g->readNotes.count(key)>0;
+            std::unique_ptr<cSavedGame> saved(new cSavedGame()); SaveNotesRead(saved.get()); g->readNotes.clear(); LoadNotesRead(saved.get());
+            const bool restored=g->readNotes.count(key)>0;
+            qaDiary=qaDiaryHostClosed && hostUnread && guestRead && restored;
+            Log("[COOP/QA] Native diary host_notebook_closed=%d unread_for_host=%d read_by_guest=%d save_roundtrip=%d\n",qaDiaryHostClosed?1:0,hostUnread?1:0,guestRead?1:0,restored?1:0);
+            qaStage=13;
         }
     } else {
         if(qaStage==0 && qaTime>5) {
@@ -1781,11 +1912,25 @@ void cCoopNetwork::RunQA(float dt) {
             Log("[COOP/QA] Replica client door changed=%d\n",qaDoorMoved?1:0); qaStage=11;
         }
         if(full && qaStage==11 && g->map.file=="maps/level01_01_outside.dae" && Ready() && init->mpGame->GetGraphics()->GetRenderer3D()->GetFogActive() && init->mpGame->GetGraphics()->GetRenderer3D()->GetSkyBoxActive()) {
-            qaTransition=true; Log("[COOP/QA] Replica second-map barrier PASS epoch=%u\n",g->map.epoch); qaStage=12;
+            qaTransition=true; qaDiaryAt=qaTime; Log("[COOP/QA] Replica second-map barrier PASS epoch=%u\n",g->map.epoch); qaStage=12;
+        }
+        if(full && qaStage==12) {
+            auto* selected=init->mpNotebook->IsActive()?init->mpNotebook->GetSelectedNote():nullptr;
+            if(!qaDiaryOpened && selected && NoteKey(selected->msTextCat,selected->msTextEntry)==NoteKey("Notes","qa_note")) { qaDiaryOpened=true; qaDiaryOpenedAt=qaTime; }
+            if(qaDiaryOpened && qaTime>qaDiaryOpenedAt+4.5f) { qaDiaryHeld=init->mpNotebook->IsActive(); init->mpNotebook->SetActive(false); qaStage=13; }
+            if(!qaDiaryOpened && qaTime>qaDiaryAt+9) { Log("[COOP/QA] Replica diary note never opened\n"); qaStage=14; }
+        }
+        if(full && qaStage==13 && qaTime>qaDiaryOpenedAt+6) {
+            bool task=false, read=false;
+            auto tasks=init->mpNotebook->GetTaskIterator(); while(tasks.HasNext()) if(tasks.Next()->msName=="qa_diary_task") task=true;
+            auto notes=init->mpNotebook->GetNoteIterator(); while(notes.HasNext()) { auto* n=notes.Next(); if(NoteKey(n->msTextCat,n->msTextEntry)==NoteKey("Notes","qa_note")) read=n->mbRead; }
+            qaDiary=qaDiaryOpened && qaDiaryHeld && qaDiaryDeferred && task && read;
+            Log("[COOP/QA] Replica diary note_opened=%d stayed_open=%d update_deferred=%d task_after_close=%d read_kept=%d\n",qaDiaryOpened?1:0,qaDiaryHeld?1:0,qaDiaryDeferred?1:0,task?1:0,read?1:0);
+            qaStage=14;
         }
     }
-    if(qaTime>(full?45:20)) {
-        const bool ok=qaReplicated && (!IsHost() || (qaMoved && qaGrabbed)) && (!full || (qaPuzzle && qaTransition && qaDoorMoved && (!IsHost() || qaDoorGrabbed)));
+    if(qaTime>(full?50:20)) {
+        const bool ok=qaReplicated && (!IsHost() || (qaMoved && qaGrabbed)) && (!full || (qaPuzzle && qaTransition && qaDoorMoved && qaDiary && (!IsHost() || qaDoorGrabbed)));
         Log("[COOP/QA] %s connected baseline, movement, native grab and replica object map=%s\n",ok?"PASS":"FAIL",g->map.file.c_str()); init->mpGame->Exit();
     }
 }

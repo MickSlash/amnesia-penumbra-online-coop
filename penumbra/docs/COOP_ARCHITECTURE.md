@@ -64,7 +64,7 @@ Il modello resta autoritativo: per ogni ospite l'host simula un `cPlayer` remoto
 
 Il numero di giocatori, host compreso, è scelto sull'host con `PENUMBRA_COOP_PLAYERS` (2..4, predefinito 2).
 
-| Livello | Implementato (protocollo 7) | Ancora da fare |
+| Livello | Implementato (protocolli 7-8) | Ancora da fare |
 | --- | --- | --- |
 | Protocollo | `Welcome` assegna l'ID (host 1, ospiti 2..4). Gli snapshot hanno da 2 a 4 giocatori, ognuno con il suo ID: `players[0]` è l'host, `players[1]` il destinatario (a cui si riferisce `acknowledgedInput`), poi gli altri ospiti in partita. Il client rifiuta snapshot e transizioni di vita indirizzati a un altro ID. | — |
 | Trasporto host | `HostTransport` possiede l'`ENetHost` e smista gli eventi a una `Session` per ospite. Il peer resta in attesa fino a `Hello`, poi va alla `Session` che aspetta la sua identità (ripresa), altrimenti a una libera, altrimenti a quella di un ospite uscito volontariamente. Se non c'è posto viene rifiutato. `Session` funziona sia con il proprio socket (client, test) sia collegata al trasporto (`AttachHost`, `HandleEvent`). | — |
@@ -100,7 +100,7 @@ Regole per tipo (`eGameItemType_`):
 | Tipo | Regola | Motivo |
 | --- | --- | --- |
 | Flashlight, GlowStick, WeaponMelee, Notebook, Map | **Di gruppo:** chi lo raccoglie lo riceve, e anche tutti gli altri giocatori senza quell'oggetto ne ricevono uno | Nel mondo ce n'è uno solo, ma serve a tutti: senza torcia un compagno resterebbe al buio, senza arma indifeso |
-| Note | Diario comune (`cNotebook`), come prima | Informazione della storia |
+| Note | **Diario personale:** la nota entra nel diario di tutti, ma si apre solo a chi la raccoglie (vedi sotto) | Informazione della storia, che serve a tutto il gruppo |
 | Battery, Painkillers, Flare, Throw, Food | **Personale:** solo chi lo raccoglie | Consumabili, da dividere fra i giocatori |
 | Normal (chiavi e oggetti della storia) | **Personale** | Oggetti unici: li tiene chi li ha trovati |
 
@@ -151,3 +151,40 @@ Passi:
 
    Il compagno conta solo se è più vicino dell'entità mirata. A chi dà e a chi
    riceve compare un sottotitolo nella lingua del gioco dell'host.
+
+## Diario personale (protocollo 8)
+
+Le note e i compiti restano **in comune**: chi trova una nota la aggiunge al
+diario di tutti, perché la storia serve a tutto il gruppo. Ogni giocatore però
+legge per conto suo.
+
+- **Chi raccoglie la nota:** si apre a lui solo.
+  - L'host: come nel gioco originale.
+  - Un ospite: `cGameItemType_Note::OnPickUp` chiama `cCoopNetwork::NoteFound`,
+    che non apre il taccuino dell'host. Al client dell'ospite arriva una
+    presentazione `Note` con la chiave della nota, e la nota si apre appena il
+    diario la contiene (entro 5 s).
+- **Gli altri giocatori:** un sottotitolo, "Il compagno ha trovato una nota: …"
+  (nella lingua del gioco dell'host, solo ASCII).
+- **Note da leggere:** nell'elenco delle note, in co-op, le note non ancora
+  aperte da chi gioca su quel PC sono scritte in rosso.
+  - Sull'host vale `cNotebook_Note::mbRead`, che il gioco originale salvava
+    ma non usava mai; ora diventa vero quando la nota si apre.
+  - Sul client, aprire una nota invia l'azione `NoteRead` con la chiave.
+    L'host la tiene in `Guest::readNotes` e la rimanda nel diario di
+    quell'ospite (`JournalEntry::read`). Finché l'host non la conferma, il
+    client la tiene letta da sé e la rimanda a ogni nuova revisione del diario.
+- **Chiave di una nota:** `categoria/voce` del testo (`NoteKey`), uguale su
+  tutti i PC.
+- **Taccuino aperto sul client:**
+  - un aggiornamento del diario aspetta che il taccuino si chiuda, invece di
+    ricostruirlo sotto gli occhi di chi legge;
+  - un messaggio del gioco, che nell'originale chiude il taccuino, viene
+    mostrato alla chiusura. Per esempio il messaggio d'ingresso in una mappa.
+- **Salvataggi:** `cSavedGame` aggiunge `mbCoopNotesRead` e le note lette degli
+  ospiti 2..4 (`msNotesRead2..4`, una chiave per riga). Da un salvataggio
+  precedente, tutte le note già trovate risultano lette da tutti.
+
+Protocollo 8:
+- `JournalEntry` porta `read` nel byte dei flag (bit 1, insieme ad `active`);
+- c'è la nuova azione `PlayerAction::NoteRead`.

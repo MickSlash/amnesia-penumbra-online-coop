@@ -17,14 +17,14 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
 | Funzione | Stato | Note |
 | --- | --- | --- |
 | 2 giocatori | ✅ | |
-| 3–4 giocatori | 🟡 | protocollo 7, trasporto, movimento, silhouette, nemici, attacchi ad area e checkpoint per tutti (prova `party` con 2, 3 e 4 istanze sullo stesso PC); inventario ancora comune; l'host sceglie 2-4 giocatori nel launcher |
+| 3–4 giocatori | 🟡 | trasporto, movimento, silhouette, nemici, attacchi ad area e checkpoint per tutti (prova `party` con 2, 3 e 4 istanze sullo stesso PC); inventari e diario per giocatore; l'host sceglie 2-4 giocatori nel launcher |
 | IP diretto (UDP 27120), LAN, VPN | ✅ | prove locali; mai provato su due PC via Radmin |
 | Ospitare/entrare dal menu del gioco | ❌ | si fa dal launcher (solo italiano) |
 | Lobby, inviti e relay Steam | ❌ | solo presenza Steam (App ID 22180); richiede uno studio dei requisiti Steamworks |
 | Elenco giocatori e stato connessione | ❌ | |
 | Riconnessione automatica | ✅ | |
 | Migrazione dell'host | ❌ | |
-| Versioni diverse rifiutate | ✅ | protocollo 7 |
+| Versioni diverse rifiutate | ✅ | protocollo 8 |
 
 ### Movimento e rete
 
@@ -68,7 +68,7 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
 | Oggetti unici tracciati | ✅ | chiavi e oggetti della storia restano a chi li trova; gli script li cercano in tutto il gruppo |
 | Dare oggetti a un compagno | ✅ | oggetto scelto, mira al compagno, clic; una unità delle pile; prova `full` in entrambe le direzioni |
 | Lasciare oggetti a terra | ❌ | |
-| Note e diario per giocatore | 🟡 | ricostruiti sul client; le note lette non sono salvate per giocatore |
+| Diario personale | ✅ | note in comune; la nota si apre solo a chi la raccoglie, gli altri vedono un avviso; ognuno ha le sue note da leggere (in rosso), salvate per giocatore; il taccuino aperto non viene chiuso da aggiornamenti e messaggi |
 
 ### Morte e transizioni
 

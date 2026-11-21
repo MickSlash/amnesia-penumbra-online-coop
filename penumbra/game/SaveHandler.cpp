@@ -187,6 +187,8 @@ void cSavedGame::ResetGlobalData()
 		pInv->mvEquipSlots.Clear();
 	}
 	mbCoopInventories = false;
+	mbCoopNotesRead = false;
+	msNotesRead2.clear(); msNotesRead3.clear(); msNotesRead4.clear();
 
 	mNotebook.mlstNotes.Clear();
 	mNotebook.mlstTasks.Clear();
@@ -1091,6 +1093,10 @@ kSerializeVar(mbCoopInventories,eSerializeType_Bool)
 kSerializeVar(mInventory2,eSerializeType_Class)
 kSerializeVar(mInventory3,eSerializeType_Class)
 kSerializeVar(mInventory4,eSerializeType_Class)
+kSerializeVar(mbCoopNotesRead,eSerializeType_Bool)
+kSerializeVar(msNotesRead2,eSerializeType_String)
+kSerializeVar(msNotesRead3,eSerializeType_String)
+kSerializeVar(msNotesRead4,eSerializeType_String)
 kSerializeVar(mPlayer,eSerializeType_Class)
 kSerializeVar(mMapHandler,eSerializeType_Class)
 kSerializeVar(mInventory,eSerializeType_Class)
