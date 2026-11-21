@@ -41,8 +41,11 @@ namespace hpl {
 	private:
 		void ReopenFile();
 
-		FILE *mpFile;
+		FILE *mpFile = NULL;
 		tWString msFileName;
+		// Inizio riga (per l'orario) e file già ruotato in questo processo.
+		bool mbLineStart = true;
+		tWString msRotatedFor;
 	};
 
 	//------------------------------------------------------

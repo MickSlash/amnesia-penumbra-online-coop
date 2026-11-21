@@ -112,7 +112,17 @@ namespace hpl {
 
 		if(mpFile)
 		{
-			fprintf(mpFile, asMessage.c_str());
+			// Orario locale all'inizio di ogni riga, per allineare i log di host
+			// e client. fputs: un '%' nel testo non è un formato.
+			if(mbLineStart)
+			{
+			#ifdef WIN32
+				SYSTEMTIME t; GetLocalTime(&t);
+				fprintf(mpFile, "[%02d:%02d:%02d.%03d] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+			#endif
+			}
+			fputs(asMessage.c_str(), mpFile);
+			mbLineStart = !asMessage.empty() && asMessage[asMessage.size()-1] == '\n';
 			fflush(mpFile);
 		}
 	}
@@ -141,6 +151,21 @@ namespace hpl {
 	{
 		if(mpFile) fclose(mpFile);
 
+		// Rotazione, una volta per file e processo: il log della sessione
+		// precedente resta come nome.1.log, quella prima ancora come nome.2.log.
+		#ifdef WIN32
+		if(msRotatedFor != msFileName)
+		{
+			msRotatedFor = msFileName;
+			tWString sBase = msFileName;
+			tWString sExt = _W("");
+			size_t lDot = sBase.find_last_of(_W('.'));
+			if(lDot != tWString::npos) { sExt = sBase.substr(lDot); sBase = sBase.substr(0, lDot); }
+			_wremove((sBase + _W(".2") + sExt).c_str());
+			_wrename((sBase + _W(".1") + sExt).c_str(), (sBase + _W(".2") + sExt).c_str());
+			_wrename(msFileName.c_str(), (sBase + _W(".1") + sExt).c_str());
+		}
+		#endif
 
 		#ifdef WIN32
 			mpFile = _wfopen(msFileName.c_str(),_W("w"));
