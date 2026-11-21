@@ -271,7 +271,9 @@ private:
     // Replicated prop and enemy poses on the host timeline, played back by
     // `playback` (protocol 5, Interpolation.h).
     struct Pose { std::vector<hpl::cMatrixf> bodies; hpl::cMatrixf mesh; bool meshMotion = false; };
-    struct Motion { online::PoseHistory<Pose,16> history; std::vector<DriveState> drive; };
+    // settledTick: ultima posa dell'host già applicata a un oggetto fermo
+    // (non va riposizionato a ogni fotogramma finché non arriva una posa nuova).
+    struct Motion { online::PoseHistory<Pose,16> history; std::vector<DriveState> drive; uint32_t settledTick = 0; bool settled = false; };
     std::map<std::string, Motion> motion;
     online::PoseHistory<online::PlayerState,32> partnerHistory;
     // Client: gli altri ospiti (players[2..] degli snapshot), per ID.
@@ -320,6 +322,9 @@ private:
     float perfTime = 0;
     uint64_t perfSum = 0, perfMax = 0;
     unsigned perfSamples = 0;
+    // FPS reali (OnPostSceneDraw), in microsecondi.
+    uint64_t fpsWindowStart = 0, fpsLastFrame = 0, fpsGapMax = 0;
+    unsigned fpsFrames = 0, fpsSlowFrames = 0;
     unsigned intervalCount = 0;
     uint64_t lastSnapshotAt = 0;
     hpl::cVector3f lastClientPosition;

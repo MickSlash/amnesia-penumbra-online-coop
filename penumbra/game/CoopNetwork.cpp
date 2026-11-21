@@ -1247,6 +1247,11 @@ void cCoopNetwork::UpdateClient(float dt) {
         const bool drive=BodyDriveEnabled() && e->GetType()!=eGameEntityType_Enemy;
         // L'host non sposta il corpo da un secondo: è fermo.
         const bool resting=double(pair.second.history.NewestTick())+60<playback.Tick();
+        // Fermo e già al suo posto: niente SetMatrix a ogni fotogramma (ognuno
+        // passa dalla fisica; con molti oggetti il costo cresceva nel tempo).
+        const bool settle=!drive && resting && alpha>=1;
+        if(settle && pair.second.settled && pair.second.settledTick==pair.second.history.NewestTick()) continue;
+        pair.second.settled=settle; pair.second.settledTick=pair.second.history.NewestTick();
         auto& drives=pair.second.drive; if(drives.size()<to->bodies.size()) drives.resize(to->bodies.size());
         const cVector3f gravity=init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld()->GetGravity()*dt;
         for(size_t n=0;n<to->bodies.size() && n<from->bodies.size() && n<size_t(e->GetBodyNum());++n) {
@@ -2430,6 +2435,20 @@ void cCoopNetwork::ApplyMedia(const online::MediaState& s) {
     }
 }
 void cCoopNetwork::OnPostSceneDraw() {
+    // FPS reali (fotogrammi disegnati) ogni 5 s, anche in gioco singolo, per
+    // confrontare la mod con il gioco senza rete nelle stesse condizioni.
+    {
+        const uint64_t now=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        if(fpsWindowStart==0) fpsWindowStart=now;
+        else { const uint64_t gap=now-fpsLastFrame; fpsGapMax=std::max(fpsGapMax,gap); if(gap>33334) ++fpsSlowFrames; }
+        fpsLastFrame=now; ++fpsFrames;
+        if(now-fpsWindowStart>=5000000) {
+            const double seconds=(now-fpsWindowStart)/1e6;
+            Log("[COOP/FPS] role=%s fps=%.1f frame_ms_mean=%.2f frame_ms_max=%.1f frames_over_33ms=%u\n",IsHost()?"host":IsClient()?"client":"single",
+                fpsFrames/seconds,seconds*1000.0/std::max(1u,fpsFrames),fpsGapMax/1000.0,fpsSlowFrames);
+            fpsWindowStart=now; fpsFrames=0; fpsGapMax=0; fpsSlowFrames=0;
+        }
+    }
     if(!getenv("PENUMBRA_COOP_QA") || !Ready()) return;
     const char* path=getenv("PENUMBRA_COOP_SCREENSHOT");
     if(!path || !*path) return;

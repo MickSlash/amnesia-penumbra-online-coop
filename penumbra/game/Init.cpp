@@ -313,6 +313,9 @@ bool cInit::Init(tString asCommandLine)
 		mpConfig->SetInt("Screen", "Width", getenv("PENUMBRA_COOP_QA_WIDTH") ? atoi(getenv("PENUMBRA_COOP_QA_WIDTH")) : 640);
 		mpConfig->SetInt("Screen", "Height", getenv("PENUMBRA_COOP_QA_HEIGHT") ? atoi(getenv("PENUMBRA_COOP_QA_HEIGHT")) : 480);
 		mpConfig->SetBool("Haptics", "Active", false);
+		// Misure di prestazione: PENUMBRA_COOP_QA_UNLIMITED=1 toglie il limite a 60 FPS.
+		if (getenv("PENUMBRA_COOP_QA_UNLIMITED") && std::string(getenv("PENUMBRA_COOP_QA_UNLIMITED")) == "1")
+			mpConfig->SetBool("Graphics", "LimitFPS", false);
 		// Prove automatiche senza audio (PENUMBRA_COOP_QA_SOUND=1 lo riattiva).
 		if (!getenv("PENUMBRA_COOP_QA_SOUND") || std::string(getenv("PENUMBRA_COOP_QA_SOUND")) != "1")
 			mpConfig->SetFloat("Sound", "Volume", 0);
