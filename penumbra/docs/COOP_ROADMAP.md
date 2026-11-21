@@ -53,7 +53,6 @@ Fase 4 (da 2 a 4 giocatori): fatti i passi 1-7 di `COOP_ARCHITECTURE.md`. Restan
 Fase 3: fatti gli inventari per giocatore (passi 1-5 di `COOP_ARCHITECTURE.md`, inventario per giocatore).
 
 Prossimo:
-- spettatore per chi è a terra;
 - partita giocata a mano su due PC;
 - video affiancati di host e client durante le prove su due PC.
 
@@ -67,6 +66,13 @@ Prossimo:
 
 ## Fatto di recente
 
+- Bug del primo test reale corretti:
+  - uscita con la X della finestra;
+  - schermo intero e risoluzioni reali del monitor;
+  - descrizioni e pensieri: messaggi personali, clic del client non girato all'host;
+  - cigolii infiniti delle porte;
+  - suoni doppi sul client.
+- Spettatore per chi è a terra; log con orario, sessione e rotazione (`COOP_LOGS.md`); FPS e suoni nel log.
 - Schede Intel HD: corretto lo schermo bianco (bloom) e la sovraesposizione della qualità "Alta", causati da letture "ombra" involontarie negli shader.
 - Prime prove su due PC reali via Radmin VPN: `full`, `hammer`, `campaign` e `resume` PASS su entrambi i ruoli.
 - Diario personale: le note sono di tutti, ma si aprono a chi le raccoglie; ognuno ha le sue note da leggere, anche nei salvataggi (protocollo 8).

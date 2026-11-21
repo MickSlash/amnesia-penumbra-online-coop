@@ -813,3 +813,55 @@ Programmi coinvolti:
     `ctest`.
 
 Non provato: le altre mappe con acqua e rifrazione sulla Intel.
+
+## 20. Aggiornamento 21 novembre — bug del primo test reale, spettatore, log
+
+Il test reale è stato giocato come client su questo PC (AMD RX 9060 XT,
+monitor 3440x1440), con l'host sul PC dell'amico via Radmin. Log del client:
+`%LocalAppData%\PenumbraOnlineCoop\client\PenumbraOnlineCoop\Overture\hpl.log`.
+
+| Bug | Causa | Correzione | Verifica |
+| --- | --- | --- | --- |
+| A, uscita difficile | Il motore ignorava `SDL_QUIT`: in finestra la X e Alt+F4 non facevano nulla | `LowLevelInputSDL` registra la richiesta; `cCoopNetwork::Update`, che gira sempre, chiama l'uscita del menu | Compilato. Prove automatiche con uscita normale. **Il clic sulla X non è stato provato a mano** |
+| B, finestra e risoluzioni | Il launcher forzava la finestra (casella spenta e non ricordata) e il gioco salvava la finestra nel profilo. Profilo della mod a 640x480. Lista fissa di 17 risoluzioni fino a 1920x1200 | Casella attiva e ricordata; importazione una tantum del `settings.cfg` originale; risoluzioni da `SDL_ListModes` | Log: 26 risoluzioni rilevate, fino a 3440x1440. Le proporzioni seguono già la risoluzione (`Player.cpp`) |
+| C, descrizioni sovrapposte | Le descrizioni esaminate dall'host andavano a tutti; il clic destro del client per chiudere un messaggio faceva esaminare un oggetto sull'host | Messaggi personali (`PersonalMessage`); clic che chiude un messaggio non inviato all'host | `full` e `intro` PASS |
+| D, pensieri che bloccano | Lo stato "messaggio" è voluto (come nell'originale). In co-op il clic del client per chiudere il pensiero arrivava all'host come "interagisci": afferrava oggetti col personaggio del client, o chiudeva il messaggio dell'host | Il clic resta sul client se il giocatore è nello stato messaggio, rilascio compreso; tolta la chiusura dei messaggi dell'host dalle azioni del client | `full`: la prova chiude prima i pensieri, poi afferra. `intro` PASS |
+| E, cigolio infinito delle porte | L'host replicava i suoni ma non segnalava la loro eliminazione: il loop `MoveSound` restava acceso sul client. Inoltre più suoni con lo stesso nome | Segnale "eliminato" (bit 7, già nel protocollo), nomi `nome#n`, volume al centesimo | Le entità sonore del client non crescono più: massimo 14 contro 29, poi tornano a 5 |
+| G, audio | Configurazione OpenAL identica all'originale. Doppioni sul client: verme, nemici, urti/strisciamenti/rotolamenti della fisica locale. Suoni replicati mai eliminati | Sul client nemici e fisica locale non creano suoni; i suoni della replica vengono eliminati | Prova hammer: massimo 6 suoni insieme su host e client (prima 13 contro 7) |
+| F, FPS | Misurato: la co-op costa 0,2-0,3 ms per aggiornamento sull'host e 1-2 ms sul client (questo PC). Il client riposizionava ogni oggetto fermo a ogni fotogramma | Oggetti fermi non riposizionati | Client hammer: da 1,51 a 1,20 ms. PC Intel, cabina: gioco singolo 45-59 FPS, client co-op 55-60 FPS |
+
+### Spettatore
+
+- **Comportamento:** chi è a terra con un compagno vivo guarda dai suoi
+  occhi; posizione e rotazione sono ammorbidite e il clic cambia compagno.
+  Alla rinascita la telecamera torna al corpo; se cadono tutti, si ricarica
+  il checkpoint.
+- **Prova `campaign`, su un PC e su due PC:** host e client entrano in
+  modalità spettatore, la telecamera è agganciata al compagno dopo 1,5 s
+  (distanza 0) ed escono alla rinascita.
+- **Non provato:** il cambio di compagno con 3-4 giocatori.
+
+### Log
+
+- Orario su ogni riga, `[COOP/SESSION]` all'avvio, rotazione
+  `hpl.1.log`/`hpl.2.log`.
+- `[COOP/FPS]` con FPS e suoni.
+- Guida completa in `COOP_LOGS.md`.
+
+### Prove
+
+- **Su un PC, tutte PASS e senza crash dump:** `full`, `intro`, `hammer`,
+  `campaign`, `resume`, `party -Players 3`, `party -Players 4`, `maps`
+  (25/25) e `ctest`.
+- **Su due PC via Radmin** (`tests/network/RunTwoPcTest.ps1`): `full`,
+  `campaign` (spettatore compreso) e `baseline` PASS.
+- **La rete Wi-Fi del secondo PC** ha interrotto due volte la copia dell'exe;
+  per questo c'è l'opzione `-SkipDeploy`.
+
+### Non verificato a mano
+
+- La X della finestra.
+- Il menu con le nuove risoluzioni e l'importazione delle impostazioni dal
+  launcher.
+- L'audio ascoltato in una partita vera.
+- Una partita completa fra due PC.

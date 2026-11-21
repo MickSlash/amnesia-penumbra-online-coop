@@ -77,7 +77,7 @@ Le prove automatiche `full`, `hammer`, `campaign` e `resume` passano anche fra d
 | --- | --- | --- |
 | Morte individuale, respawn vicino al compagno dopo 5 s | ✅ | |
 | Morte di tutti: ricarica del checkpoint co-op | ✅ | |
-| Spettatore | ❌ | |
+| Spettatore | ✅ | chi è a terra guarda dagli occhi di un compagno vivo; clic per cambiare; prova campaign su un PC e su due PC |
 | Cambio mappa con barriera di caricamento | ✅ | prova `maps`: tutte le 25 mappe della campagna caricate e sincronizzate su host e client |
 
 ### Nemici
