@@ -699,3 +699,52 @@ Suite completa dopo la modifica, tutto PASS e nessun crash dump: `hammer`, `camp
 
 Non provato: la raccolta di una nota vera nel mondo e la lettura fatta a mano
 su due PC reali.
+
+## 18. Aggiornamento 21 novembre — prime prove su due PC reali (Radmin VPN)
+
+### Configurazione
+
+- **Host:** PC di sviluppo, indirizzo Radmin `26.175.119.47`.
+- **Client:** secondo PC con i3-4150 e Intel HD Graphics 4400 (driver
+  20.19.15.5171), Windows 10 IoT Enterprise LTSC, collegato in Wi-Fi alla LAN;
+  indirizzo Radmin `26.28.80.238`.
+- **Collegamenti:**
+  - LAN solo per il controllo, con SSH a chiave e Desktop Remoto;
+  - la partita passa solo da Radmin (`PENUMBRA_COOP_ADDRESS=26.175.119.47`).
+- **Avvio:**
+  - il client parte nella sessione di Desktop Remoto di Michael, con
+    un'attività pianificata interattiva;
+  - il driver Intel disegna anche in quella sessione.
+- **Exe del client:** lo stesso della build del commit, con
+  `msvcp140.dll` e `vcruntime140.dll` x86 accanto. Il secondo PC non ha il
+  runtime installato.
+
+### Risultati
+
+| Prova | Host | Client | RTT min/mediano/max (ms) | Perdita affidabile |
+| --- | --- | --- | --- | --- |
+| `full` | PASS | PASS | 17 / 23 / 76 | 0 |
+| `hammer` | PASS | PASS | 22 / 26 / 111 | 0 |
+| `campaign` | PASS | PASS | 17 / 27 / 230 | 0-1 per mille |
+| `resume` (dal salvataggio di `campaign`) | PASS | PASS | 17 / 19 / 19 | 0 |
+
+- **`hammer`:**
+  - correzione massima 0,15 m;
+  - passo oltre l'host 0,0001 m;
+  - nessuna correzione forte.
+- **`full`:** nessuna posa del client oltre 10 cm.
+- **Uscite:** host e client escono con codice 0, senza crash dump.
+
+### Problema trovato: schede Intel HD
+
+- **Il difetto:** con la qualità shader 3 ("Alta"), predefinita, il client
+  sulla HD 4400 disegna i materiali con rilievo e riflessi sovraesposti e
+  quasi bianchi (galleria della miniera, cabina della nave).
+- **Il confronto:**
+  - con le qualità 2, 1 e 0 la cabina è disegnata come sull'host;
+  - sul PC di sviluppo la qualità 3 è corretta.
+- **La causa:** è il driver OpenGL Intel con i programmi `arbfp1` della
+  qualità Alta, non la rete.
+- **Per ora:** su queste schede va impostata "Media" nelle opzioni grafiche.
+
+Non provato: una partita giocata a mano fra i due PC.

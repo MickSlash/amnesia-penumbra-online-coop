@@ -27,7 +27,7 @@ Niente push senza autorizzazione esplicita.
    - ✅ recupero degli arretrati dopo blocchi lunghi;
    - ✅ buffer di interpolazione temporale (protocollo 5);
    - poi previsione durante il trascinamento.
-2. **Prova reale su due PC** via Radmin, raccogliendo `[COOP/NETDIAG]` da entrambi.
+2. ✅ **Prova reale su due PC** via Radmin, raccogliendo `[COOP/NETDIAG]` da entrambi (prove automatiche; resta una partita a mano).
 3. **Inventari separati e oggetti unici tracciati**, prima di passare a 4 giocatori: cambiano salvataggi e protocollo.
 4. **Da 2 a 4 giocatori.**
 5. **Modello e animazioni del partner.**
@@ -54,7 +54,8 @@ Fase 3: fatti gli inventari per giocatore (passi 1-5 di `COOP_ARCHITECTURE.md`, 
 
 Prossimo:
 - spettatore per chi è a terra;
-- prova su due PC reali con Radmin VPN.
+- partita giocata a mano su due PC;
+- schede Intel HD: qualità shader "Media" automatica, o correzione dei programmi "Alta".
 
 ### Rimandato, con motivo
 
@@ -66,6 +67,7 @@ Prossimo:
 
 ## Fatto di recente
 
+- Prime prove su due PC reali via Radmin VPN: `full`, `hammer`, `campaign` e `resume` PASS su entrambi i ruoli.
 - Diario personale: le note sono di tutti, ma si aprono a chi le raccoglie; ognuno ha le sue note da leggere, anche nei salvataggi (protocollo 8).
 - Passare un oggetto a un compagno con il gesto del gioco: oggetto scelto, mira, clic. Una unità delle pile; gli oggetti di gruppo restano a tutti.
 - Inventari per giocatore:

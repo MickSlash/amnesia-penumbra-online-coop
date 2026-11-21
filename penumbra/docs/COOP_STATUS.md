@@ -8,7 +8,7 @@ Ultimo aggiornamento: 20 novembre 2026. Il documento tiene traccia di cosa funzi
 - 🟡 parziale, oppure presente nel codice ma non verificato
 - ❌ mancante
 
-Non è stata fatta una prova reale fra due PC né una partita completa della campagna.
+Le prove automatiche `full`, `hammer`, `campaign` e `resume` passano anche fra due PC reali collegati con Radmin VPN (21 novembre, `COOP_TEST_RESULTS.md` §18). Non è stata giocata a mano una partita fra due PC né una partita completa della campagna.
 
 ## Penumbra: Overture
 
@@ -18,7 +18,8 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
 | --- | --- | --- |
 | 2 giocatori | ✅ | |
 | 3–4 giocatori | 🟡 | trasporto, movimento, silhouette, nemici, attacchi ad area e checkpoint per tutti (prova `party` con 2, 3 e 4 istanze sullo stesso PC); inventari e diario per giocatore; l'host sceglie 2-4 giocatori nel launcher |
-| IP diretto (UDP 27120), LAN, VPN | ✅ | prove locali; mai provato su due PC via Radmin |
+| IP diretto (UDP 27120), LAN, VPN | ✅ | prove automatiche su due PC via Radmin VPN (client in Wi-Fi): RTT mediano 19-27 ms, nessuna perdita rilevante |
+| Schede Intel HD (driver OpenGL Intel) | 🟡 | con qualità shader "Alta" (3) i materiali con rilievo risultano sovraesposti; con "Media" (2) il disegno è corretto |
 | Ospitare/entrare dal menu del gioco | ❌ | si fa dal launcher (solo italiano) |
 | Lobby, inviti e relay Steam | ❌ | solo presenza Steam (App ID 22180); richiede uno studio dei requisiti Steamworks |
 | Elenco giocatori e stato connessione | ❌ | |
