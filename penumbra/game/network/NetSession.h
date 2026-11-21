@@ -8,10 +8,27 @@
 #include <deque>
 #include <map>
 #include "Checkpoint.h"
+#include "PlayerInput.h"
+#include "InputQueue.h"
 struct _ENetHost;
 struct _ENetPeer;
+struct _ENetEvent;
 namespace online {
-constexpr uint16_t ProtocolVersion = 3;
+// 4: batched movement commands (InputBatch) consumed one per host tick;
+// snapshots acknowledge the command already integrated by physics.
+// 5: snapshots and entity poses carry the host logic tick (hostTick) for
+// client-side interpolation on the host timeline (Interpolation.h).
+// 6: each player state names the object it holds, pulls or pushes, and
+// counts intentional teleports (respawn, scripts) so they are never eased.
+// 7: ID dei giocatori (1 = host, 2..4 = ospiti). Welcome assegna l'ID
+// all'ospite; gli snapshot hanno da 2 a 4 giocatori, ognuno con il suo ID.
+constexpr uint16_t ProtocolVersion = 8;
+constexpr size_t MaxPlayers = 4;
+constexpr uint8_t HostPlayerId = 1;
+// Intestazione 22 byte (con il numero di giocatori) + 61 byte per giocatore.
+constexpr size_t SnapshotBytes(size_t players) { return 22 + players * 61; }
+// What a player is doing with an object (PlayerState::heldMode).
+enum class HeldMode : uint8_t { None = 0, Grab = 1, Move = 2, Push = 3 };
 constexpr uint32_t VoluntaryDisconnectReason = 0x504f0001;
 constexpr uint16_t DefaultPort = 27120;
 // ENet UDP payload cap, leaving room for IP/UDP and VPN encapsulation.
@@ -21,10 +38,11 @@ constexpr uint32_t ConservativeDatagramBytes = 576;
 // reliable packet. A 256 KiB cap can reject the very retransmit that drains it.
 constexpr uint32_t TransportWaitingDataBytes = 4 * 1024 * 1024;
 enum class Role { Offline, Host, Client };
-enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17, Loading = 18, WorldApplied = 19 };
+enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17, Loading = 18, WorldApplied = 19, InputBatch = 20 };
 struct JournalEntry {
     uint8_t kind = 0; // note, diary, quest
     bool active = true;
+    bool read = false; // nota: già letta da chi riceve il diario
     std::string group, name, nameEntry, textEntry, icon, image;
 };
 struct JournalState { uint32_t epoch = 0, revision = 0; std::vector<JournalEntry> entries; };
@@ -36,19 +54,12 @@ enum class PresentationKind : uint8_t { Note = 1, Diary = 2, Voice = 3, Message 
 struct Presentation {
     uint32_t epoch = 0;
     PresentationKind kind = PresentationKind::Message;
-    uint8_t target = 0; // 0 = both, 1 = host, 2 = client
+    uint8_t target = 0; // 0 = tutti, altrimenti l'ID del giocatore
     std::array<std::string, 4> text;
     std::array<int32_t, 6> values = {};
 };
 std::vector<uint8_t> EncodePresentation(const Presentation& event);
 bool DecodePresentation(const uint8_t* data, size_t size, Presentation& event);
-struct PlayerInput {
-    uint32_t sequence = 0, tick = 0, epoch = 0;
-    int16_t forward = 0, strafe = 0; // normalized signed axes, -1000..1000
-    int16_t yaw = 0, pitch = 0; // radians * 1000
-    int16_t lookYaw = 0, lookPitch = 0; // native mouse look deltas *10000, consumed once
-    uint8_t buttons = 0; // jump, crouch, run, rotate grabbed object
-};
 struct PlayerState {
     int32_t x = 0, y = 0, z = 0; // feet position, millimetres
     int16_t yaw = 0, pitch = 0;
@@ -60,13 +71,27 @@ struct PlayerState {
     uint8_t flags = 4; // crouching, flashlight, active, dead, native door-controlled look
     int16_t forwardSpeed = 0, sideSpeed = 0; // current local-axis velocity, mm/s
     uint16_t forwardMax = 0, sideMax = 0, acceleration = 0, deceleration = 0, backwardMax = 0; // mm/s, mm/s^2
+    // Object held (Grab), moved by mouse (Move: doors, levers, drawers) or
+    // pushed (Push): entity ID (EntityID of its name) and body index.
+    uint32_t heldEntity = 0;
+    uint8_t heldBody = 0, heldMode = 0;
+    // Incremented by the host whenever the player moved more than 1 m within a
+    // tick (no walk or fall does that): the client snaps instead of correcting.
+    uint8_t teleport = 0;
+    uint8_t id = 0; // ID di rete del giocatore, 1..MaxPlayers
 };
+// Ogni snapshot è indirizzato a un solo ospite (una Session per ospite):
+// players[0] è l'host, players[1] il destinatario (acknowledgedInput si
+// riferisce ai suoi comandi), players[2..playerCount-1] gli altri ospiti.
 struct Snapshot {
     uint32_t epoch = 0, sequence = 0, acknowledgedInput = 0;
-    PlayerState players[2]; // stable network IDs 1 (host), 2 (client)
+    uint32_t hostTick = 0; // host logic tick the poses were captured on
+    uint8_t playerCount = 2;
+    PlayerState players[MaxPlayers];
+    Snapshot() { for(size_t i = 0; i < MaxPlayers; ++i) players[i].id = uint8_t(i + 1); }
 };
 struct MapState { uint32_t epoch = 0; uint64_t fingerprint = 0; std::string file; };
-enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, WeaponLook = 7, Checkpoint = 8 };
+enum class PlayerAction : uint8_t { Interact = 1, Lantern = 2, Attack = 3, UseInventory = 4, CombineInventory = 5, Ignite = 6, WeaponLook = 7, Checkpoint = 8, NoteRead = 9 };
 struct ActionRequest { uint32_t epoch = 0, sequence = 0; PlayerAction action = PlayerAction::Interact; bool pressed = false; std::string item, secondItem; int16_t lookYaw = 0, lookPitch = 0; };
 struct InventoryItem {
     std::string name, subtype, image, value, extraValue, nameEntry, descriptionEntry;
@@ -93,6 +118,7 @@ struct Animation { uint16_t index = 0, weight = 0; uint32_t time = 0; bool loop 
 struct EntityState {
     uint32_t epoch = 0, id = 0;
     uint32_t sequence = 0; // shared serial across reliable lifecycle and live poses
+    uint32_t hostTick = 0; // host logic tick the pose was captured on
     bool liveMotion = false; // local receive metadata, excluded from the wire
     std::string name, file;
     uint8_t type = 0, flags = 0; // active, interaction disabled, destroyed, lit, locked, closed, effects
@@ -116,6 +142,10 @@ std::vector<uint8_t> EncodeMap(const MapState& map);
 bool DecodeMap(const uint8_t* data, size_t size, MapState& map);
 std::vector<uint8_t> EncodeInput(const PlayerInput& input);
 bool DecodeInput(const uint8_t* data, size_t size, PlayerInput& input);
+// The newest movement commands of one map epoch, oldest first (1..MaxInputBatch).
+constexpr size_t MaxInputBatch = 6;
+std::vector<uint8_t> EncodeInputBatch(const std::vector<PlayerInput>& inputs);
+bool DecodeInputBatch(const uint8_t* data, size_t size, std::vector<PlayerInput>& inputs);
 class Session {
 public:
     using Logger = std::function<void(const std::string&)>;
@@ -124,6 +154,14 @@ public:
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
     bool StartHost(uint16_t port, bool resume = false);
+    // Host con più ospiti: la Session usa il socket di un HostTransport, che
+    // le passa gli eventi del suo peer con HandleEvent (vedi HostTransport.h).
+    bool AttachHost(_ENetHost* host, uint16_t port, bool resume = false);
+    bool HostAttached() const { return host_ && !ownsHost_ && role_ == Role::Host; }
+    bool OwnsPeer(const _ENetPeer* peer) const { return peer && peer == peer_; }
+    uint64_t ExpectedIdentity() const { return expectedIdentity_; }
+    void ForgetIdentity() { expectedIdentity_ = 0; checkpointAck_ = 0; }
+    void HandleEvent(const _ENetEvent& event);
     bool StartClient(const std::string& address, uint16_t port, bool resume = false);
     void Stop();
     void CloseVoluntarily();
@@ -135,7 +173,13 @@ public:
     void BeginMapLoad();
     void RecoverConnection(const char* reason);
     bool SendInput(const PlayerInput& input);
-    bool ReadInput(PlayerInput& input) const; // expires after 250 ms
+    bool ReadInput(PlayerInput& input) const; // newest received; expires after 250 ms
+    // Host: the command to simulate on this tick, one per call (see InputQueue).
+    bool NextInput(PlayerInput& input, bool& repeated);
+    bool CatchUpInput(PlayerInput& input) { return ready_ && inputQueue_.CatchUp(input); }
+    size_t InputQueueDepth() const { return inputQueue_.Depth(); }
+    size_t InputQueueTarget() const { return inputQueue_.Target(); }
+    InputQueue::Stats TakeInputStats() { return inputQueue_.TakeStats(); }
     bool SendSnapshot(const Snapshot& snapshot);
     // Low-rate reliable pose on control channel; never a life discontinuity.
     bool SendSnapshotBackup(const Snapshot& snapshot);
@@ -172,6 +216,7 @@ public:
     bool Connected() const { return ready_; }
     Role GetRole() const { return role_; }
     uint32_t Ping() const;
+    uint32_t PingVariance() const;
     void SetLobbyReady(bool ready);
     bool LobbyReady() const { return Connected() && localReady_ && remoteReady_; }
     bool LocalReady() const { return localReady_; }
@@ -185,6 +230,10 @@ public:
     void SetListenPort(uint16_t port) { listenPort_ = port; }
     uint64_t LocalIdentity() const { return identity_; }
     bool SetLocalIdentity(uint64_t identity) { if(role_ != Role::Offline || !identity) return false; identity_ = identity; return true; }
+    // ID dell'ospite di questa connessione: sull'host quello assegnato con
+    // Welcome (impostabile prima di StartHost), sul client il proprio.
+    uint8_t GuestPlayerId() const { return guestId_; }
+    bool SetGuestPlayerId(uint8_t id) { if(role_ != Role::Offline || id <= HostPlayerId || id > MaxPlayers) return false; guestId_ = id; return true; }
 private:
     bool Initialize();
     bool Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reliable, bool bulk = false);
@@ -194,6 +243,7 @@ private:
     void SetLoading(bool loading);
     void ClearPeerState();
     void BoundReliableRetries();
+    void Maintain(uint32_t now);
     Logger log_;
     _ENetHost* host_ = nullptr;
     _ENetPeer* peer_ = nullptr;
@@ -204,6 +254,8 @@ private:
     uint32_t lastDiagnostic_ = 0;
     uint32_t transportDatagramBytes_ = TransportDatagramBytes, lastSocketError_ = 0;
     PlayerInput input_;
+    InputQueue inputQueue_;
+    std::deque<PlayerInput> sentInputs_;
     Snapshot snapshot_;
     MapState map_;
     bool hasSnapshot_ = false, hasMap_ = false;
@@ -236,5 +288,7 @@ private:
     CheckpointReceiver checkpointReceiver_;
     uint32_t checkpointAck_ = 0;
     uint32_t checkpointSent_ = 0, checkpointDelivered_ = 0;
+    uint8_t guestId_ = 2;
+    bool ownsHost_ = true;
 };
 }

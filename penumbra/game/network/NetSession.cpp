@@ -22,7 +22,7 @@ bool ValidPlayer(const PlayerState& p) {
     return p.x >= -100000000 && p.x <= 100000000 && p.y >= -100000000 && p.y <= 100000000 &&
         p.z >= -100000000 && p.z <= 100000000 && p.yaw >= -3142 && p.yaw <= 3142 &&
         p.pitch >= -1571 && p.pitch <= 1571 && p.health <= 10000 && p.sanity <= 10000 && p.oil <= 10000 &&
-        p.eyeHeight >= -5000 && p.eyeHeight <= 5000 && !(p.flags & ~127) &&
+        p.eyeHeight >= -5000 && p.eyeHeight <= 5000 && !(p.flags & ~127) && p.heldMode <= 3 && (p.heldMode || !p.heldEntity) &&
         p.roll >= -3142 && p.roll <= 3142 && p.cameraX >= -5000 && p.cameraX <= 5000 &&
         p.cameraZ >= -5000 && p.cameraZ <= 5000 && p.fov >= 10 && p.fov <= 3142 &&
         p.aspect >= 10 && p.aspect <= 20000 && p.lookSpeed <= 10000;
@@ -52,7 +52,7 @@ bool ValidTransform(const Transform& t) {
 }
 bool ValidEntity(const EntityState& e) {
     if(!e.epoch || e.name.empty() || e.name.size() > 128 || !ValidAsset(e.file) || e.type > 2 ||
-        e.bodies.size() > 32 || e.animations.size() > 32 || (e.flags & 128) || e.health<0 || e.health>1000000000 || e.enemyState>12 || e.target>2 || !ValidTransform(e.character) || !ValidTransform(e.transform)) return false;
+        e.bodies.size() > 32 || e.animations.size() > 32 || (e.flags & 128) || e.health<0 || e.health>1000000000 || e.enemyState>12 || e.target>MaxPlayers || !ValidTransform(e.character) || !ValidTransform(e.transform)) return false;
     for(unsigned char c : e.name) if(c < 32 || c > 126) return false;
     for(int32_t s : e.scale) if(s <= 0 || s > 100000) return false;
     for(const auto& t : e.bodies) if(!ValidTransform(t)) return false;
@@ -75,7 +75,7 @@ bool ValidInventoryItem(const InventoryItem& item) {
         (item.image.empty() || (item.image[0] != '/' && item.image[0] != '\\'));
 }
 bool ValidPresentation(const Presentation& event) {
-    if(!event.epoch || uint8_t(event.kind) < 1 || uint8_t(event.kind) > 21 || event.target > 2) return false;
+    if(!event.epoch || uint8_t(event.kind) < 1 || uint8_t(event.kind) > 21 || event.target > MaxPlayers) return false;
     for(unsigned i = 0; i < 4; ++i)
         if(event.text[i].size() > ((i == 0 && event.kind == PresentationKind::Message) ||
             (i == 1 && event.kind == PresentationKind::Hint) ? 4096u : 256u) || event.text[i].find('\0') != std::string::npos) return false;
@@ -147,7 +147,7 @@ std::vector<uint8_t> EncodeJournal(const JournalState& s) {
     auto out = Header(Message::Journal); U32(out, s.epoch); U32(out, s.revision); U16(out, uint16_t(s.entries.size()));
     for(const auto& e : s.entries) {
         if(e.kind > 2) return {};
-        out.push_back(e.kind); out.push_back(e.active ? 1 : 0);
+        out.push_back(e.kind); out.push_back(uint8_t((e.active ? 1 : 0) | (e.read ? 2 : 0)));
         for(const auto* value : {&e.group, &e.name, &e.nameEntry, &e.textEntry, &e.icon, &e.image}) {
             if(value->size() > 256 || value->find('\0') != std::string::npos) return {};
             String(out, *value);
@@ -163,8 +163,8 @@ bool DecodeJournal(const uint8_t* p, size_t n, JournalState& s) {
     JournalState value; value.epoch = R32(p + 5); value.revision = R32(p + 9);
     size_t cursor = 15;
     for(unsigned i = 0; i < R16(p + 13); ++i) {
-        if(n - cursor < 2 || p[cursor] > 2 || p[cursor + 1] > 1) return false;
-        JournalEntry e; e.kind = p[cursor++]; e.active = p[cursor++] != 0;
+        if(n - cursor < 2 || p[cursor] > 2 || p[cursor + 1] > 3) return false;
+        JournalEntry e; e.kind = p[cursor++]; e.active = (p[cursor] & 1) != 0; e.read = (p[cursor++] & 2) != 0;
         for(auto* text : {&e.group, &e.name, &e.nameEntry, &e.textEntry, &e.icon, &e.image})
             if(!ReadString(p, n, cursor, *text, 256)) return false;
         value.entries.push_back(std::move(e));
@@ -239,16 +239,16 @@ std::vector<uint8_t> EncodeEntity(const EntityState& e) {
     for(const auto& a : e.animations) { U16(out, a.index); U16(out, a.weight); U32(out, a.time); out.push_back(a.loop?1:0); }
     U32(out,uint32_t(e.health)); out.push_back(e.enemyState); out.push_back(e.target);
     for(int32_t v:e.character) U32(out,uint32_t(v));
-    U32(out, e.sequence);
+    U32(out, e.sequence); U32(out, e.hostTick);
     return out;
 }
 bool DecodeEntity(const uint8_t* p, size_t n, EntityState& entity) {
-    if(!ValidHeader(p, n) || n < 141 || p[4] != uint8_t(Message::Entity)) return false;
+    if(!ValidHeader(p, n) || n < 145 || p[4] != uint8_t(Message::Entity)) return false;
     const unsigned names = R16(p + 17), files = R16(p + 19), bodies = p[21];
     const size_t animationsOffset = 82 + names + files + bodies * 48;
     if(names > 128 || files > 240 || bodies > 32 || n <= animationsOffset) return false;
     const unsigned animations = p[animationsOffset];
-    if(animations > 32 || n != animationsOffset + 59 + animations * 9) return false;
+    if(animations > 32 || n != animationsOffset + 63 + animations * 9) return false;
     EntityState e; e.epoch = R32(p + 5); e.id = R32(p + 9); e.type = p[13]; e.flags = p[14]; e.subtype = R16(p + 15);
     for(unsigned i = 0; i < 3; ++i) e.scale[i] = Signed32(p + 22 + i * 4);
     for(unsigned i = 0; i < 12; ++i) e.transform[i] = Signed32(p + 34 + i * 4);
@@ -263,17 +263,29 @@ bool DecodeEntity(const uint8_t* p, size_t n, EntityState& entity) {
         e.animations[i].index = R16(a); e.animations[i].weight = R16(a + 2); e.animations[i].time = R32(a + 4);
         if(a[8]>1) return false; e.animations[i].loop=a[8]!=0;
     }
-    const uint8_t* extra=p+n-58;
+    const uint8_t* extra=p+n-62;
     e.health=Signed32(extra); e.enemyState=extra[4]; e.target=extra[5];
     for(unsigned i=0;i<12;++i) e.character[i]=Signed32(extra+6+i*4);
-    e.sequence = R32(p + n - 4);
+    e.sequence = R32(p + n - 8); e.hostTick = R32(p + n - 4);
     if(!ValidEntity(e)) return false;
     entity = std::move(e); return true;
 }
+// Da 2 a MaxPlayers giocatori con ID distinti; il primo è sempre l'host.
+bool ValidPlayers(const Snapshot& s) {
+    if(s.playerCount < 2 || s.playerCount > MaxPlayers || s.players[0].id != HostPlayerId) return false;
+    for(size_t i = 0; i < s.playerCount; ++i) {
+        if(!ValidPlayer(s.players[i]) || s.players[i].id < HostPlayerId || s.players[i].id > MaxPlayers) return false;
+        for(size_t j = 0; j < i; ++j) if(s.players[j].id == s.players[i].id) return false;
+    }
+    return true;
+}
 std::vector<uint8_t> EncodeSnapshot(const Snapshot& s) {
-    if (!s.epoch || !ValidPlayer(s.players[0]) || !ValidPlayer(s.players[1])) return {};
-    auto out = Header(Message::Snapshot); U32(out, s.epoch); U32(out, s.sequence); U32(out, s.acknowledgedInput);
-    for (const auto& p : s.players) {
+    if (!s.epoch || !ValidPlayers(s)) return {};
+    auto out = Header(Message::Snapshot); U32(out, s.epoch); U32(out, s.sequence); U32(out, s.acknowledgedInput); U32(out, s.hostTick);
+    out.push_back(s.playerCount);
+    for (size_t i = 0; i < s.playerCount; ++i) {
+        const auto& p = s.players[i];
+        out.push_back(p.id);
         U32(out, uint32_t(p.x)); U32(out, uint32_t(p.y)); U32(out, uint32_t(p.z));
         U16(out, uint16_t(p.yaw)); U16(out, uint16_t(p.pitch));
         U16(out, p.health); U16(out, p.sanity); U16(out, p.oil);
@@ -282,15 +294,18 @@ std::vector<uint8_t> EncodeSnapshot(const Snapshot& s) {
                 U16(out, p.fov); U16(out, p.aspect); U16(out, p.lookSpeed);
         U16(out, uint16_t(p.forwardSpeed)); U16(out, uint16_t(p.sideSpeed));
         U16(out, p.forwardMax); U16(out, p.sideMax); U16(out, p.acceleration); U16(out, p.deceleration); U16(out,p.backwardMax);
+        U32(out, p.heldEntity); out.push_back(p.heldBody); out.push_back(p.heldMode); out.push_back(p.teleport);
     }
     return out;
 }
 bool DecodeSnapshot(const uint8_t* p, size_t n, Snapshot& s) {
-    if (!ValidHeader(p, n) || n != 123 || p[4] != uint8_t(Message::Snapshot)) return false;
-    Snapshot value; value.epoch = R32(p + 5); value.sequence = R32(p + 9); value.acknowledgedInput = R32(p + 13);
-    if (!value.epoch) return false;
-    for (unsigned i = 0; i < 2; ++i) {
-        const uint8_t* b = p + 17 + i * 53; auto& player = value.players[i];
+    if (!ValidHeader(p, n) || n < 22 || p[4] != uint8_t(Message::Snapshot)) return false;
+    Snapshot value; value.epoch = R32(p + 5); value.sequence = R32(p + 9); value.acknowledgedInput = R32(p + 13); value.hostTick = R32(p + 17);
+    value.playerCount = p[21];
+    if (!value.epoch || value.playerCount < 2 || value.playerCount > MaxPlayers || n != SnapshotBytes(value.playerCount)) return false;
+    for (unsigned i = 0; i < value.playerCount; ++i) {
+        auto& player = value.players[i]; player.id = p[22 + i * 61];
+        const uint8_t* b = p + 23 + i * 61;
         player.x = Signed32(b); player.y = Signed32(b + 4); player.z = Signed32(b + 8);
         player.yaw = Signed16(b + 12); player.pitch = Signed16(b + 14);
         player.health = R16(b + 16); player.sanity = R16(b + 18); player.oil = R16(b + 20);
@@ -300,8 +315,9 @@ bool DecodeSnapshot(const uint8_t* p, size_t n, Snapshot& s) {
         player.forwardSpeed = Signed16(b+39); player.sideSpeed = Signed16(b+41);
         player.forwardMax = R16(b+43); player.sideMax = R16(b+45); player.acceleration = R16(b+47); player.deceleration = R16(b+49);
         player.backwardMax = R16(b+51);
-        if (!ValidPlayer(player)) return false;
+        player.heldEntity = R32(b+53); player.heldBody = b[57]; player.heldMode = b[58]; player.teleport = b[59];
     }
+    if (!ValidPlayers(value)) return false;
     s = value; return true;
 }
 std::vector<uint8_t> EncodeLife(const Snapshot& s) {
@@ -310,7 +326,7 @@ std::vector<uint8_t> EncodeLife(const Snapshot& s) {
     return bytes;
 }
 bool DecodeLife(const uint8_t* p, size_t n, Snapshot& s) {
-    if(!ValidHeader(p, n) || n != 123 || p[4] != uint8_t(Message::Life)) return false;
+    if(!ValidHeader(p, n) || n < 22 || p[4] != uint8_t(Message::Life)) return false;
     auto bytes = std::vector<uint8_t>(p, p + n);
     bytes[4] = uint8_t(Message::Snapshot);
     return DecodeSnapshot(bytes.data(), bytes.size(), s);
@@ -336,6 +352,31 @@ std::vector<uint8_t> EncodeInput(const PlayerInput& i) {
     U16(out, uint16_t(i.yaw)); U16(out, uint16_t(i.pitch)); out.push_back(i.buttons); U32(out, i.epoch);
     U16(out, uint16_t(i.lookYaw)); U16(out, uint16_t(i.lookPitch));
     return out;
+}
+std::vector<uint8_t> EncodeInputBatch(const std::vector<PlayerInput>& inputs) {
+    if (inputs.empty() || inputs.size() > MaxInputBatch) return {};
+    auto out = Header(Message::InputBatch); U32(out, inputs.front().epoch); out.push_back(uint8_t(inputs.size()));
+    for (const auto& i : inputs) {
+        if (!ValidInput(i) || i.epoch != inputs.front().epoch) return {};
+        U32(out, i.sequence); U16(out, uint16_t(i.forward)); U16(out, uint16_t(i.strafe));
+        U16(out, uint16_t(i.yaw)); U16(out, uint16_t(i.pitch)); out.push_back(i.buttons);
+        U16(out, uint16_t(i.lookYaw)); U16(out, uint16_t(i.lookPitch));
+    }
+    return out;
+}
+bool DecodeInputBatch(const uint8_t* p, size_t n, std::vector<PlayerInput>& inputs) {
+    if (!ValidHeader(p, n) || n < 10 || p[4] != uint8_t(Message::InputBatch)) return false;
+    const size_t count = p[9];
+    if (!count || count > MaxInputBatch || n != 10 + count * 17) return false;
+    std::vector<PlayerInput> values(count);
+    for (size_t k = 0; k < count; ++k) {
+        const uint8_t* c = p + 10 + k * 17; auto& v = values[k];
+        v.epoch = R32(p + 5); v.sequence = R32(c);
+        v.forward = Signed16(c + 4); v.strafe = Signed16(c + 6); v.yaw = Signed16(c + 8); v.pitch = Signed16(c + 10);
+        v.buttons = c[12]; v.lookYaw = Signed16(c + 13); v.lookPitch = Signed16(c + 15);
+        if (!ValidInput(v)) return false;
+    }
+    inputs = std::move(values); return true;
 }
 bool DecodeInput(const uint8_t* p, size_t n, PlayerInput& i) {
     if (!ValidHeader(p, n) || n != 30 || p[4] != uint8_t(Message::Input)) return false;
@@ -364,12 +405,18 @@ bool Session::StartHost(uint16_t port, bool resume) {
     if (!host_) { log_("[NET/CONNECTION] Cannot bind host socket"); Stop(); return false; }
     host_->maximumPacketSize = 65536; host_->maximumWaitingData = TransportWaitingDataBytes;
     host_->mtu = transportDatagramBytes_;
-    role_ = Role::Host;
+    role_ = Role::Host; ownsHost_ = true;
     log_("[NET/CONNECTION] Listening on 0.0.0.0:" + std::to_string(port)); return true;
+}
+bool Session::AttachHost(_ENetHost* host, uint16_t port, bool resume) {
+    Stop(); fatal_ = false; if(!resume) { expectedIdentity_ = 0; checkpointAck_ = 0; transportDatagramBytes_ = TransportDatagramBytes; }
+    if(!host || !port) return false;
+    host_ = host; ownsHost_ = false; listenPort_ = port; role_ = Role::Host;
+    return true;
 }
 bool Session::StartClient(const std::string& name, uint16_t port, bool resume) {
     Stop(); fatal_ = false; if(!resume) { expectedIdentity_ = 0; checkpointAck_ = 0; transportDatagramBytes_ = TransportDatagramBytes; } if (name.empty() || !port || !Initialize()) return false;
-    host_ = enet_host_create(nullptr, 1, 4, 0, 0);
+    host_ = enet_host_create(nullptr, 1, 4, 0, 0); ownsHost_ = true;
     if (!host_) { Stop(); return false; }
     host_->maximumPacketSize = 65536; host_->maximumWaitingData = TransportWaitingDataBytes;
     host_->mtu = transportDatagramBytes_;
@@ -382,9 +429,10 @@ bool Session::StartClient(const std::string& name, uint16_t port, bool resume) {
 }
 void Session::Stop() {
     if (peer_) { enet_peer_disconnect_now(peer_, closing_ ? VoluntaryDisconnectReason : 0); }
-    if (host_) enet_host_destroy(host_);
+    if (host_ && ownsHost_) enet_host_destroy(host_);
     if (initialized_) enet_deinitialize();
-    host_ = nullptr; peer_ = nullptr; initialized_ = ready_ = hasInput_ = false; role_ = Role::Offline;
+    ownsHost_ = true;
+    host_ = nullptr; peer_ = nullptr; initialized_ = ready_ = hasInput_ = false; role_ = Role::Offline; inputQueue_.Clear(); sentInputs_.clear();
     lastPoll_ = lastPacket_ = lastDiagnostic_ = 0;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = snapshotBackups_ = 0; map_ = MapState();
     entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
@@ -411,7 +459,7 @@ void Session::BeginMapLoad() {
 void Session::CloseVoluntarily() {
     if(!peer_ || peer_->state != ENET_PEER_STATE_CONNECTED) { Stop(); return; }
     // Service the reliable disconnect in the background, without gameplay.
-    closing_ = true; closeStarted_ = enet_time_get(); ready_ = hasInput_ = false; role_ = Role::Offline;
+    closing_ = true; closeStarted_ = enet_time_get(); ready_ = hasInput_ = false; role_ = Role::Offline; inputQueue_.Clear(); sentInputs_.clear();
     enet_peer_disconnect(peer_,VoluntaryDisconnectReason); enet_host_flush(host_);
 }
 void Session::SuspendTransportForTest() {
@@ -452,7 +500,7 @@ bool Session::Send(const std::vector<uint8_t>& bytes, uint8_t channel, bool reli
     return true;
 }
 void Session::ClearPeerState() {
-    peer_ = nullptr; ready_ = hasInput_ = false;
+    peer_ = nullptr; ready_ = hasInput_ = false; inputQueue_.Clear(); sentInputs_.clear();
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
     entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
     presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
@@ -474,17 +522,17 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         const uint64_t identity = (uint64_t(R32(p + 5)) << 32) | R32(p + 9);
         if(!identity || !R16(p + 13) || (expectedIdentity_ && identity != expectedIdentity_)) { Reject("different resume identity"); return; }
         expectedIdentity_ = identity; remotePort_ = R16(p + 13);
-        auto welcome = Header(Message::Welcome); U32(welcome, 2); U32(welcome, uint32_t(identity_ >> 32)); U32(welcome, uint32_t(identity_)); U16(welcome, listenPort_);
+        auto welcome = Header(Message::Welcome); U32(welcome, guestId_); U32(welcome, uint32_t(identity_ >> 32)); U32(welcome, uint32_t(identity_)); U16(welcome, listenPort_);
         if (!Send(welcome, 0, true)) { Reject("cannot send Welcome"); return; }
         ready_ = true; fatal_ = false; ++generation_; SetLobbyReady(localReady_);
-        log_("[NET/CONNECTION] Protocol handshake accepted; Player assigned ID 2"); return;
+        log_("[NET/CONNECTION] Protocol handshake accepted; Player assigned ID " + std::to_string(guestId_)); return;
     }
-    if (!ready_ && role_ == Role::Client && channel == 0 && n == 19 && p[4] == uint8_t(Message::Welcome) && R32(p + 5) == 2) {
+    if (!ready_ && role_ == Role::Client && channel == 0 && n == 19 && p[4] == uint8_t(Message::Welcome) && R32(p + 5) > HostPlayerId && R32(p + 5) <= MaxPlayers) {
         const uint64_t identity = (uint64_t(R32(p + 9)) << 32) | R32(p + 13);
         if(!identity || !R16(p + 17) || (expectedIdentity_ && identity != expectedIdentity_)) { Reject("different host identity"); return; }
-        expectedIdentity_ = identity; remotePort_ = R16(p + 17);
+        expectedIdentity_ = identity; remotePort_ = R16(p + 17); guestId_ = uint8_t(R32(p + 5));
         ready_ = true; fatal_ = false; ++generation_; SetLobbyReady(localReady_);
-        log_("[NET/CONNECTION] Protocol handshake accepted; Player assigned ID 2"); return;
+        log_("[NET/CONNECTION] Protocol handshake accepted; Player assigned ID " + std::to_string(guestId_)); return;
     }
     if(ready_ && channel == 0 && n == 8 && p[4] == uint8_t(Message::Peer) && p[5] <= 1 && R16(p + 6)) {
         remoteReady_ = p[5] != 0; remotePort_ = R16(p + 6); return;
@@ -520,7 +568,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
     }
     if(ready_ && role_ == Role::Client && channel == 2 && p[4] == uint8_t(Message::Life)) {
         Snapshot state;
-        if(!DecodeLife(p, n, state)) { Reject("invalid life transition"); return; }
+        if(!DecodeLife(p, n, state) || state.players[1].id != guestId_) { Reject("invalid life transition"); return; }
         if(!hasMap_ || state.epoch != map_.epoch) return;
         uint32_t delta = state.sequence - lastLife_;
         if(hasLife_ && (!delta || delta >= 0x80000000u)) return;
@@ -547,7 +595,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         return;
     }
     if(ready_ && role_ == Role::Host && channel == 0 && n >= 23 && p[4] == uint8_t(Message::Action)) {
-        if(p[13] < 1 || p[13] > 8 || p[14] > 1) { Reject("invalid player action"); return; }
+        if(p[13] < 1 || p[13] > 9 || p[14] > 1) { Reject("invalid player action"); return; }
         ActionRequest action; action.epoch = R32(p + 5); action.sequence = R32(p + 9);
         action.action = PlayerAction(p[13]); action.pressed = p[14] != 0;
         size_t cursor = 15;
@@ -589,12 +637,27 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         if(entities_.size() >= 1024) { Reject("world entity queue exceeded"); return; }
         entities_.push_back(std::move(entity)); return;
     }
+    if (ready_ && role_ == Role::Host && channel == 1 && n >= 5 && p[4] == uint8_t(Message::InputBatch)) {
+        std::vector<PlayerInput> values;
+        if (!DecodeInputBatch(p, n, values)) { Reject("invalid input batch"); return; }
+        if (hasMap_ && (values.front().epoch != map_.epoch || readyEpoch_ != map_.epoch)) return;
+        for (const auto& command : values) {
+            // Serial number arithmetic supports wraparound and ignores duplicate/old input.
+            const uint32_t delta = command.sequence - input_.sequence;
+            if (!hasInput_ || (delta != 0 && delta < 0x80000000u)) {
+                input_ = command; hasInput_ = true; lastInput_ = enet_time_get();
+            }
+            inputQueue_.Offer(command);
+        }
+        return;
+    }
     if (ready_ && role_ == Role::Host && channel == 1 && DecodeInput(p, n, value)) {
         if (hasMap_ && (value.epoch != map_.epoch || readyEpoch_ != map_.epoch)) return;
         // Serial number arithmetic supports wraparound and ignores duplicate/old input.
         uint32_t delta = value.sequence - input_.sequence;
         if (!hasInput_ || (delta != 0 && delta < 0x80000000u)) {
             input_ = value; hasInput_ = true; lastInput_ = enet_time_get();
+            inputQueue_.Offer(value);
         }
         return;
     }
@@ -616,7 +679,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
     }
     if (ready_ && role_ == Role::Client && (channel == 1 || channel == 0) && p[4] == uint8_t(Message::Snapshot)) {
         Snapshot snapshot;
-        if (!DecodeSnapshot(p, n, snapshot)) { Reject("invalid player snapshot"); return; }
+        if (!DecodeSnapshot(p, n, snapshot) || snapshot.players[1].id != guestId_) { Reject("invalid player snapshot"); return; }
         if (hasMap_ && snapshot.epoch == map_.epoch && (!hasSnapshot_ ||
             (snapshot.sequence - snapshot_.sequence != 0 && snapshot.sequence - snapshot_.sequence < 0x80000000u))) {
             if(!hasSnapshot_ || ((snapshot_.players[1].flags ^ snapshot.players[1].flags) & 8))
@@ -632,10 +695,12 @@ void Session::Poll() {
     if (!host_) return;
     uint32_t now = enet_time_get();
     if(closing_) {
-        ENetEvent event;
-        for(unsigned count=0; count<64 && enet_host_service(host_,&event,0)>0; ++count) {
-            if(event.type == ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(event.packet);
-            if(event.type == ENET_EVENT_TYPE_DISCONNECT) { Stop(); return; }
+        if(ownsHost_) {
+            ENetEvent event;
+            for(unsigned count=0; count<64 && enet_host_service(host_,&event,0)>0; ++count) {
+                if(event.type == ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(event.packet);
+                if(event.type == ENET_EVENT_TYPE_DISCONNECT) { Stop(); return; }
+            }
         }
         if(uint32_t(now-closeStarted_) >= 3000) Stop();
         else enet_host_flush(host_);
@@ -647,7 +712,8 @@ void Session::Poll() {
     BoundReliableRetries();
     ENetEvent e;
     // Bound work per logic tick; malformed peers cannot monopolize the game loop.
-    for (int count = 0; count < 64; ++count) {
+    // Con un HostTransport il socket è suo: gli eventi arrivano da HandleEvent.
+    for (int count = 0; ownsHost_ && count < 64; ++count) {
         const int serviced = enet_host_service(host_, &e, 0);
         if(serviced < 0) {
 #ifdef _WIN32
@@ -663,10 +729,20 @@ void Session::Poll() {
             break;
         }
         if(!serviced) break;
+        HandleEvent(e);
+        if (e.type == ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(e.packet);
+        if (!host_) return;
+    }
+    Maintain(now);
+}
+void Session::HandleEvent(const ENetEvent& e) {
+    if (!host_) return;
+    if (closing_) { if (e.type == ENET_EVENT_TYPE_DISCONNECT && e.peer == peer_) Stop(); return; }
+    const uint32_t now = enet_time_get();
         if (e.type == ENET_EVENT_TYPE_CONNECT) {
             partnerLeftVoluntarily_ = false;
             char address[64] = {}; enet_address_get_host_ip(&e.peer->address, address, sizeof(address)); remoteAddress_ = address; remoteReady_ = false;
-            peer_ = e.peer; ready_ = hasInput_ = hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; started_ = enet_time_get();
+            peer_ = e.peer; ready_ = hasInput_ = hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; started_ = enet_time_get(); inputQueue_.Clear(); sentInputs_.clear();
             loading_ = false; worldAppliedEpoch_ = mapReadyAt_ = 0;
             entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
@@ -674,7 +750,7 @@ void Session::Poll() {
             // BulkReady regulates the large reliable stream. RTT spikes during
             // loading/ACK bursts must not make ENet discard every player pose.
             enet_peer_throttle_configure(peer_, ENET_PEER_PACKET_THROTTLE_INTERVAL, ENET_PEER_PACKET_THROTTLE_SCALE, 0);
-            if (role_ == Role::Host && e.data != ProtocolVersion) { Reject("incompatible connect version"); continue; }
+            if (role_ == Role::Host && e.data != ProtocolVersion) { Reject("incompatible connect version"); return; }
             lastPacket_ = now;
             log_("[NET/CONNECTION] Peer connected; UDP payload cap=" + std::to_string(peer_->mtu) + " bytes");
                         if(role_ == Role::Client) {
@@ -683,10 +759,9 @@ void Session::Poll() {
             }
         } else if (e.type == ENET_EVENT_TYPE_RECEIVE) {
             if (e.peer == peer_) { lastPacket_ = now; Receive(e.packet->data, e.packet->dataLength, e.channelID); }
-            enet_packet_destroy(e.packet);
         } else if (e.type == ENET_EVENT_TYPE_DISCONNECT && e.peer == peer_) {
             partnerLeftVoluntarily_ = e.data == VoluntaryDisconnectReason;
-            peer_ = nullptr; ready_ = hasInput_ = false;
+            peer_ = nullptr; ready_ = hasInput_ = false; inputQueue_.Clear(); sentInputs_.clear();
             log_("[NET/CONNECTION] Peer disconnected or timed out; remote reason=" + std::to_string(e.data) +
                 "; last received application packet age=" + std::to_string(uint32_t(now - lastPacket_)) + " ms");
             hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
@@ -694,7 +769,8 @@ void Session::Poll() {
             entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
             presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
         }
-    }
+}
+void Session::Maintain(uint32_t now) {
     // Service updates lastReceiveTime using its own newer clock. Refresh before
     // subtracting ages so a fresh ACK cannot underflow into a false long stall.
     now = enet_time_get();
@@ -743,12 +819,26 @@ void Session::Poll() {
             " udp_sent_packets=" + std::to_string(host_->totalSentPackets) + " udp_received_packets=" + std::to_string(host_->totalReceivedPackets));
     }
 }
-bool Session::SendInput(const PlayerInput& input) { return role_ == Role::Client && ready_ && Send(EncodeInput(input), 1, false); }
+// Every packet repeats the newest commands of the current map, so a lost
+// datagram costs no command as long as one of the next five arrives.
+bool Session::SendInput(const PlayerInput& input) {
+    if (role_ != Role::Client || !ready_ || !ValidInput(input)) return false;
+    if (!sentInputs_.empty() && sentInputs_.back().epoch != input.epoch) sentInputs_.clear();
+    sentInputs_.push_back(input);
+    while (sentInputs_.size() > MaxInputBatch) sentInputs_.pop_front();
+    return Send(EncodeInputBatch(std::vector<PlayerInput>(sentInputs_.begin(), sentInputs_.end())), 1, false);
+}
 bool Session::ReadInput(PlayerInput& input) const {
     if (!ready_ || !hasInput_ || uint32_t(enet_time_get() - lastInput_) > 250) return false;
     input = input_; return true;
 }
+bool Session::NextInput(PlayerInput& input, bool& repeated) {
+    repeated = false;
+    if (!ready_ || !hasInput_ || uint32_t(enet_time_get() - lastInput_) > 250) return false;
+    return inputQueue_.Next(input, repeated);
+}
 uint32_t Session::Ping() const { return peer_ && ready_ ? peer_->roundTripTime : 0; }
+uint32_t Session::PingVariance() const { return peer_ && ready_ ? peer_->roundTripTimeVariance : 0; }
 void Session::SetLobbyReady(bool ready) {
     localReady_ = ready;
     if(!ready_) return;
@@ -787,7 +877,7 @@ bool Session::SendMap(const MapState& map) {
     if(role_ != Role::Host || !ready_) return false;
     BeginMapLoad();
     if(!Send(EncodeMap(map),0,true)) return false;
-    map_ = map; hasMap_ = true; readyEpoch_ = worldAppliedEpoch_ = 0; hasInput_ = false; actions_.clear(); return true;
+    map_ = map; hasMap_ = true; readyEpoch_ = worldAppliedEpoch_ = 0; hasInput_ = false; actions_.clear(); inputQueue_.Clear(); sentInputs_.clear(); return true;
 }
 bool Session::ReadMap(MapState& map) const { if (!ready_ || !hasMap_) return false; map = map_; return true; }
 bool Session::SendMapReady(uint32_t epoch) {
@@ -819,7 +909,7 @@ bool Session::ReadEntity(EntityState& e) {
     return true;
 }
 bool Session::SendAction(const ActionRequest& a) {
-    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 8 || a.item.size() > 128 || a.secondItem.size() > 128 || std::abs(int(a.lookYaw))>31420 || std::abs(int(a.lookPitch))>31420) return false;
+    if(role_ != Role::Client || !ready_ || !hasMap_ || a.epoch != map_.epoch || uint8_t(a.action) < 1 || uint8_t(a.action) > 9 || a.item.size() > 128 || a.secondItem.size() > 128 || std::abs(int(a.lookYaw))>31420 || std::abs(int(a.lookPitch))>31420) return false;
     auto out = Header(Message::Action); U32(out, a.epoch); U32(out, a.sequence); out.push_back(uint8_t(a.action)); out.push_back(a.pressed ? 1 : 0);
     String(out, a.item); String(out, a.secondItem);
     U16(out,uint16_t(a.lookYaw)); U16(out,uint16_t(a.lookPitch));

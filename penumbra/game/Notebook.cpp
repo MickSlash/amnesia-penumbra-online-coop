@@ -17,6 +17,7 @@
  * along with Penumbra Overture.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "Notebook.h"
+#include "CoopNetwork.h"
 
 #include "Init.h"
 #include "Player.h"
@@ -573,7 +574,9 @@ void cNotebookState_NoteList::OnDraw()
 		if(pNote->mfAlpha < 1)
 		{
 			float fAlpha = 0.9f*mpNotebook->GetAlpha()*(1-pNote->mfAlpha);
-			mpTextFont->Draw(vTextPos,mvSize,cColor(0,fAlpha),eFontAlign_Left,pNote->msName.c_str());
+			// Co-op: le note ancora da leggere (trovate da un compagno) in rosso.
+			const bool bUnread = !pNote->mbRead && mpInit->mpCoop && mpInit->mpCoop->IsOnline();
+			mpTextFont->Draw(vTextPos,mvSize,bUnread ? cColor(0.55f,0.05f,0.05f,fAlpha) : cColor(0,fAlpha),eFontAlign_Left,pNote->msName.c_str());
 		}
 
 		if(pNote->mfAlpha > 0)
@@ -716,6 +719,9 @@ void cNotebookState_Note::OnEnterState(int alLastState)
 {
 	mpNotebook->SetBookType(eNotebookType_Open);
 	cNotebook_Note *pNote = mpNotebook->GetSelectedNote();
+	// Diario personale: la nota aperta è letta da chi gioca su questo PC.
+	pNote->mbRead = true;
+	if(mpInit->mpCoop) mpInit->mpCoop->NoteOpened(pNote);
 	
 	mvRows.clear();
 	mvPages.clear();

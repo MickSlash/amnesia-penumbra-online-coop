@@ -256,6 +256,9 @@ namespace hpl {
 
 		//GL
 		Log(" Setting up OpenGL\n");
+		// Driver in uso, utile per i problemi di una sola marca di schede.
+		Log("  GL vendor: %s\n  GL renderer: %s\n  GL version: %s\n",
+			(const char*)glGetString(GL_VENDOR),(const char*)glGetString(GL_RENDERER),(const char*)glGetString(GL_VERSION));
 		SetupGL();
 
 		//Set the clear color
@@ -916,6 +919,14 @@ namespace hpl {
 	}
 	void cLowLevelGraphicsSDL::SwapBuffers()
 	{
+		// Prove (PENUMBRA_COOP_FINAL_SCREENSHOT=file.bmp): il fotogramma finito,
+		// effetti e interfaccia compresi, quello che vede il giocatore, dopo
+		// PENUMBRA_COOP_DEBUG_FRAME fotogrammi (predefiniti 900).
+		static const char* sFinal = getenv("PENUMBRA_COOP_FINAL_SCREENSHOT");
+		static const int lFinalFrame = getenv("PENUMBRA_COOP_DEBUG_FRAME") ? atoi(getenv("PENUMBRA_COOP_DEBUG_FRAME")) : 900;
+		static int lFrame = 0;
+		if(sFinal && *sFinal && ++lFrame == lFinalFrame) SaveScreenToBMP(sFinal);
+
 		glFlush();
 		SDL_GL_SwapBuffers();
 	}

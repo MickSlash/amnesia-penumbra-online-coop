@@ -229,6 +229,12 @@ namespace hpl {
 		void SetCollideCharacter(bool abX){ mbCollideCharacter = abX;}
 		bool GetCollideCharacter(){ return mbCollideCharacter;}
 
+		// Character bodies sharing a non-zero group ignore each other in shape
+		// collisions (co-op players pass through each other but still collide
+		// with every other character). 0 = no group.
+		void SetCharacterGroup(int alX){ mlCharacterGroup = alX;}
+		int GetCharacterGroup(){ return mlCharacterGroup;}
+
 		void SetCharacterBody(iCharacterBody *apCharBody){ mpCharacterBody = apCharBody;}
 		iCharacterBody* GetCharacterBody(){ return mpCharacterBody;}
 
@@ -308,6 +314,7 @@ namespace hpl {
 		bool mbBlocksSound;
 		bool mbBlocksLight;
 		bool mbIsCharacter;
+		int mlCharacterGroup;
 		bool mbCollideCharacter;
 		bool mbIsRagDoll;
 		bool mbCollideRagDoll;

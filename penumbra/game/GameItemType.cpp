@@ -26,6 +26,7 @@
 #include "GameEntity.h"
 #include "GameMessageHandler.h"
 #include "Notebook.h"
+#include "CoopNetwork.h"
 #include "GameItem.h"
 
 #include "PlayerState_Weapon.h"
@@ -165,7 +166,8 @@ bool cGameItemType_Note::OnPickUp(cInventoryItem *apItem, bool abInGame)
 {
 	cNotebook_Note *pNote = mpInit->mpNotebook->AddNote(apItem->GetGameName(),"Notes",apItem->GetName());
 	
-	if(abInGame)
+	// Co-op: la nota entra nel diario di tutti, ma si apre solo a chi la raccoglie.
+	if(abInGame && (!mpInit->mpCoop || mpInit->mpCoop->NoteFound(pNote)))
 	{
 		mpInit->mpNotebook->SetActive(true);
 		mpInit->mpNotebook->SetSelectedNote(pNote);

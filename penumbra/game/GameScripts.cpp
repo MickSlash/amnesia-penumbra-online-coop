@@ -40,6 +40,7 @@
 #include "GameMessageHandler.h"
 #include "RadioHandler.h"
 #include "Inventory.h"
+#include "CoopNetwork.h"
 #include "Notebook.h"
 #include "NumericalPanel.h"
 #include "FadeHandler.h"
@@ -777,7 +778,9 @@ static bool __stdcall HasItem(std::string asName)
 {
 	//if(cString::ToLowerCase(asName)=="notebook") return gpInit->mpInventory->GetNoteBookActive();
 
-	return gpInit->mpInventory->GetItem(asName) != NULL;
+	if(gpInit->mpInventory->GetItem(asName) != NULL) return true;
+	//Co-op: the scripts check doors and conditions without knowing who plays.
+	return gpInit->mpCoop && gpInit->mpCoop->PartyHasItem(asName);
 }
 SCRIPT_DEFINE_FUNC_1(bool,HasItem,string)
 
@@ -787,6 +790,10 @@ static void __stdcall RemoveItem(std::string asName)
 	if(pItem)
 	{
 		gpInit->mpInventory->RemoveItem(pItem);
+	}
+	else if(gpInit->mpCoop && gpInit->mpCoop->PartyRemoveItem(asName))
+	{
+		//Co-op: the item was in a partner's inventory.
 	}
 	else
 	{

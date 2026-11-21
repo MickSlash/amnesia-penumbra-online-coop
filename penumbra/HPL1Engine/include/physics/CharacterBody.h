@@ -198,6 +198,28 @@ namespace hpl {
 		void SetFeetPosition(const cVector3f& avPos, bool abSmooth=false);
 		// Network XZ corrections preserve gravity, jump velocity and queued forces.
 		void SetNetworkHorizontalPosition(float x, float z);
+
+		// Network prediction: the client replays its unacknowledged commands with
+		// this same movement code (collisions, sliding, step climbing). While
+		// predicting, Update changes only the movement state below: no callbacks,
+		// pushes, camera, entity, attachment or waking of nearby bodies. Save the
+		// state before a replay and restore it afterwards.
+		struct tPredictionState
+		{
+			cVector3f mvPosition, mvLastPosition, mvVelocity, mvForce;
+			float mfMoveSpeed[2];
+			bool mbMoving[2];
+			float mfYaw, mfCheckStepClimbCount;
+			bool mbOnGround, mbClimbing;
+		};
+		tPredictionState GetPredictionState();
+		void SetPredictionState(const tPredictionState& aState);
+		void SetPredicting(bool abX){ mbPredicting = abX; }
+
+		// See iPhysicsBody::SetCharacterGroup; applied to every size body.
+		void SetCharacterGroup(int alX);
+		int GetCharacterGroup(){ return mlCharacterGroup; }
+		bool IsPredicting(){ return mbPredicting; }
 		cVector3f GetFeetPosition();
 
 		void SetYaw(float afX);
@@ -408,6 +430,8 @@ namespace hpl {
 		bool mbAccurateClimbing;
 
 		bool mbEnableNearbyBodies;
+		bool mbPredicting;
+		int mlCharacterGroup;
 
 		iPhysicsBody* mpBody;
 		iPhysicsWorld *mpWorld;

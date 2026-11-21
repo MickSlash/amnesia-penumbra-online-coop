@@ -344,6 +344,20 @@ public:
 	int mlCoopVersion = 0;
     cPlayer_GlobalSave mPlayer2;
     tString msHostWeapon,msClientWeapon;
+    // Co-op a 3-4 giocatori: ospiti con ID 3 e 4, salvati se presenti.
+    // Assenti nei salvataggi precedenti: il caricamento li lascia a false.
+    bool mbPlayer3 = false, mbPlayer4 = false;
+    cPlayer_GlobalSave mPlayer3, mPlayer4;
+    tString msPlayer3Weapon, msPlayer4Weapon;
+    // Inventario per giocatore: quelli degli ospiti 2..4. Assenti nei
+    // salvataggi precedenti (mbCoopInventories false): gli ospiti ricevono
+    // allora gli oggetti di gruppo dell'host.
+    bool mbCoopInventories = false;
+    cInventory_GlobalSave mInventory2, mInventory3, mInventory4;
+    // Note del diario già lette dagli ospiti 2..4, una chiave per riga.
+    // Assenti nei salvataggi precedenti: le note già trovate sono lette.
+    bool mbCoopNotesRead = false;
+    tString msNotesRead2, msNotesRead3, msNotesRead4;
     cPlayer_GlobalSave mPlayer;
 	cMapHandler_GlobalSave mMapHandler;
 	cInventory_GlobalSave mInventory;

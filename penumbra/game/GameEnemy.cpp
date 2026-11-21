@@ -1372,15 +1372,19 @@ void iGameEnemy::UpdateCheckForPlayer(float afTimeStep)
 
 // Each candidate retains its own visibility counter; a wall or a dead partner
 // must not donate visibility accumulated for the other player.
-void iGameEnemy::SelectNetworkTarget(cPlayer* first,cPlayer* second,float dt)
+void iGameEnemy::SelectNetworkTarget(const std::vector<cPlayer*>& players,float dt)
 {
     networkCheck-=dt;
-    if(networkCheck>0 && networkTarget && !networkTarget->IsDead()) return;
+    // Un bersaglio uscito dalla partita (ospite disconnesso, corpo tolto dal
+    // mondo) va sostituito subito: gli stati del nemico leggono il suo corpo.
+    bool targetPresent=false;
+    for(auto* p:players) if(p && p==networkTarget && p->GetCharacterBody()) targetPresent=true;
+    if(networkCheck>0 && targetPresent && !networkTarget->IsDead()) return;
     networkCheck=mfCheckForPlayerRate;
-    cPlayer* players[2]={first,second};
-    cPlayer* selected=nullptr; float best=1e30f; float selectedChance=0;
+    const int count=int(std::min<size_t>(players.size(),4));
+    cPlayer* selected=nullptr; float best=1e30f; float selectedChance=0; int selectedId=0;
     cPlayer* original=mpInit->mpPlayer;
-    for(int n=0;n<2;++n) {
+    for(int n=0;n<count;++n) {
         cPlayer* p=players[n];
         if(!p || !p->GetCharacterBody() || p->IsDead() || !p->IsActive()) { networkLOS[n]=0; continue; }
         mpInit->mpPlayer=p;
@@ -1402,7 +1406,7 @@ void iGameEnemy::SelectNetworkTarget(cPlayer* first,cPlayer* second,float dt)
         networkLOS[n]=relentless && seen?mlMaxPlayerInLOSCount:seen?std::min(mlMaxPlayerInLOSCount,networkLOS[n]+1):std::max(0,networkLOS[n]-1);
         const float score=distance*(p==networkTarget?.65f:1.0f);
         if(seen && networkLOS[n]>=mlMaxPlayerInLOSCount && score<best) {
-            selected=p; best=score; selectedChance=std::max(0.0f,1-distance/mfMaxSeeDist);
+            selected=p; best=score; selectedChance=std::max(0.0f,1-distance/mfMaxSeeDist); selectedId=n+1;
         }
         mfFOV=oldFOV; mfMaxSeeDist=oldDistance;
     }
@@ -1411,8 +1415,13 @@ void iGameEnemy::SelectNetworkTarget(cPlayer* first,cPlayer* second,float dt)
     cPlayer* previous=networkTarget;
     mbCanSeePlayer=selected!=nullptr;
     if(selected) networkTarget=selected;
-    if(!networkTarget || networkTarget->IsDead() || (networkTarget!=first && networkTarget!=second)) {
-        networkTarget=first && !first->IsDead()?first:second && !second->IsDead()?second:first;
+    bool present=false;
+    for(int n=0;n<count;++n) if(players[n] && players[n]==networkTarget) present=true;
+    if(!networkTarget || networkTarget->IsDead() || !present) {
+        // Il primo giocatore vivo in partita, altrimenti l'host.
+        cPlayer* fallback=count?players[0]:nullptr;
+        for(int n=count-1;n>=0;--n) if(players[n] && !players[n]->IsDead()) fallback=players[n];
+        networkTarget=fallback;
     }
     for(auto* state:mvStates) if(state) state->SetNetworkPlayer(networkTarget);
     if(selected) {
@@ -1422,7 +1431,7 @@ void iGameEnemy::SelectNetworkTarget(cPlayer* first,cPlayer* second,float dt)
             if(mlCurrentState>=0) mvStates[mlCurrentState]->OnSeePlayer(selected->GetCharacterBody()->GetPosition(),selectedChance);
             selected->GetHidden()->UnHide();
             mpInit->mpPlayer=original;
-            Log("[COOP/ENEMY] %s acquired player=%d\n",GetName().c_str(),selected==second?2:1);
+            Log("[COOP/ENEMY] %s acquired player=%d\n",GetName().c_str(),selectedId);
         }
     }
 }

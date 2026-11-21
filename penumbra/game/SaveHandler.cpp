@@ -178,6 +178,17 @@ void cSavedGame::ResetGlobalData()
 	mInventory.mlstItems.Clear();
 	mInventory.mlstSlots.Clear();
 	mInventory.mvEquipSlots.Clear();
+	// Co-op: anche gli inventari degli ospiti, altrimenti ogni salvataggio o
+	// caricamento accoda oggetti e slot alle copie precedenti.
+	for(cInventory_GlobalSave *pInv : {&mInventory2, &mInventory3, &mInventory4})
+	{
+		pInv->mlstItems.Clear();
+		pInv->mlstSlots.Clear();
+		pInv->mvEquipSlots.Clear();
+	}
+	mbCoopInventories = false;
+	mbCoopNotesRead = false;
+	msNotesRead2.clear(); msNotesRead3.clear(); msNotesRead4.clear();
 
 	mNotebook.mlstNotes.Clear();
 	mNotebook.mlstTasks.Clear();
@@ -561,7 +572,7 @@ void cSaveHandler::SaveGameToFile(const tWString& asFile)
         Error("[COOP/SAVE] Could not replace checkpoint, Windows error=%lu\n",GetLastError()); return;
     }
     lastOperationOK=true;
-    Log("[COOP/SAVE] Saved campaign map=%s players=%d\n",mpSavedGame->mMapHandler.msCurrentMap.c_str(),mpSavedGame->mlCoopVersion?2:1);
+    Log("[COOP/SAVE] Saved campaign map=%s players=%d\n",mpSavedGame->mMapHandler.msCurrentMap.c_str(),mpSavedGame->mlCoopVersion?2+int(mpSavedGame->mbPlayer3)+int(mpSavedGame->mbPlayer4):1);
 }
 
 //-----------------------------------------------------------------------
@@ -583,7 +594,8 @@ void cSaveHandler::LoadGameFromFile(const tWString& asFile)
     };
     if(name.empty() || name.find("..")!=tString::npos || name.find(':')!=tString::npos || name.find('/')!=tString::npos || name.find('\\')!=tString::npos ||
        !FileExists(cString::To16Char("maps/"+name+".dae")) || !validPlayer(loaded->mPlayer) ||
-       (mpInit->mpCoop && mpInit->mpCoop->IsHost() && (loaded->mlCoopVersion!=1 || !validPlayer(loaded->mPlayer2)))) {
+       (mpInit->mpCoop && mpInit->mpCoop->IsHost() && (loaded->mlCoopVersion!=1 || !validPlayer(loaded->mPlayer2) ||
+        (loaded->mbPlayer3 && !validPlayer(loaded->mPlayer3)) || (loaded->mbPlayer4 && !validPlayer(loaded->mPlayer4))))) {
         Error("[COOP/SAVE] Incompatible or invalid cooperative save\n"); return;
     }
 	///////////////////////////////
@@ -679,7 +691,7 @@ void cSaveHandler::LoadGameFromFile(const tWString& asFile)
 	//Quick fix, make sure player is always active:
 	mpInit->mpPlayer->SetActive(true);
     lastOperationOK=true;
-    Log("[COOP/SAVE] Restored campaign map=%s players=%d\n",mpSavedGame->mMapHandler.msCurrentMap.c_str(),mpSavedGame->mlCoopVersion?2:1);
+    Log("[COOP/SAVE] Restored campaign map=%s players=%d\n",mpSavedGame->mMapHandler.msCurrentMap.c_str(),mpSavedGame->mlCoopVersion?2+int(mpSavedGame->mbPlayer3)+int(mpSavedGame->mbPlayer4):1);
 }
 
 //-----------------------------------------------------------------------
@@ -1071,6 +1083,20 @@ kSerializeVar(mlCoopVersion,eSerializeType_Int32)
 kSerializeVar(mPlayer2,eSerializeType_Class)
 kSerializeVar(msHostWeapon,eSerializeType_String)
 kSerializeVar(msClientWeapon,eSerializeType_String)
+kSerializeVar(mbPlayer3,eSerializeType_Bool)
+kSerializeVar(mbPlayer4,eSerializeType_Bool)
+kSerializeVar(mPlayer3,eSerializeType_Class)
+kSerializeVar(mPlayer4,eSerializeType_Class)
+kSerializeVar(msPlayer3Weapon,eSerializeType_String)
+kSerializeVar(msPlayer4Weapon,eSerializeType_String)
+kSerializeVar(mbCoopInventories,eSerializeType_Bool)
+kSerializeVar(mInventory2,eSerializeType_Class)
+kSerializeVar(mInventory3,eSerializeType_Class)
+kSerializeVar(mInventory4,eSerializeType_Class)
+kSerializeVar(mbCoopNotesRead,eSerializeType_Bool)
+kSerializeVar(msNotesRead2,eSerializeType_String)
+kSerializeVar(msNotesRead3,eSerializeType_String)
+kSerializeVar(msNotesRead4,eSerializeType_String)
 kSerializeVar(mPlayer,eSerializeType_Class)
 kSerializeVar(mMapHandler,eSerializeType_Class)
 kSerializeVar(mInventory,eSerializeType_Class)

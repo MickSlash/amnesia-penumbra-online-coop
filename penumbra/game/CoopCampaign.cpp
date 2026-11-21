@@ -53,8 +53,8 @@ void cCoopNetwork::RunCampaignQA(float dt) {
         const bool items=init->mpInventory->GetItem("hammer") && local->GetState()==ePlayerState_WeaponMelee && local->GetFlashLight()->IsActive();
         const bool otherOK=IsClient() || (remotePlayer->GetHealth()>=42.9f && remotePlayer->GetHealth()<58 && std::abs(remotePlayer->GetPower()-61)<1.5f && remotePlayer->GetState()==ePlayerState_WeaponMelee && remotePlayer->GetFlashLight()->IsActive());
         const bool ok=worldOK && selfOK && items && otherOK && task && (IsClient() || (progress && progress->mlVal==31415));
-        Log("[COOP/QA] Saved state role=%s world=%d self=%d items=%d partner=%d notebook=%d health=%.2f power=%.2f epoch=%u\n",IsHost()?"host":"client",worldOK,selfOK,items,otherOK,task,local->GetHealth(),local->GetPower(),map.epoch);
-        Log("[COOP/QA] Equipment role=%s state=%d lamp=%d partner_state=%d partner_lamp=%d tool=%d flags=%d\n",IsHost()?"host":"client",int(local->GetState()),local->GetFlashLight()->IsActive(),remotePlayer?int(remotePlayer->GetState()):-1,remotePlayer?remotePlayer->GetFlashLight()->IsActive():0,latest.players[1].tinderboxes,latest.players[1].flags); return ok;
+        Log("[COOP/QA] Saved state role=%s world=%d self=%d items=%d partner=%d notebook=%d health=%.2f power=%.2f epoch=%u\n",IsHost()?"host":"client",worldOK,selfOK,items,otherOK,task,local->GetHealth(),local->GetPower(),g->map.epoch);
+        Log("[COOP/QA] Equipment role=%s state=%d lamp=%d partner_state=%d partner_lamp=%d tool=%d flags=%d\n",IsHost()?"host":"client",int(local->GetState()),local->GetFlashLight()->IsActive(),remotePlayer?int(remotePlayer->GetState()):-1,remotePlayer?remotePlayer->GetFlashLight()->IsActive():0,g->latest.players[1].tinderboxes,g->latest.players[1].flags); return ok;
     };
     if(resume) {
         if(campaignTime>3 && campaignStage==0) { qaLoaded=savedState(); campaignStage=1; }
@@ -65,7 +65,7 @@ void cCoopNetwork::RunCampaignQA(float dt) {
     }
     if(IsClient()) {
         if(local->GetHealth()<95 && !local->IsDead()) qaClientAttacked=true;
-        if(latest.players[0].health<9500 && !(latest.players[0].flags&8)) qaHostAttacked=true;
+        if(g->latest.players[0].health<9500 && !(g->latest.players[0].flags&8)) qaHostAttacked=true;
         auto* dog=enemy("CoopQA_DogClient");
         if(dog && dog->GetMeshEntity()->GetAnimationStateNum()>0 && dog->GetHealth()>0) {
             for(int n=0;n<dog->GetMeshEntity()->GetAnimationStateNum();++n) {
@@ -73,8 +73,15 @@ void cCoopNetwork::RunCampaignQA(float dt) {
             }
         }
         if(local->IsDead()) qaRespawned=true;
-        if(campaignTime>85 && campaignStage==0 && Ready()) { qaLoaded=savedState(); campaignStage=1; }
-        if(campaignTime>90) {
+        // Tempi agganciati al primo ricaricamento del checkpoint (nuova epoca),
+        // non all'avvio: la durata delle fasi dell'host varia. Dopo ~9 s l'host
+        // fa morire tutti e ricarica di nuovo nella stessa epoca; il controllo
+        // segue quello, e il client resta connesso per il controllo finale
+        // dell'host (~21 s dopo il ricaricamento).
+        if(!qaStartEpoch) qaStartEpoch=g->map.epoch;
+        if(g->map.epoch>qaStartEpoch) qaReloadWait+=dt;
+        if(campaignStage==0 && Ready() && qaReloadWait>15) { qaLoaded=savedState(); campaignStage=1; }
+        if(qaReloadWait>28 || campaignTime>140) {
             const bool ok=qaClientAttacked && qaHostAttacked && qaEnemySeen && qaRespawned && qaLoaded;
             Log("[COOP/QA] %s enemy replica, both damaged, death and checkpoint baseline role=client\n",ok?"PASS":"FAIL"); init->mpGame->Exit();
         }
@@ -127,9 +134,13 @@ void cCoopNetwork::RunCampaignQA(float dt) {
         remotePlayer->GetCharacterBody()->SetFeetPosition(cVector3f(0,.3f,2.3f));
         spawnEnemy("CoopQA_Spider","character_spider.ent"); campaignStage=5;
     }
+    // Il morso si registra durante l'attacco, come per i cani: se il ragno
+    // uccide il client prima della fine della fase passa giustamente
+    // all'host, e un controllo solo finale lo darebbe per mancato.
+    if(campaignStage==5) { auto* spider=enemy("CoopQA_Spider"); qaSpiderHit=qaSpiderHit || (spider && spider->GetNetworkTarget()==remotePlayer && remotePlayer->GetHealth()<99); }
     if(campaignStage==5 && campaignTime>43) {
         auto* spider=enemy("CoopQA_Spider");
-        const bool hit=spider && spider->GetNetworkTarget()==remotePlayer && remotePlayer->GetHealth()<99;
+        const bool hit=qaSpiderHit;
         qaClientAttacked=qaClientAttacked && hit;
         Log("[COOP/QA] Native spider attacked client=%d health=%.2f\n",hit,remotePlayer->GetHealth());
         if(spider) spider->SetActive(false);

@@ -401,6 +401,8 @@ namespace hpl {
 			if(pBody->IsCharacter() && abCollideCharacter==false) continue;
 			if(pBody->IsActive()==false)continue;
 			if(pBody == apSkipBody) continue;
+			if(apSkipBody && pBody->IsCharacter() && apSkipBody->GetCharacterGroup()!=0 &&
+				pBody->GetCharacterGroup()==apSkipBody->GetCharacterGroup()) continue;
 			if(abSkipStatic && pBody->GetMass()==0) continue;
 			if(abIsCharacter && pBody->GetCollideCharacter()==false) continue;
 			if(abIsCharacter==false && pBody->GetCollide()==false) continue;

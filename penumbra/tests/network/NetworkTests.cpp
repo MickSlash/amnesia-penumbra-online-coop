@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../../game/network/NetSession.h"
+#include "../../game/network/HostTransport.h"
 #include "../../game/network/Prediction.h"
+#include "../../game/network/Interpolation.h"
 #include "../../game/network/ScriptPreloads.h"
 #include <chrono>
 #include <iostream>
 #include <thread>
 #include <cstdlib>
 #include <enet/enet.h>
+#include <mmsystem.h>
 using namespace online;
 static void Check(bool ok, const char* message) {
     if (!ok) { std::cerr << "FAIL: " << message << '\n'; std::exit(1); }
@@ -503,10 +506,11 @@ static void RecoveryTests() {
     JournalState journal; journal.epoch = 7; journal.revision = 42;
     for(unsigned i = 0; i < 5; ++i) {
         JournalEntry e; e.kind = uint8_t(i%3); e.name = "quest"; e.group = "Daniel"; e.nameEntry = "name";
-        e.textEntry = "text"; e.icon = "graphics/note_icon.tga"; e.active = i != 2; journal.entries.push_back(e);
+        e.textEntry = "text"; e.icon = "graphics/note_icon.tga"; e.active = i != 2; e.read = i == 3; journal.entries.push_back(e);
     }
     auto bytes = EncodeJournal(journal); JournalState restored;
     Check(DecodeJournal(bytes.data(),bytes.size(),restored) && restored.entries.size() == 5 && !restored.entries[2].active, "full journal chronology and completed quest roundtrip");
+    Check(restored.entries[3].read && restored.entries[3].active && !restored.entries[0].read && !restored.entries[2].read, "journal read flag per recipient roundtrip");
     for(size_t i = 0; i < bytes.size(); ++i) Check(!DecodeJournal(bytes.data(),i,restored), "journal truncation");
     journal.entries[0].image = "../secret"; Check(EncodeJournal(journal).empty(), "journal traversal rejected"); journal.entries[0].image.clear();
     StressCodec(journal,EncodeJournal,DecodeJournal);
@@ -544,6 +548,10 @@ static void RecoveryTests() {
     Check(position.x>0 && position.x<0.04f && smooth.CorrectionDistance()>0, "small authoritative correction eases instead of snapping");
     for(int i=0;i<60;++i) position=smooth.ReconcileSmoothed(corrected,0,2,1.0f/60,free);
     Check(std::fabs(position.x-0.04f)<0.001f, "correction converges without permanent drift");
+    { MovementPrediction half; PlayerState pose; pose.forwardMax=pose.sideMax=3000; pose.acceleration=pose.deceleration=30000;
+      half.ReconcileSmoothed(pose,0,1,1.0f/60,free); pose.x=500;
+      auto shown=half.ReconcileSmoothed(pose,0,2,1.0f/60,free);
+      Check(shown.x>0.01f && shown.x<0.25f && half.CorrectionDistance()>0, "a half-metre misprediction is eased, not snapped (teleports are announced)"); }
     smooth.Push(input,1.0f/60); position=smooth.ReconcileSmoothed(corrected,0,2,1.0f/60,free);
     Check(position.z<-0.007f, "new local input remains immediate during correction smoothing");
     corrected.x=2000; position=smooth.ReconcileSmoothed(corrected,1,3,1.0f/60,free);
@@ -632,10 +640,233 @@ static void PropMotionTransportTest() {
     Check(!client.ReadEntity(read) && !host.SendEntityMotion(box), "prop motion discarded across map transition");
     std::cout << "PASS: live prop coalescing, reliable backpressure bypass, stale pose rejection, removal, articulated fragments and sequence wrap\n";
 }
+static void InputBatchCodecTest() {
+    PlayerInput a, b; a.epoch = b.epoch = 9; a.sequence = 41; b.sequence = 42;
+    a.forward = 1000; a.strafe = -1000; a.yaw = -3142; a.pitch = 1571; a.buttons = 5; a.lookYaw = -31420; a.lookPitch = 7;
+    b.forward = -250; b.lookYaw = 12;
+    auto bytes = EncodeInputBatch({a, b}); std::vector<PlayerInput> read;
+    Check(bytes.size() == 10 + 2*17 && DecodeInputBatch(bytes.data(), bytes.size(), read) && read.size() == 2 &&
+        read[0].sequence == 41 && read[0].strafe == -1000 && read[0].yaw == -3142 && read[0].buttons == 5 && read[0].lookYaw == -31420 &&
+        read[1].sequence == 42 && read[1].forward == -250 && read[1].lookYaw == 12 && read[1].epoch == 9, "input batch roundtrip");
+    for(size_t n = 0; n < bytes.size(); ++n) Check(!DecodeInputBatch(bytes.data(), n, read), "truncated input batch");
+    bytes.push_back(0); Check(!DecodeInputBatch(bytes.data(), bytes.size(), read), "input batch trailing byte"); bytes.pop_back();
+    bytes[9] = 0; Check(!DecodeInputBatch(bytes.data(), bytes.size(), read), "empty input batch"); bytes[9] = 2;
+    bytes[10 + 12] = 64; Check(!DecodeInputBatch(bytes.data(), bytes.size(), read), "input batch buttons bounded");
+    Check(EncodeInputBatch({}).empty() && EncodeInputBatch(std::vector<PlayerInput>(MaxInputBatch + 1, a)).empty(), "input batch size bounded");
+    b.epoch = 10; Check(EncodeInputBatch({a, b}).empty(), "input batch never mixes map epochs"); b.epoch = 9;
+    b.forward = 1001; Check(EncodeInputBatch({a, b}).empty(), "input batch axes bounded"); b.forward = -250;
+    StressCodec(std::vector<PlayerInput>{a, b}, EncodeInputBatch, DecodeInputBatch);
+    std::cout << "PASS: bounded redundant input batch codec\n";
+}
+static void InputQueueTest() {
+    InputQueue queue; PlayerInput command, out; bool repeated = false;
+    Check(!queue.Next(out, repeated), "no command before the first arrival");
+    for(uint32_t s = 1; s <= 3; ++s) { command.sequence = s; command.lookYaw = int16_t(10*s); Check(queue.Offer(command), "queue accepts newer command"); }
+    command.sequence = 2; Check(!queue.Offer(command), "queue ignores redundant copies");
+    for(uint32_t s = 1; s <= 3; ++s) Check(queue.Next(out, repeated) && !repeated && out.sequence == s && out.lookYaw == int16_t(10*s), "one command per tick, in order");
+    Check(queue.Next(out, repeated) && repeated && out.sequence == 3 && out.lookYaw == 0, "dry queue repeats without look delta");
+    Check(queue.Target() == 2, "starvation raises the jitter buffer");
+    command.sequence = 4; command.lookYaw = 0; queue.Offer(command);
+    Check(queue.Next(out, repeated) && repeated, "refilling waits for the target depth");
+    command.sequence = 5; queue.Offer(command);
+    Check(queue.Next(out, repeated) && !repeated && out.sequence == 4, "buffered commands resume in order");
+    command.sequence = 8; queue.Offer(command);
+    auto stats = queue.TakeStats();
+    Check(stats.lost == 2 && stats.starvations == 1 && stats.repeated == 2 && stats.consumed == 4, "queue statistics");
+    for(uint32_t s = 9; s <= 20; ++s) { command.sequence = s; command.lookYaw = 1; command.buttons = s == 10 ? 1 : 0; queue.Offer(command); }
+    Check(queue.Next(out, repeated) && !repeated && out.sequence == 5, "a moderate backlog is kept, not dropped");
+    Check(queue.CatchUp(out) && out.sequence == 8 && queue.TakeStats().caughtUp == 1, "backlog caught up with one extra command per tick");
+    command.buttons = 0;
+    for(uint32_t s = 21; s <= 60; ++s) { command.sequence = s; queue.Offer(command); }
+    Check(queue.Next(out, repeated) && !repeated && out.sequence == 29 && out.lookYaw == 21 && (out.buttons & 1), "a backlog beyond half a second is trimmed, merging look deltas and jumps");
+    Check(queue.TakeStats().dropped == 20 && queue.Depth() == 31, "trim keeps target plus the maximum backlog");
+    while(queue.CatchUp(out)) {}
+    Check(queue.Depth() == 4, "catch-up stops at target plus two");
+    for(unsigned i = 0; i < InputQueue::QuietTicksToShrink + 4; ++i) { command.sequence = 61 + i; queue.Offer(command); queue.Next(out, repeated); }
+    Check(queue.Target() == 1, "quiet ticks shrink the jitter buffer");
+    command.sequence = 500; Check(!queue.Offer(command), "past sequence rejected");
+    queue.Clear(); Check(!queue.Next(out, repeated) && queue.Target() == 1, "clear resets queue");
+    std::cout << "PASS: one command per tick input queue with adaptive jitter buffer\n";
+}
+static void NativeMovementPredictionTest() {
+    auto free = [](PredictedPosition, PredictedPosition to) { return to; };
+    MovementLimits limits; limits.forwardMax = limits.backwardMax = limits.sideMax = 3; limits.forwardAcc = limits.sideAcc = 30; limits.forwardDec = limits.sideDec = 30;
+    PlayerState state; state.forwardSpeed = state.sideSpeed = 3000;
+    MovementPrediction diagonal; PlayerInput input; input.forward = 1000; input.strafe = 1000;
+    for(uint32_t s = 1; s <= 30; ++s) { input.sequence = s; diagonal.Push(input, 1.0f/60); }
+    auto p = diagonal.Reconcile(state, 0, limits, free);
+    Check(std::fabs(std::sqrt(p.x*p.x + p.z*p.z) - 1.5f) < 0.01f, "diagonal steps are capped at the forward limit like iCharacterBody");
+    MovementPrediction analog; PlayerState still; input.strafe = 0; input.forward = 500;
+    for(uint32_t s = 1; s <= 30; ++s) { input.sequence = s; analog.Push(input, 1.0f/60); }
+    p = analog.Reconcile(still, 0, limits, free);
+    Check(p.z < -1.2f, "a partial input scales acceleration, not the speed limit");
+    MovementPrediction crouched; PlayerState low; low.flags = 4 | 1; input.forward = 1000; input.buttons = 2;
+    input.sequence = 1; crouched.Push(input, 1.0f/60);
+    p = crouched.Reconcile(low, 0, limits, free);
+    Check(p.z < 0 && crouched.Pending() == 1, "crouched movement keeps predicting with the crouch limits");
+    input.buttons = 1; input.sequence = 2; crouched.Push(input, 1.0f/60);
+    p = crouched.Reconcile(low, 0, limits, free);
+    Check(!crouched.LastReplayTruncated() && p.z < -0.012f, "a jump does not stop the horizontal replay");
+    std::cout << "PASS: prediction replays native character movement\n";
+}
+static void HeldStateCodecTest() {
+    Snapshot snapshot; snapshot.epoch = 3; snapshot.players[0].heldEntity = 99; snapshot.players[0].heldMode = uint8_t(HeldMode::Grab);
+    auto bytes = EncodeSnapshot(snapshot); Snapshot read;
+    Check(bytes.size() == SnapshotBytes(2) && DecodeSnapshot(bytes.data(), bytes.size(), read) && read.players[0].heldEntity == 99 && read.players[0].heldMode == 1, "held object roundtrip");
+    snapshot.players[0].heldMode = 4; Check(EncodeSnapshot(snapshot).empty(), "unknown held mode rejected");
+    snapshot.players[0].heldMode = 0; Check(EncodeSnapshot(snapshot).empty(), "held entity without a mode rejected");
+    snapshot.players[0].heldEntity = 0; Check(!EncodeSnapshot(snapshot).empty(), "nothing held is valid");
+    StressCodec(snapshot, EncodeSnapshot, DecodeSnapshot);
+    std::cout << "PASS: held object state codec\n";
+}
+static void InterpolationTest() {
+    JitterDelay delay; Check(delay.Delay() == JitterDelay::MinDelay, "no arrivals: minimum delay");
+    for(uint32_t t = 0; t < 60; ++t) delay.Arrival(1000 + t, t);
+    Check(delay.Delay() == JitterDelay::MinDelay, "steady arrival keeps the minimum delay");
+    delay.Arrival(1066, 60); delay.Arrival(1066, 61); delay.Arrival(1066, 62);
+    Check(std::fabs(delay.Delay() - (6 + JitterDelay::Margin)) < 0.001, "a burst raises the delay to the measured spread");
+    for(uint32_t t = 63; t < 300; ++t) delay.Arrival(1004 + t, t);
+    Check(delay.Delay() == JitterDelay::MinDelay, "the delay shrinks once the burst leaves the window");
+    PlaybackClock clock; Check(!clock.Valid(), "clock starts invalid");
+    Check(clock.Advance(100, 4) == 96, "first advance snaps behind the newest pose");
+    Check(std::fabs(clock.Advance(101, 4) - 97) < 0.001, "one host tick per client tick");
+    for(int i = 0; i < 10; ++i) clock.Advance(101, 4);
+    Check(clock.Tick() <= 101.0, "the clock never passes the newest pose");
+    Check(clock.Advance(500, 4) == 496, "a large jump snaps");
+    PoseHistory<float, 4> history; const float *from = nullptr, *to = nullptr; float alpha = 0;
+    Check(!history.Sample(0, from, to, alpha), "empty history has no sample");
+    history.Add(10, 1.0f); history.Add(12, 3.0f); Check(!history.Add(11, 9.0f) && !history.Add(12, 9.0f), "older or duplicate ticks ignored");
+    Check(history.Sample(11, from, to, alpha) && *from == 1.0f && *to == 3.0f && std::fabs(alpha - 0.5f) < 0.001f, "interpolate between the samples around the tick");
+    Check(history.Sample(5, from, to, alpha) && *from == 1.0f && *to == 1.0f, "before the oldest sample holds it");
+    Check(history.Sample(20, from, to, alpha) && *from == 3.0f && *to == 3.0f && alpha == 1, "after the newest sample holds it: no extrapolation");
+    for(uint32_t t = 13; t < 20; ++t) history.Add(t, float(t));
+    Check(history.NewestTick() == 19 && history.Sample(11, from, to, alpha) && *from == 16.0f, "history keeps the newest samples only");
+    Check(std::fabs(LerpAngle(3.0f, -3.0f, 0.5f) - 3.1416f) < 0.01f || std::fabs(LerpAngle(3.0f, -3.0f, 0.5f) + 3.1416f) < 0.01f, "angles blend across the wrap");
+    std::cout << "PASS: host-timeline playback clock, adaptive delay and pose history\n";
+}
+static void BunchedInputTransportTest() {
+    Session host(Log), client(Log);
+    Check(host.StartHost(27058) && client.StartClient("127.0.0.1", 27058), "bunched input startup");
+    auto pump = [&](int ms) { for(int i = 0; i < ms; ++i) { host.Poll(); client.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    pump(100); Check(host.Connected() && client.Connected(), "bunched input handshake");
+    PlayerInput input; input.forward = 1000;
+    for(uint32_t s = 1; s <= 3; ++s) { input.sequence = s; input.lookYaw = int16_t(100*s); Check(client.SendInput(input), "send bunched command"); }
+    pump(20);
+    PlayerInput next; bool repeated = false;
+    for(uint32_t s = 1; s <= 3; ++s)
+        Check(host.NextInput(next, repeated) && !repeated && next.sequence == s && next.lookYaw == int16_t(100*s), "commands sent together are each simulated once, in order");
+    Check(host.NextInput(next, repeated) && repeated && next.sequence == 3, "host repeats the last command while waiting");
+    pump(300); Check(!host.NextInput(next, repeated), "silent input still expires");
+    client.Stop(); host.Stop();
+    std::cout << "PASS: redundant input batches over UDP\n";
+}
+// Protocollo 7: ID dei giocatori negli snapshot e assegnazione con Welcome.
+static void PlayerSlotTest() {
+    Snapshot four; four.epoch = 2; four.playerCount = 4;
+    four.players[1].id = 3; four.players[2].id = 2; four.players[3].id = 4; four.players[3].x = 4321;
+    auto bytes = EncodeSnapshot(four); Snapshot read;
+    Check(bytes.size() == SnapshotBytes(4) && DecodeSnapshot(bytes.data(), bytes.size(), read) && read.playerCount == 4 &&
+        read.players[1].id == 3 && read.players[2].id == 2 && read.players[3].id == 4 && read.players[3].x == 4321, "four players roundtrip");
+    for(size_t n = 0; n < bytes.size(); ++n) Check(!DecodeSnapshot(bytes.data(), n, read), "truncated four-player snapshot");
+    StressCodec(four, EncodeSnapshot, DecodeSnapshot);
+    Snapshot three = four; three.playerCount = 3; bytes = EncodeSnapshot(three);
+    Check(bytes.size() == SnapshotBytes(3) && DecodeSnapshot(bytes.data(), bytes.size(), read) && read.playerCount == 3, "three players roundtrip");
+    bytes[21] = 4; Check(!DecodeSnapshot(bytes.data(), bytes.size(), read), "player count must match the size");
+    Snapshot bad = four; bad.players[2].id = 3; Check(EncodeSnapshot(bad).empty(), "duplicate player ID rejected");
+    bad = four; bad.players[0].id = 2; bad.players[2].id = 1; Check(EncodeSnapshot(bad).empty(), "host must come first");
+    bad = four; bad.players[3].id = 5; Check(EncodeSnapshot(bad).empty(), "player ID beyond the maximum rejected");
+    bad = four; bad.playerCount = 1; Check(EncodeSnapshot(bad).empty(), "a snapshot names host and recipient");
+    bad = four; bad.playerCount = 5; Check(EncodeSnapshot(bad).empty(), "at most four players");
+    Session host(Log), client(Log);
+    Check(host.SetGuestPlayerId(3) && !host.SetGuestPlayerId(1) && !host.SetGuestPlayerId(5), "guest ID range");
+    Check(host.StartHost(27059) && client.StartClient("127.0.0.1", 27059), "slot startup");
+    Check(!host.SetGuestPlayerId(4), "guest ID fixed while running");
+    auto pump = [&](int ms) { for(int i = 0; i < ms; ++i) { host.Poll(); client.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    pump(100); Check(host.Connected() && client.Connected() && client.GuestPlayerId() == 3, "Welcome assigns the slot");
+    MapState map; map.epoch = 5; map.fingerprint = 1; map.file = "maps/test.dae";
+    Check(host.SendMap(map), "slot map"); pump(20); Check(client.SendMapReady(5), "slot map ready"); pump(20);
+    Snapshot addressed; addressed.epoch = 5; addressed.sequence = 1; addressed.playerCount = 3;
+    addressed.players[1].id = 3; addressed.players[2].id = 2; addressed.players[2].x = 777;
+    Check(host.SendSnapshot(addressed), "addressed snapshot"); pump(20);
+    Check(client.ReadSnapshot(read) && read.players[1].id == 3 && read.players[2].x == 777, "guest reads its own slot and the others");
+    Snapshot wrong = addressed; wrong.sequence = 2; wrong.players[1].id = 2; wrong.players[2].id = 3;
+    Check(host.SendSnapshot(wrong), "misaddressed snapshot sent"); pump(50);
+    Check(!client.Connected(), "a snapshot addressed to another guest is rejected");
+    client.Stop(); host.Stop();
+    std::cout << "PASS: player IDs and slot assignment\n";
+}
+// Un socket host, tre Session ospite: ID distinti, traffico separato per
+// ospite, quarto rifiutato, slot riusato dopo un'uscita volontaria, stessa
+// identità che torna nel proprio slot.
+static void MultiGuestTransportTest() {
+    Session a(Log), b(Log), c(Log);
+    HostTransport transport(Log);
+    Check(transport.Start(27060, {&a, &b, &c}), "transport startup");
+    Session g1(Log), g2(Log), g3(Log), g4(Log);
+    Check(g1.SetLocalIdentity(0x1111) && g2.SetLocalIdentity(0x2222) && g3.SetLocalIdentity(0x3333) && g4.SetLocalIdentity(0x4444), "guest identities");
+    std::vector<Session*> clients = {&g1, &g2, &g3, &g4};
+    auto pump = [&](int ms) { for(int i = 0; i < ms; ++i) { transport.Poll(); for(auto* s : clients) s->Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); } };
+    Check(g1.StartClient("127.0.0.1", 27060), "guest 1 start"); pump(150);
+    Check(g2.StartClient("127.0.0.1", 27060), "guest 2 start"); pump(150);
+    Check(g3.StartClient("127.0.0.1", 27060), "guest 3 start"); pump(150);
+    Check(transport.ConnectedGuests() == 3 && g1.Connected() && g2.Connected() && g3.Connected(), "three guests connected");
+    Check(g1.GuestPlayerId() == 2 && g2.GuestPlayerId() == 3 && g3.GuestPlayerId() == 4, "slots assigned in order");
+    Check(a.GuestPlayerId() == 2 && b.GuestPlayerId() == 3 && c.GuestPlayerId() == 4 && a.Connected() && b.Connected() && c.Connected(), "host sessions own one guest each");
+    Check(g4.StartClient("127.0.0.1", 27060), "guest 4 start"); pump(300);
+    Check(!g4.Connected() && transport.ConnectedGuests() == 3, "a fourth guest is rejected");
+    // Traffico per ospite: ogni Session riceve solo i comandi del suo peer.
+    PlayerInput input; input.forward = 1000;
+    input.sequence = 1; input.lookYaw = 200; Check(g1.SendInput(input), "guest 1 input");
+    input.sequence = 1; input.lookYaw = 300; Check(g2.SendInput(input), "guest 2 input");
+    input.sequence = 1; input.lookYaw = 400; Check(g3.SendInput(input), "guest 3 input");
+    pump(30);
+    PlayerInput read;
+    Check(a.ReadInput(read) && read.lookYaw == 200 && b.ReadInput(read) && read.lookYaw == 300 && c.ReadInput(read) && read.lookYaw == 400, "inputs reach their own session");
+    MapState map; map.epoch = 9; map.fingerprint = 1; map.file = "maps/test.dae";
+    Check(a.SendMap(map) && b.SendMap(map) && c.SendMap(map), "map to every guest"); pump(30);
+    Check(g1.SendMapReady(9) && g2.SendMapReady(9) && g3.SendMapReady(9), "every guest ready"); pump(30);
+    Check(a.IsMapReady(9) && b.IsMapReady(9) && c.IsMapReady(9), "readiness per guest");
+    for(auto* s : {&a, &b, &c}) {
+        Snapshot snapshot; snapshot.epoch = 9; snapshot.sequence = 1; snapshot.playerCount = 4;
+        snapshot.players[1].id = s->GuestPlayerId();
+        uint8_t next = 2; for(size_t i = 2; i < 4; ++i) { if(next == s->GuestPlayerId()) ++next; snapshot.players[i].id = next++; }
+        snapshot.players[1].x = 1000 * s->GuestPlayerId();
+        Check(s->SendSnapshot(snapshot), "addressed snapshot per guest");
+    }
+    pump(30);
+    Snapshot state;
+    Check(g1.ReadSnapshot(state) && state.players[1].x == 2000 && g2.ReadSnapshot(state) && state.players[1].x == 3000 &&
+        g3.ReadSnapshot(state) && state.players[1].x == 4000 && state.playerCount == 4, "each guest sees its own pose");
+    // Uscita volontaria: lo slot si libera per un nuovo ospite.
+    g2.CloseVoluntarily(); pump(200);
+    Check(!b.Connected() && b.PartnerLeftVoluntarily() && transport.ConnectedGuests() == 2, "voluntary leave frees the slot");
+    Check(g4.StartClient("127.0.0.1", 27060), "guest 4 retry"); pump(200);
+    Check(g4.Connected() && g4.GuestPlayerId() == 3 && b.Connected() && b.ExpectedIdentity() == 0x4444, "a new guest takes the freed slot");
+    // Caduta senza uscita: lo stesso ospite torna nel suo slot.
+    g3.SuspendTransportForTest(); pump(50);
+    Check(g3.StartClient("127.0.0.1", 27060, true), "guest 3 reconnect"); pump(300);
+    Check(g3.Connected() && g3.GuestPlayerId() == 4 && c.Connected() && transport.ConnectedGuests() == 3, "same identity returns to its slot");
+    for(auto* s : clients) s->Stop();
+    transport.Stop();
+    std::cout << "PASS: one host socket, three guest sessions, slot reuse and reconnection\n";
+}
 int main(int argc, char** argv) {
+    // ENet chiede il timer a 1 ms a ogni enet_initialize e lo rilascia a ogni
+    // enet_deinitialize. Dopo molti avvii e arresti nello stesso processo
+    // Windows può lasciare Sleep a 15,6 ms e i comandi scadono (250 ms) nei
+    // test con pause di 20 ms. Una richiesta per tutta l'esecuzione lo evita.
+    timeBeginPeriod(1);
+    if(argc == 1) MultiGuestTransportTest();
     if(argc == 1) PropMotionTransportTest();
+    if(argc == 1) BunchedInputTransportTest();
+    if(argc == 1) PlayerSlotTest();
     ScriptPreloadTest();
     MediaCodecTest();
+    InputBatchCodecTest();
+    InputQueueTest();
+    InterpolationTest();
+    HeldStateCodecTest();
+    NativeMovementPredictionTest();
     PlayerInput input; input.sequence = 0x12345678; input.tick = 42;
     input.forward = -1000; input.strafe = 500; input.yaw = -3141; input.pitch = 1570; input.buttons = 15;
     input.lookYaw = -1234; input.lookPitch = 31420;
@@ -651,7 +882,9 @@ int main(int argc, char** argv) {
     input.lookYaw = 31421; Check(EncodeInput(input).empty(), "raw look bounded"); input.lookYaw = 0;
     Snapshot snapshot; snapshot.epoch = 1; snapshot.sequence = 17; snapshot.players[0].x = -54321;
     auto stateBytes = EncodeSnapshot(snapshot); Snapshot stateRead;
-    Check(stateBytes.size() == 123 && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) &&
+    snapshot.hostTick = 0xfedcba98u; snapshot.players[1].heldEntity = 0x01020304u; snapshot.players[1].heldBody = 7; snapshot.players[1].heldMode = uint8_t(HeldMode::Move); snapshot.players[1].teleport = 201;
+    stateBytes = EncodeSnapshot(snapshot);
+    Check(stateBytes.size() == SnapshotBytes(2) && DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead) && stateRead.hostTick == 0xfedcba98u && stateRead.players[1].heldEntity == 0x01020304u && stateRead.players[1].heldBody == 7 && stateRead.players[1].heldMode == 2 && stateRead.players[1].teleport == 201 &&
         stateRead.players[0].x == -54321 && stateRead.sequence == 17, "signed snapshot roundtrip");
     for(size_t n = 0; n < stateBytes.size(); ++n) Check(!DecodeSnapshot(stateBytes.data(), n, stateRead), "truncated snapshot");
     stateBytes.push_back(0); Check(!DecodeSnapshot(stateBytes.data(), stateBytes.size(), stateRead), "snapshot trailing byte");
@@ -688,7 +921,7 @@ int main(int argc, char** argv) {
     for(size_t n = 0; n < entityBytes.size(); ++n) Check(!DecodeEntity(entityBytes.data(), n, entityRead), "truncated entity");
     entity.health=-1; Check(EncodeEntity(entity).empty(),"negative enemy health rejected"); entity.health=74250;
     entity.enemyState=13; Check(EncodeEntity(entity).empty(),"unknown enemy state rejected"); entity.enemyState=2;
-    entity.target=3; Check(EncodeEntity(entity).empty(),"unknown enemy target rejected"); entity.target=2;
+    entity.target=4; Check(!EncodeEntity(entity).empty(),"enemy targets any of four players"); entity.target=5; Check(EncodeEntity(entity).empty(),"unknown enemy target rejected"); entity.target=2;
     entityBytes.push_back(0); Check(!DecodeEntity(entityBytes.data(), entityBytes.size(), entityRead), "entity trailing byte");
     entity.file = "../secret.ent"; Check(EncodeEntity(entity).empty(), "entity asset traversal rejected");
     entity.file = "entities/box.ent"; entity.bodies.resize(33); Check(EncodeEntity(entity).empty(), "entity body count bounded");
@@ -709,7 +942,7 @@ int main(int argc, char** argv) {
     for(size_t n = 0; n < storyBytes.size(); ++n) Check(!DecodePresentation(storyBytes.data(), n, storyRead), "truncated story event");
     storyBytes.push_back(0); Check(!DecodePresentation(storyBytes.data(), storyBytes.size(), storyRead), "story trailing byte");
     story.text[0] = "../secret.ogg"; Check(EncodePresentation(story).empty(), "story asset traversal rejected");
-    story.text[0] = "voice/test.ogg"; story.target = 3; Check(EncodePresentation(story).empty(), "story recipient bounded");
+    story.text[0] = "voice/test.ogg"; story.target = 5; Check(EncodePresentation(story).empty(), "story recipient bounded");
     story.target = 0; story.kind = PresentationKind(99); Check(EncodePresentation(story).empty(), "story kind bounded");
     story.kind = PresentationKind::Message; story.text[0] = std::string(4097, 'x'); Check(EncodePresentation(story).empty(), "story text bounded");
     story = Presentation(); story.epoch = 1; story.kind = PresentationKind::Hint; story.text[0] = "Diary"; story.text[1] = std::string(4096, 'x');

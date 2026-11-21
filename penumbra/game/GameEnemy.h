@@ -286,7 +286,8 @@ public:
 	
 	//AI
 	bool CanSeePlayer();
-    void SelectNetworkTarget(cPlayer* first,cPlayer* second,float dt);
+    // Co-op: `players` per ID di rete meno uno (0 = host); nullptr = non in partita.
+    void SelectNetworkTarget(const std::vector<cPlayer*>& players,float dt);
     cPlayer* GetNetworkTarget() const { return networkTarget; }
     void ApplyNetworkState(float health,int state);
 	cCharacterMove* GetMover(){ return mpMover;}
@@ -363,7 +364,7 @@ protected:
 
 	cPlayer* networkTarget = nullptr;
     float networkCheck = 0;
-    int networkLOS[2] = {};
+    int networkLOS[4] = {};
     bool mbSetFeetAtGroundOnStart;
 	bool mbAttachMeshToBody;
 	bool mbRemoveAttackerOnDisable;

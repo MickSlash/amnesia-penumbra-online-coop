@@ -16,6 +16,7 @@ public sealed class CoopLauncher : Form {
     readonly CheckBox fullscreen = new CheckBox();
     readonly CheckBox useSteam = new CheckBox();
     readonly CheckBox resume = new CheckBox();
+    readonly NumericUpDown players = new NumericUpDown();
     readonly string state = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"PenumbraOnlineCoop");
     public CoopLauncher() {
         Text="Penumbra: Overture — Co-op sperimentale"; ClientSize=new Size(690,369); Font=new Font("Segoe UI",10);
@@ -31,8 +32,11 @@ public sealed class CoopLauncher : Form {
         fullscreen.Text="Schermo intero"; fullscreen.SetBounds(465,122,205,28); Controls.Add(fullscreen);
         useSteam.Text="Usa Steam: mostra Penumbra: Overture in esecuzione"; useSteam.SetBounds(20,166,650,28); Controls.Add(useSteam);
         folder.TextChanged+=delegate { useSteam.Checked=SteamInstallation(folder.Text); };
-        resume.Text="Host: riprendi l\x27ultimo checkpoint cooperativo"; resume.SetBounds(20,202,650,28); Controls.Add(resume);
-        Controls.Add(new Label { Text="Due giocatori, nemici e salvataggio autorevoli sull\x27host.\r\nPrototipo: avatar provvisorio e campagna da validare.", Location=new Point(20,239), Size=new Size(650,52) });
+        resume.Text="Host: riprendi l\x27ultimo checkpoint cooperativo"; resume.SetBounds(20,202,420,28); Controls.Add(resume);
+        // Giocatori in totale, host compreso: lo sceglie solo l'host.
+        Controls.Add(new Label { Text="Giocatori (host)", Location=new Point(465,205), AutoSize=true });
+        players.SetBounds(600,202,70,28); players.Minimum=2; players.Maximum=4; players.Value=2; Controls.Add(players);
+        Controls.Add(new Label { Text="Da 2 a 4 giocatori, nemici e salvataggio autorevoli sull\x27host.\r\nPrototipo: avatar provvisorio, inventario comune, campagna da validare.", Location=new Point(20,239), Size=new Size(650,52) });
         var host=new Button { Text="Ospita partita", Location=new Point(20,313), Size=new Size(205,36) };
         var join=new Button { Text="Connettiti all'host", Location=new Point(240,313), Size=new Size(220,36) };
         var logs=new Button { Text="Apri log della mod", Location=new Point(475,313), Size=new Size(195,36) };
@@ -42,6 +46,8 @@ public sealed class CoopLauncher : Form {
         var saved=Path.Combine(state,"game-folder.txt"); if(File.Exists(saved)) folder.Text=File.ReadAllText(saved).Trim();
         if(!Valid(folder.Text)) folder.Text=Discover();
         var preference=Path.Combine(state,"use-steam.txt"); if(File.Exists(preference)) useSteam.Checked=File.ReadAllText(preference).Trim()=="1";
+        var count=Path.Combine(state,"players.txt"); int savedPlayers;
+        if(File.Exists(count) && Int32.TryParse(File.ReadAllText(count).Trim(),out savedPlayers) && savedPlayers>=2 && savedPlayers<=4) players.Value=savedPlayers;
     }
     public static string DataDirectory(string path) {
         if(String.IsNullOrWhiteSpace(path)) return "";
@@ -115,6 +121,10 @@ public sealed class CoopLauncher : Form {
             foreach(string key in launch.EnvironmentVariables.Keys) if(key.StartsWith("PENUMBRA_COOP_",StringComparison.OrdinalIgnoreCase)) keys.Add(key);
             foreach(string key in keys) launch.EnvironmentVariables.Remove(key);
             launch.EnvironmentVariables["PENUMBRA_COOP_ROLE"]=role;
+            if(role=="host") {
+                launch.EnvironmentVariables["PENUMBRA_COOP_PLAYERS"]=players.Value.ToString();
+                File.WriteAllText(Path.Combine(state,"players.txt"),players.Value.ToString(),Encoding.UTF8);
+            }
             if(role=="host" && resume.Checked) {
                 var checkpoint=Path.Combine(state,"host","PenumbraOnlineCoop","Overture","save","coop_checkpoint.sav");
                 if(!File.Exists(checkpoint)) throw new IOException("Non esiste ancora un checkpoint co-op su questo PC. Avvia una nuova partita e salva dal menu.");
