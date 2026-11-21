@@ -102,6 +102,7 @@ void cGameItemType_Normal::OnUse(cInventoryItem *apItem, iGameEntity* apEntity)
 		if(bUsed==false)
 		{
 			tString sEntry = "CannotUseItem" + cString::ToString(cMath::RandRectl(1,5));
+			cCoopNetwork::PersonalMessage personal(mpInit->mpCoop);
 			mpInit->mpGameMessageHandler->Add(kTranslate("Inventory", sEntry));
 		}
 	}

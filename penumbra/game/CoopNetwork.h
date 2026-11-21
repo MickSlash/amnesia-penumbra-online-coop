@@ -62,6 +62,14 @@ public:
     bool RemoteSimpleSwing() const { auto* guest=GuestFor(init->mpPlayer); return guest && guest->simpleSwing; }
     bool RemoteExamineDown() const { auto* guest=GuestFor(init->mpPlayer); return guest && guest->examineDown; }
     bool RelayMessage(const hpl::tWString& text);
+    // Messaggi personali (descrizione di un oggetto esaminato, "non puoi usarlo"):
+    // li vede solo chi li ha provocati, non tutto il gruppo come i pensieri.
+    struct PersonalMessage {
+        cCoopNetwork* coop;
+        explicit PersonalMessage(cCoopNetwork* c) : coop(c) { if(coop) coop->personalMessage=true; }
+        ~PersonalMessage() { if(coop) coop->personalMessage=false; }
+    };
+    bool personalMessage = false;
     void RelayFade(bool fadeOut, float seconds);
     void RelayGuiSound(const std::string& file, float volume);
     void OnStart(hpl::cSoundEntity* sound);
@@ -297,6 +305,7 @@ private:
     uint8_t qaScreenshots = 0;
     float lookYaw = 0, lookPitch = 0;
     bool interactHeld = false;
+    bool interactForMessage = false, examineForMessage = false; // client: clic che ha chiuso un messaggio
     hpl::cMatrixf qaDoorMatrix;
     bool qaDoorMoved = false, qaDoorGrabbed = false;
     CoopSteam steam;
