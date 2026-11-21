@@ -898,3 +898,27 @@ questo PC (AMD RX 9060 XT), client sul secondo PC (Intel HD 4400, monitor
 - Il cambio di compagno da spettatore con 3-4 giocatori.
 - L'importazione delle impostazioni dal launcher.
 - Una partita completa.
+
+
+## 22. Mano del client e postura del compagno (21 novembre)
+
+Due bug segnalati dalla seconda partita reale.
+
+| Bug | Causa | Correzione | Verifica |
+| --- | --- | --- | --- |
+| Sul client non compare la mano per afferrare gli oggetti | Sul client i corpi replicati stanno a massa 0 (li muove l'host). `iGameEntity::GetPickCrossHairState` mostra la mano solo per corpi con massa | `CoopPickMass`: il client ricorda la massa originale dei corpi replicati e la usa per mirino e scelta dell'oggetto (`GameEntity.cpp`, `PlayerHelper.cpp`) | `full`: il client punta la bottiglia (massa 0, originale 1,5) e il mirino è "Active" |
+| L'host vede il client abbassato anche quando è in piedi o salta | Il client invia la postura come stato, ma l'host la applicava come pressione del tasto. Con "Accovacciati a interruttore", attivo di norma, il rilascio non faceva nulla. Un salto o un messaggio a schermo rendevano gli stati ancora più diversi. Inoltre sull'host il controllo dello spazio sopra la testa vede oggetti leggeri appesi, come la lampada della cabina, che sul client non bloccano | L'host applica lo stato a ogni comando, così si riallinea da solo. Il client invia la postura anche con un messaggio a schermo. Sull'host un ospite remoto si rialza senza ripetere il controllo già fatto dal client (`PlayerMoveStates.h`) | `full`: il client si abbassa e si rialza; l'host lo segue in entrambi i casi, con l'interruttore attivo |
+
+**Note:**
+- Il primo tentativo di prova cadeva in una finestra in cui la prova `full`
+  ignora apposta i comandi del client (host ai secondi 4-6, 15-18 e 24-26).
+  Per questo la prova della postura è stata spostata dopo il diario, sulla
+  seconda mappa.
+- In cabina, sotto la lampada, un log diagnostico ha mostrato che sull'host
+  l'alzarsi era bloccato da `parrafinlight_joint2/3`.
+- **Suite su un PC, tutte PASS e senza crash dump:** `full`, `intro`, `hammer`,
+  `campaign`, `resume`, `party` a 3 e 4 giocatori, `maps` e `ctest`.
+- **Su due PC via Radmin:** `full` (mano e postura comprese) e `campaign`
+  PASS.
+- **Non verificato:** la postura sotto la lampada della cabina, provata solo
+  con il log diagnostico; una partita giocata a mano.
