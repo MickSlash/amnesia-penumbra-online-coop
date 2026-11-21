@@ -215,6 +215,16 @@ private:
     void ApplyMedia(const online::MediaState& state);
     void PublishEnvironment();
     void UpdateLife(float dt);
+    // Spettatore: chi è a terra guarda dagli occhi di un compagno vivo
+    // (clic: compagno successivo) finché non torna in vita. Solo telecamera
+    // locale: nessun effetto su fisica, nemici o progressione.
+    void UpdateSpectator(float dt);
+    void StopSpectating(cPlayer* me);
+    bool spectating = false;
+    uint8_t spectatorTarget = 0;
+    hpl::cVector3f spectatorPos;
+    float spectatorYaw = 0, spectatorPitch = 0, spectatorTime = 0;
+    bool spectatorFollowLogged = false;
     void PublishJournal();
     void RunCampaignQA(float dt);
     void RunMapsQA(float dt);

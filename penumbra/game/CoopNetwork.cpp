@@ -822,6 +822,66 @@ void cCoopNetwork::PublishJournal() {
         Log("[NET/JOURNAL] Cannot encode journal entries=%u; the client cannot finish loading\n",unsigned(next.entries.size()));
     if(bytes!=g->journalBytes) { next.revision=g->journalRevision+1; if(g->session.SendJournal(next)) { g->journalBytes=bytes; g->journalRevision=next.revision; } }
 }
+void cCoopNetwork::StopSpectating(cPlayer* me) {
+    spectating=false;
+    if(me && me->GetCharacterBody()) {
+        me->GetCharacterBody()->SetCamera(me->GetCamera());
+        me->GetCamera()->SetPosition(me->GetCharacterBody()->GetFeetPosition()+cVector3f(0,me->GetSize().y+me->GetCameraHeightAdd(),0));
+    }
+    Log("[COOP/SPECTATOR] Stop role=%s\n",IsHost()?"host":"client");
+}
+void cCoopNetwork::UpdateSpectator(float dt) {
+    cPlayer* me=IsHost()?hostPlayer:init->mpPlayer;
+    const bool down=me && me->GetCharacterBody() && me->IsDead() && Ready();
+    // Compagni vivi: occhi, direzione dello sguardo e ID.
+    struct Target { uint8_t id; cVector3f eye; float yaw, pitch; };
+    std::vector<Target> targets;
+    if(down && IsHost()) {
+        for(auto& guest:guests) {
+            auto* p=guest->player;
+            if(!p || !p->GetCharacterBody() || p->IsDead() || !guest->session.Connected() || !guest->session.IsWorldApplied(guest->map.epoch)) continue;
+            targets.push_back({guest->session.GuestPlayerId(),p->GetCamera()->GetPosition(),p->GetCamera()->GetYaw(),p->GetCamera()->GetPitch()});
+        }
+    } else if(down) {
+        const float eyeHeight=me->GetSize().y+me->GetCameraHeightAdd();
+        for(uint8_t n=0;n<g->latest.playerCount && n<online::MaxPlayers;++n) {
+            if(n==1) continue; // il giocatore di questo PC
+            const auto& s=g->latest.players[n];
+            if(!s.id || (s.flags&8) || !(s.flags&4)) continue;
+            targets.push_back({s.id,cVector3f(s.x/1000.0f,s.y/1000.0f+eyeHeight,s.z/1000.0f),s.yaw/1000.0f,s.pitch/1000.0f});
+        }
+    }
+    if(targets.empty()) { if(spectating) StopSpectating(me); return; }
+    size_t index=0;
+    for(size_t n=0;n<targets.size();++n) if(targets[n].id==spectatorTarget) index=n;
+    // Clic (Interagisci): compagno successivo.
+    if(spectating && targets.size()>1 && init->mpGame->GetInput()->BecameTriggerd("Interact")) {
+        index=(index+1)%targets.size();
+        Log("[COOP/SPECTATOR] Next target=%u\n",unsigned(targets[index].id));
+    }
+    const Target& t=targets[index];
+    auto* camera=me->GetCamera();
+    if(!spectating) {
+        spectating=true; spectatorTime=0; spectatorFollowLogged=false;
+        me->GetCharacterBody()->SetCamera(nullptr); // la telecamera non segue più il corpo a terra
+        spectatorPos=camera->GetPosition(); spectatorYaw=camera->GetYaw(); spectatorPitch=camera->GetPitch();
+        init->mpEffectHandler->GetSubTitle()->Add(cString::To16Char(ItalianGame(init)?"Sei a terra: guardi un compagno (clic: cambia compagno)":"You are down: watching a partner (click: next partner)"),4,false);
+        Log("[COOP/SPECTATOR] Start role=%s target=%u targets=%u\n",IsHost()?"host":"client",unsigned(t.id),unsigned(targets.size()));
+    }
+    spectatorTarget=t.id; spectatorTime+=dt;
+    // Inseguimento morbido: niente scatti né tremolii dagli aggiornamenti di rete.
+    const float k=1.0f-std::exp(-dt*10.0f);
+    spectatorPos+= (t.eye-spectatorPos)*k;
+    float dYaw=t.yaw-spectatorYaw;
+    while(dYaw>kPif) dYaw-=k2Pif;
+    while(dYaw<-kPif) dYaw+=k2Pif;
+    spectatorYaw+=dYaw*k; spectatorPitch+=(t.pitch-spectatorPitch)*k;
+    camera->SetPosition(spectatorPos); camera->SetYaw(spectatorYaw); camera->SetPitch(spectatorPitch); camera->SetRoll(0);
+    if(!spectatorFollowLogged && spectatorTime>1.5f) {
+        spectatorFollowLogged=true;
+        Log("[COOP/SPECTATOR] Following role=%s target=%u distance=%.3f\n",IsHost()?"host":"client",unsigned(t.id),(spectatorPos-t.eye).Length());
+    }
+}
 void cCoopNetwork::WeaponHit(const std::string& entity,float health) {
     if(!IsHost()) return;
     worldDirty=true;
@@ -935,6 +995,7 @@ void cCoopNetwork::Update(float dt) {
     (IsHost()?g->diag.clock:clientDiag.clock).Tick(Milliseconds());
     InjectQAHitch();
     if(IsHost()) UpdateHost(dt); else UpdateClient(dt);
+    UpdateSpectator(dt);
     ReportDiagnostics();
     const auto elapsed=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-perfStart).count());
     perfSum+=elapsed; perfMax=std::max(perfMax,elapsed); ++perfSamples; perfTime+=dt;
