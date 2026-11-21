@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(PenumbraOnlineCoop VERSION 0.6 LANGUAGES C CXX)
+project(PenumbraOnlineCoop VERSION 0.6.1 LANGUAGES C CXX)
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR "This verified build currently requires Windows and MSVC.")
 endif()
