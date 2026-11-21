@@ -13,7 +13,7 @@ their own movement predicted locally so it does not feel laggy.
 | Folder | Game | Engine | Status |
 | --- | --- | --- | --- |
 | [`amnesia/`](amnesia/README.md) | Amnesia: The Dark Descent | HPL2 (64-bit fork) | **Playable**, experimental |
-| [`penumbra/`](penumbra/README.md) | Penumbra: Overture | HPL1 | Experimental 0.5 |
+| [`penumbra/`](penumbra/README.md) | Penumbra: Overture | HPL1 | Experimental 0.6 |
 | [`bunker/`](bunker/README.md) | Amnesia: The Bunker | official add-on + bridge | Early work in progress, not playable yet |
 
 > **No game files are included.** Both players need their own legitimate copy of the
@@ -143,11 +143,14 @@ restarting**, and open an issue saying which map and what happened. Lines starti
 
 ## Penumbra: Overture
 
-Experimental co-op (version 0.5, protocol 8): 2 players, 3-4 players in testing.
+Experimental co-op (version 0.6, protocol 8): 2 players, 3-4 players in testing.
 - Each player has their own inventory, and items can be handed to the partner.
 - Diary: notes are shared, but each player opens and reads them on their own.
 - Host-authoritative enemies, death and respawn, co-op checkpoints.
 - Version 0.5 also fixes the white screen on Intel HD graphics.
+- Version 0.6 adds a spectator view for downed players and fixes the first real
+  two-PC test: closing the window, fullscreen and monitor resolutions, overlapping
+  messages, endless door creaks and doubled sounds on the client.
 - The automated tests also pass between two real PCs over Radmin VPN.
 
 It uses UDP port 27120. Download `PenumbraOnlineCoop-<version>.zip` from the Releases page; it

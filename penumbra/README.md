@@ -1,6 +1,25 @@
-# Penumbra: Overture — Online Co-op 0.5 sperimentale
+# Penumbra: Overture — Online Co-op 0.6 sperimentale
 
 Mod per **2 giocatori** su Windows; **3-4 giocatori** in prova (l'host li sceglie nel launcher; provati solo con più istanze sullo stesso PC). Richiede un'installazione originale di **Penumbra: Overture** su ogni PC. La campagna completa resta da validare.
+
+## Novità della 0.6
+
+Correzioni del primo test reale fra due PC e nuove funzioni:
+- **Spettatore:** chi è a terra guarda dagli occhi di un compagno vivo; il clic
+  passa al compagno successivo; alla rinascita si torna alla propria visuale.
+- **Uscita:** la X della finestra e Alt+F4 chiudono il gioco.
+- **Schermo intero e risoluzioni:** il launcher ricorda lo schermo intero (attivo
+  di norma) e al primo avvio importa le impostazioni del gioco originale; il menu
+  mostra le risoluzioni reali del monitor, anche ultrawide.
+- **Messaggi:** descrizioni degli oggetti e messaggi dell'inventario compaiono solo
+  a chi li provoca; il clic che chiude un pensiero non fa più afferrare oggetti
+  né chiude i messaggi dell'host.
+- **Audio del client:** niente più cigolii infiniti delle porte e niente suoni
+  doppi (nemici, urti, strisciamenti).
+- **Prestazioni:** il client non riposiziona più gli oggetti fermi.
+- **Log:** orario su ogni riga, sessione e ruolo all'avvio, log della partita
+  precedente conservato (`hpl.1.log`, `hpl.2.log`), FPS ogni 5 s. Guida in
+  [`docs/COOP_LOGS.md`](docs/COOP_LOGS.md).
 
 ## Novità della 0.5
 
@@ -28,7 +47,7 @@ Mod per **2 giocatori** su Windows; **3-4 giocatori** in prova (l'host li scegli
 1. Estrarre lo ZIP in una cartella separata e aprire **PenumbraCoopLauncher.exe**.
 2. Selezionare la cartella del gioco, per esempio `E:\Steam\steamapps\common\Penumbra Overture`. Il launcher trova anche `redist`.
 3. L'host sceglie quanti giocatori (2-4) e poi **Ospita partita**. Il client inserisce l'IP dell'host e sceglie **Connettiti all'host**. Porta predefinita: **UDP 27120**.
-4. Aggiornare entrambi alla stessa build (**0.5, protocollo 8**): le build precedenti non sono compatibili.
+4. Aggiornare entrambi alla stessa build (**0.6, protocollo 8**). La 0.5 usa lo stesso protocollo e si collega, ma senza le correzioni della 0.6; le build precedenti non sono compatibili.
 
 Per giocare non serve PowerShell. Non vengono sostituiti gli eseguibili originali. Il pacchetto non contiene mappe, texture, audio o DLL commerciali: usa quelle della propria installazione `redist`. Il runtime Visual C++ x86 (`msvcp140.dll`, `vcruntime140.dll`) è incluso in `bin`. Se manca OpenAL, installare quello fornito con il gioco.
 
