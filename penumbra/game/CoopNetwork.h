@@ -120,9 +120,20 @@ public:
     // Host: passa un oggetto (tutta la pila) da un giocatore a un altro, senza
     // far scattare le callback di raccolta.
     bool TransferItem(const std::string& name, cPlayer* from, cPlayer* to);
+    // Host: il compagno davanti a `giver` (entro 2 m, sulla linea di mira e
+    // più vicino di `pickedDistance`), a cui passare l'oggetto scelto.
+    cPlayer* ItemPartnerInFront(cPlayer* giver, float pickedDistance) const;
+    // Host: passa `item` da `giver` a `to` (vedi COOP_ARCHITECTURE.md,
+    // passare un oggetto). Vero se l'azione è stata gestita (anche rifiutata).
+    bool GiveItem(cPlayer* giver, cPlayer* to, cInventoryItem* item);
+    // Host: un ospite usa un oggetto del proprio inventario (azione del
+    // client); va chiamata dentro il suo PlayerScope.
+    void UseItemAction(cPlayer* player, const std::string& name);
     void Reset();
     cPlayerHands* HandsFor(const cPlayer* player) const;
 private:
+    // Sottotitolo per un solo giocatore (sull'host o inviato al suo client).
+    void PlayerHint(cPlayer* player, const std::string& text);
     // Silhouette di un altro giocatore, per ID: sull'host gli ospiti, sul
     // client l'host (e, dal passo 4, gli altri ospiti).
     struct AvatarView {

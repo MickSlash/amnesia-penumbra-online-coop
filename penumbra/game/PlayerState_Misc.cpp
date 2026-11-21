@@ -21,6 +21,7 @@
 
 #include "Init.h"
 #include "Player.h"
+#include "CoopNetwork.h"
 #include "EffectHandler.h"
 #include "GameLadder.h"
 
@@ -481,6 +482,20 @@ void cPlayerState_UseItem::OnStartInteract()
 	iPhysicsBody *pBody = mpPlayer->GetPickedBody();
 	iGameEntity *pEntity = NULL;
 	if(pBody) pEntity = (iGameEntity*)pBody->GetUserData();
+
+	//Co-op: an item used on a partner in front of the player is given to them.
+	if(mpInit->mpCoop && mpInit->mpCoop->IsHost() && mpPlayer->GetCurrentItem())
+	{
+		cPlayer *pPartner = mpInit->mpCoop->ItemPartnerInFront(mpPlayer, pEntity ? mpPlayer->GetPickedDist() : 1e9f);
+		if(pPartner)
+		{
+			cInventoryItem *pItem = mpPlayer->GetCurrentItem();
+			if(mPrevState == ePlayerState_WeaponMelee || mPrevState == ePlayerState_Throw) mpPlayer->ChangeState(ePlayerState_Normal);
+			else mpPlayer->ChangeState(mPrevState);
+			mpInit->mpCoop->GiveItem(mpPlayer, pPartner, pItem);
+			return;
+		}
+	}
 
 	if(pEntity && mpPlayer->GetPickedDist() <= pEntity->GetMaxExamineDist())
 	{

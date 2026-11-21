@@ -66,7 +66,8 @@ Non è stata fatta una prova reale fra due PC né una partita completa della cam
 | Inventari separati | ✅ | uno per giocatore; torcia, glowstick, armi, taccuino e mappa a tutti, il resto a chi lo raccoglie (`COOP_ARCHITECTURE.md`) |
 | Consumabili per giocatore | ✅ | batterie, antidolorifici, razzi, oggetti da lanciare e cibo restano a chi li raccoglie |
 | Oggetti unici tracciati | ✅ | chiavi e oggetti della storia restano a chi li trova; gli script li cercano in tutto il gruppo |
-| Dare e lasciare oggetti | 🟡 | il passaggio esiste nel codice ed è provato da `full`; manca il comando nel gioco |
+| Dare oggetti a un compagno | ✅ | oggetto scelto, mira al compagno, clic; una unità delle pile; prova `full` in entrambe le direzioni |
+| Lasciare oggetti a terra | ❌ | |
 | Note e diario per giocatore | 🟡 | ricostruiti sul client; le note lette non sono salvate per giocatore |
 
 ### Morte e transizioni

@@ -621,3 +621,38 @@ Non sono state provate:
 - una partita reale su più PC;
 - la rete degradata con 3-4 giocatori;
 - l'intera campagna con oggetti consumabili divisi fra i giocatori.
+
+## 16. Aggiornamento 21 novembre — passare un oggetto a un compagno
+
+### Modifiche
+
+- **Il gesto:** con un oggetto scelto dall'inventario (stato "usa oggetto")
+  si mira a un compagno e si clicca.
+- **Il bersaglio:** un compagno entro 2 m sulla linea di mira, più vicino
+  dell'entità mirata, riceve l'oggetto (`ItemPartnerInFront`, `GiveItem`).
+- **Le regole:**
+  - oggetti di gruppo: solo un avviso;
+  - pile: un'unità alla volta;
+  - altri oggetti: interi, oppure un avviso se il compagno li ha già.
+- **Gli avvisi:** sottotitoli per chi dà e per chi riceve, nella lingua del
+  gioco dell'host e solo in ASCII. I testi del motore passano per `mbstowcs`
+  con la locale "C", che non gestisce gli accenti.
+- **La prova `full`:**
+  - la chiave del lucchetto passa dall'host all'ospite con il gesto vero,
+    invece di `TransferItem`;
+  - l'ospite passa un antidolorifico all'host, con l'azione del client e da
+    una pila di 2;
+  - l'ospite prova a passare una torcia, che va rifiutata.
+
+### Misure
+
+Prova `full`, PASS su entrambi i ruoli:
+- `Item padlock_key given by player 1 to player 2`, poi il client apre il
+  lucchetto con quella chiave;
+- `Guest gave one painkiller=1 (host 0->1, guest left 1) flashlight kept=1`;
+- avvisi registrati: "Given to your partner", "Received" e "Your partner
+  already has: Flashlight".
+
+Suite completa dopo la modifica, tutto PASS e nessun crash dump: `full`, `hammer`, `campaign`, `resume`, `party -Players 3`, `party -Players 4`, `maps` (25/25 mappe su host e client) e `ctest`.
+
+Non provato: il gesto fatto a mano su due PC reali.

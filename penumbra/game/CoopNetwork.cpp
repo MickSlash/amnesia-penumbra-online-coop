@@ -311,6 +311,89 @@ bool cCoopNetwork::TransferItem(const std::string& name, cPlayer* from, cPlayer*
     Log("[COOP/INVENTORY] Item %s passed to player %s\n",name.c_str(),to==hostPlayer?"host":"guest");
     return target->GetItem(name)!=nullptr;
 }
+cPlayer* cCoopNetwork::ItemPartnerInFront(cPlayer* giver, float pickedDistance) const {
+    if(!hosting || !giver || !giver->GetCamera()) return nullptr;
+    const cVector3f eye=giver->GetCamera()->GetPosition(), forward=giver->GetCamera()->GetForward();
+    cPlayer* best=nullptr; float bestAlong=std::min(2.0f,pickedDistance+0.5f);
+    for(auto* p:TargetablePlayers()) {
+        if(!p || p==giver || p->IsDead() || !p->GetCharacterBody()) continue;
+        // Il corpo del compagno come un segmento verticale dai piedi alla testa.
+        const cVector3f feet=p->GetCharacterBody()->GetFeetPosition();
+        const float height=std::max(.5f,p->GetCharacterBody()->GetSize().y);
+        const cVector3f center=feet+cVector3f(0,height*.5f,0), offset=center-eye;
+        const float along=cMath::Vector3Dot(offset,forward);
+        if(along<=.1f || along>bestAlong) continue;
+        const cVector3f closest=eye+forward*along, side=closest-center;
+        if(std::sqrt(side.x*side.x+side.z*side.z)>.45f || std::fabs(side.y)>height*.5f+.1f) continue;
+        best=p; bestAlong=along;
+    }
+    return best;
+}
+void cCoopNetwork::PlayerHint(cPlayer* player, const std::string& text) {
+    Log("[COOP/INVENTORY] Hint to %s: %s\n",player==hostPlayer?"host":"guest",text.c_str());
+    if(player==hostPlayer) { init->mpEffectHandler->GetSubTitle()->Add(cString::To16Char(text),3,false); return; }
+    if(auto* guest=GuestFor(player)) {
+        online::Presentation e; e.kind=online::PresentationKind::Hint; e.target=guest->session.GuestPlayerId(); e.text[0]=text; Present(e);
+    }
+}
+bool cCoopNetwork::GiveItem(cPlayer* giver, cPlayer* to, cInventoryItem* item) {
+    if(!hosting || !giver || !to || !item || giver==to) return false;
+    cInventory* source=InventoryFor(giver); cInventory* target=InventoryFor(to);
+    if(source==target || source->GetItem(item->GetName())!=item) return false;
+    const tString name=item->GetName(), file=item->GetEntityFile();
+    // Solo ASCII: i testi del motore passano per mbstowcs con la locale "C".
+    std::string shown;
+    for(wchar_t c:item->GetGameName()) {
+        if(c<128) shown+=char(c);
+        else if(c>=0xE0 && c<=0xE4) shown+='a'; else if(c>=0xE8 && c<=0xEB) shown+='e';
+        else if(c>=0xEC && c<=0xEF) shown+='i'; else if(c>=0xF2 && c<=0xF6) shown+='o';
+        else if(c>=0xF9 && c<=0xFC) shown+='u'; else if(c>=0xC0 && c<=0xC4) shown+='A';
+        else if(c>=0xC8 && c<=0xCB) shown+='E'; else shown+='?';
+    }
+    // Avvisi nella lingua del gioco dell'host (come il nome dell'oggetto).
+    const bool italian=cString::ToLowerCase(init->msLanguageFile).find("italian")!=tString::npos;
+    const std::string alreadyHas=italian?"Il compagno ha gia': ":"Your partner already has: ";
+    // Torcia, glowstick, armi, taccuino e mappa: li ha già ogni giocatore.
+    if(GroupItemType(item->GetItemType())) { PlayerHint(giver,alreadyHas+shown); return true; }
+    // Le pile (batterie, antidolorifici, razzi...) si uniscono per tipo e
+    // sottotipo, come in cInventory::AddItemFromFile; gli altri per nome.
+    cInventoryItem* existing=nullptr;
+    for(const auto& pair:target->NetworkItems()) {
+        auto* other=pair.second;
+        if(item->HasCount() ? (other->GetItemType()==item->GetItemType() && other->GetSubType()==item->GetSubType()) : other->GetName()==name) { existing=other; break; }
+    }
+    if(existing && !item->HasCount()) { PlayerHint(giver,alreadyHas+shown); return true; }
+    // Una sola unità di una pila, altrimenti l'oggetto intero.
+    const int units=item->HasCount() ? 1 : std::max(1,item->GetCount());
+    if(giver->GetCurrentItem()==item && (!item->HasCount() || item->GetCount()<=1)) giver->SetCurrentItem(nullptr);
+    {
+        PlayerScope scope(init,giver,HandsFor(giver));
+        if(item->HasCount() && item->GetCount()>1) item->AddCount(-1); else source->RemoveItem(item);
+    }
+    if(existing) existing->AddCount(units);
+    else {
+        PlayerScope scope(init,to,HandsFor(to));
+        mainInventory->SetSilent(true);
+        target->AddItemFromFile(name,file,-1);
+        mainInventory->SetSilent(false);
+        if(auto* added=target->GetItem(name)) { if(added->HasCount()) added->SetCount(units); }
+    }
+    const auto idOf=[&](cPlayer* p) { auto* guest=GuestFor(p); return guest ? unsigned(guest->session.GuestPlayerId()) : 1u; };
+    Log("[COOP/INVENTORY] Item %s given by player %u to player %u units=%d\n",name.c_str(),idOf(giver),idOf(to),units);
+    PlayerHint(giver,(italian?"Hai dato al compagno: ":"Given to your partner: ")+shown);
+    PlayerHint(to,(italian?"Hai ricevuto: ":"Received: ")+shown);
+    return true;
+}
+void cCoopNetwork::UseItemAction(cPlayer* player, const std::string& name) {
+    auto* item=init->mpInventory->GetItem(name);
+    auto* body=player->GetPickedBody();
+    auto* entity=body?static_cast<iGameEntity*>(body->GetUserData()):nullptr;
+    if(getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Item action name=%s target=%s distance=%.3f maximum=%.3f\n",name.c_str(),entity?entity->GetName().c_str():"none",player->GetPickedDist(),entity?entity->GetMaxInteractDist():0);
+    // Un compagno davanti, più vicino dell'entità mirata, riceve l'oggetto.
+    if(cPlayer* partner=item ? ItemPartnerInFront(player,entity ? player->GetPickedDist() : 1e9f) : nullptr) { GiveItem(player,partner,item); return; }
+    if(item && entity && entity->IsActive() && player->GetPickedDist()<=entity->GetMaxInteractDist())
+        init->mpInventory->GetItemType(item->GetItemType())->OnUse(item,entity);
+}
 void cCoopNetwork::Reset() {
     // Nuova partita: anche gli inventari degli ospiti si svuotano (quello
     // dell'host è un modulo del gioco e viene azzerato dal motore).
@@ -882,14 +965,8 @@ void cCoopNetwork::UpdateGuest(float dt) {
         if(action.action==online::PlayerAction::Interact && action.pressed && init->mpGameMessageHandler->HasMessage()) { init->mpGameMessageHandler->ShowNext(); continue; }
         PlayerScope scope(init,remotePlayer,remoteHands);
         if(action.action==online::PlayerAction::Interact) {
-            if(action.pressed && !action.item.empty()) {
-                auto* item=init->mpInventory->GetItem(action.item);
-                auto* body=remotePlayer->GetPickedBody();
-                auto* entity=body?static_cast<iGameEntity*>(body->GetUserData()):nullptr;
-                if(getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Item action name=%s target=%s distance=%.3f maximum=%.3f\n",action.item.c_str(),entity?entity->GetName().c_str():"none",remotePlayer->GetPickedDist(),entity?entity->GetMaxInteractDist():0);
-                if(item && entity && entity->IsActive() && remotePlayer->GetPickedDist()<=entity->GetMaxInteractDist())
-                    init->mpInventory->GetItemType(item->GetItemType())->OnUse(item,entity);
-            } else if(action.pressed) {
+            if(action.pressed && !action.item.empty()) UseItemAction(remotePlayer,action.item);
+            else if(action.pressed) {
                 if(getenv("PENUMBRA_COOP_QA")) {
                     auto eye=remotePlayer->GetCamera()->GetPosition(), forward=remotePlayer->GetCamera()->GetForward();
                     Log("[COOP/QA] Native interact picked=%s distance=%.3f pitch=%.3f eye=%.3f/%.3f/%.3f forward=%.3f/%.3f/%.3f\n",remotePlayer->GetPickedBody()?remotePlayer->GetPickedBody()->GetName().c_str():"none",remotePlayer->GetPickedDist(),remotePlayer->GetCamera()->GetPitch(),eye.x,eye.y,eye.z,forward.x,forward.y,forward.z);
@@ -1573,8 +1650,18 @@ void cCoopNetwork::RunQA(float dt) {
             Log("[COOP/QA] Native grabbed object maximum_distance=%.3f broken=%d released_state=%d\n",qaObjectMaxDistance,e?0:1,int(remotePlayer->GetState())); qaStage=4;
         }
         if(full && qaStage==4 && qaTime>15) {
-            // Inventari per giocatore: la chiave è dell'host, che la passa al client.
-            if(mainInventory->GetItem("padlock_key")) Log("[COOP/QA] Key passed to the client=%d\n",TransferItem("padlock_key",hostPlayer,remotePlayer)?1:0);
+            // Inventari per giocatore: la chiave è dell'host, che la passa al
+            // client col gesto del gioco (oggetto scelto, mira, clic).
+            if(auto* key=mainInventory->GetItem("padlock_key")) {
+                const cVector3f eye=init->mpPlayer->GetCamera()->GetPosition();
+                cVector3f forward=init->mpPlayer->GetCamera()->GetForward(); forward.y=0; forward.Normalise();
+                cVector3f feet=init->mpPlayer->GetCharacterBody()->GetFeetPosition()+forward*1.2f;
+                remotePlayer->GetCharacterBody()->SetFeetPosition(feet);
+                const auto aim=AimAngles(eye,feet+cVector3f(0,remotePlayer->GetCharacterBody()->GetSize().y*.5f,0));
+                init->mpPlayer->GetCamera()->SetYaw(aim.y); init->mpPlayer->GetCamera()->SetPitch(aim.x);
+                init->mpPlayer->SetCurrentItem(key); init->mpPlayer->ChangeState(ePlayerState_UseItem); init->mpPlayer->StartInteract();
+                Log("[COOP/QA] Key given by gesture=%d host_state=%d\n",InventoryFor(remotePlayer)->GetItem("padlock_key") && !mainInventory->GetItem("padlock_key")?1:0,int(init->mpPlayer->GetState()));
+            }
             auto* locker=init->mpMapHandler->GetGameEntity("padlockarea",false);
             if(!locker || !locker->GetBodyNum()) FatalError("[COOP/QA] Missing locker fixture\n");
             auto target=locker->GetBody(0)->GetLocalPosition();
@@ -1590,6 +1677,34 @@ void cCoopNetwork::RunQA(float dt) {
             { std::string hostItems, guestItems; for(const auto& pair:mainInventory->NetworkItems()) hostItems+=pair.first+" ";
               for(const auto& pair:InventoryFor(remotePlayer)->NetworkItems()) guestItems+=pair.first+" ";
               Log("[COOP/QA] Inventories host=[%s] guest=[%s]\n",hostItems.c_str(),guestItems.c_str()); }
+            // Passaggio dall'ospite all'host, con l'azione del client (stesso
+            // fotogramma: nessun comando del client sposta la mira nel frattempo).
+            {
+                cInventory* guestInventory=InventoryFor(remotePlayer);
+                { PlayerScope scope(init,remotePlayer,remoteHands); mainInventory->SetSilent(true);
+                  guestInventory->AddItemFromFile("qa_painkillers","item_painkillers.ent",-1);
+                  if(auto* pills=guestInventory->GetItem("qa_painkillers")) pills->SetCount(2);
+                  guestInventory->AddItemFromFile("qa_flashlight","item_flashlight.ent",-1); // di gruppo: arriva anche all'host
+                  mainInventory->SetSilent(false); }
+                const cVector3f eye=init->mpPlayer->GetCamera()->GetPosition();
+                cVector3f forward=init->mpPlayer->GetCamera()->GetForward(); forward.y=0; forward.Normalise();
+                const cVector3f feet=init->mpPlayer->GetCharacterBody()->GetFeetPosition()+forward*1.2f;
+                remotePlayer->GetCharacterBody()->SetFeetPosition(feet);
+                const cVector3f guestEye=feet+cVector3f(0,remotePlayer->GetSize().y+remotePlayer->GetCameraHeightAdd(),0);
+                const auto aim=AimAngles(guestEye,init->mpPlayer->GetCharacterBody()->GetFeetPosition()+cVector3f(0,init->mpPlayer->GetCharacterBody()->GetSize().y*.5f,0));
+                remotePlayer->GetCamera()->SetPosition(guestEye); remotePlayer->GetCamera()->SetYaw(aim.y); remotePlayer->GetCamera()->SetPitch(aim.x);
+                int hostPillsBefore=0; for(const auto& pair:mainInventory->NetworkItems()) if(pair.second->GetItemType()==eGameItemType_Painkillers) hostPillsBefore+=pair.second->GetCount();
+                { PlayerScope scope(init,remotePlayer,remoteHands); UseItemAction(remotePlayer,"qa_painkillers"); UseItemAction(remotePlayer,"qa_flashlight"); }
+                int hostPills=0; for(const auto& pair:mainInventory->NetworkItems()) if(pair.second->GetItemType()==eGameItemType_Painkillers) hostPills+=pair.second->GetCount();
+                auto* guestPills=guestInventory->GetItem("qa_painkillers");
+                const bool oneUnit=hostPills==hostPillsBefore+1 && guestPills && guestPills->GetCount()==1;
+                const bool groupKept=guestInventory->GetItem("qa_flashlight")!=nullptr && mainInventory->GetItem("qa_flashlight")!=nullptr;
+                // La torcia di prova non resta a nessuno dei due.
+                { PlayerScope scope(init,remotePlayer,remoteHands); if(auto* light=guestInventory->GetItem("qa_flashlight")) guestInventory->RemoveItem(light); }
+                if(auto* light=mainInventory->GetItem("qa_flashlight")) mainInventory->RemoveItem(light);
+                Log("[COOP/QA] Guest gave one painkiller=%d (host %d->%d, guest left %d) flashlight kept=%d\n",oneUnit?1:0,hostPillsBefore,hostPills,guestPills?guestPills->GetCount():0,groupKept?1:0);
+                qaPuzzle=qaPuzzle && oneUnit && groupKept;
+            }
         }
         if(full && qaStage==6 && qaTime>24) {
             auto* locker=init->mpMapHandler->GetGameEntity("locker1",false);

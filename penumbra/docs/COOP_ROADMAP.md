@@ -53,7 +53,6 @@ Fase 4 (da 2 a 4 giocatori): fatti i passi 1-7 di `COOP_ARCHITECTURE.md`. Restan
 Fase 3: fatti gli inventari per giocatore (passi 1-5 di `COOP_ARCHITECTURE.md`, inventario per giocatore).
 
 Prossimo:
-- comando nel gioco per passare un oggetto a un compagno (la funzione c'è già);
 - diario personale;
 - spettatore per chi è a terra.
 
@@ -67,6 +66,7 @@ Prossimo:
 
 ## Fatto di recente
 
+- Passare un oggetto a un compagno con il gesto del gioco: oggetto scelto, mira, clic. Una unità delle pile; gli oggetti di gruppo restano a tutti.
 - Inventari per giocatore:
   - un inventario per ospite sull'host, scambiato da `PlayerScope`;
   - oggetti di gruppo dati a tutti, consumabili e oggetti della storia a chi li raccoglie;

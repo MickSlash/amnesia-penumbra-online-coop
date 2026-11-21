@@ -134,5 +134,20 @@ Passi:
 3. ✅ Oggetti di gruppo (raccolta, ingresso in partita, salvataggi vecchi).
 4. ✅ Regole degli script (`HasItem`, `RemoveItem`, `GiveItem`).
 5. ✅ Salvataggi (`mInventory2..4`, `mbCoopInventories`).
-6. 🟡 Passare un oggetto a un compagno: `cCoopNetwork::TransferItem` esiste
-   ed è usata dalla prova `full`; manca il comando nell'interfaccia.
+6. ✅ Passare un oggetto a un compagno, con il gesto del gioco: si sceglie
+   l'oggetto nell'inventario, si mira al compagno entro 2 m e si clicca.
+
+   Regole:
+   - **Oggetti di gruppo:** torcia, glowstick, armi, taccuino e mappa li
+     hanno già tutti; compare solo un avviso.
+   - **Pile** (antidolorifici, razzi...): passa un'unità alla volta.
+   - **Altri oggetti:** passano interi; se il compagno ha già lo stesso
+     oggetto, compare un avviso.
+
+   Lo decide l'host:
+   - per sé, in `cPlayerState_UseItem::OnStartInteract`;
+   - per un ospite, in `cCoopNetwork::UseItemAction`, dall'azione Interact
+     con l'oggetto.
+
+   Il compagno conta solo se è più vicino dell'entità mirata. A chi dà e a chi
+   riceve compare un sottotitolo nella lingua del gioco dell'host.
