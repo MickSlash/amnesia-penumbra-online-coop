@@ -30,7 +30,7 @@
 
 using namespace hpl;
 namespace hpl { extern bool gbGameScriptExecution; }
-namespace hpl { extern bool gbQuitRequested; }
+namespace hpl { extern bool gbQuitRequested; extern bool gbPhysicsSoundsMuted; }
 namespace hpl { extern bool (*gGameGuiSoundCallback)(const tString&,float); }
 namespace {
 cCoopNetwork* activeNetwork=nullptr;
@@ -489,7 +489,7 @@ void cCoopNetwork::BeforeMapLoad() {
     positioned=false; hasClientPosition=false; snapshotAge=0;
     prediction.Clear(); ResetPlayback();
     for(auto& guest:guests) { ResetGuestMap(*guest); guest->pendingSave.reset(); guest->pendingWeapon.clear(); }
-    restoredEquipment=false; baselineNames.clear(); receivedJournal=0; pendingNote.clear(); deferredMessages.clear();
+    restoredEquipment=false; baselineNames.clear(); receivedJournal=0; pendingNote.clear(); deferredMessages.clear(); replicatedSounds.clear();
     currentMusic.clear(); currentSkybox.clear();
 }
 // Punto libero vicino a `center` per il corpo `body`: prima le posizioni
@@ -896,6 +896,7 @@ void cCoopNetwork::Update(float dt) {
     // Finestra chiusa con la X o Alt+F4: stessa uscita ordinata del menu
     // (questo aggiornamento gira sempre, anche nei menu e in gioco singolo).
     if(hpl::gbQuitRequested) { hpl::gbQuitRequested=false; Log("[COOP] Window close requested; exiting\n"); init->mpGame->Exit(); }
+    hpl::gbPhysicsSoundsMuted=IsClient(); // suoni della fisica: sul client arrivano dall'host
     if(!IsOnline()) return;
     steam.Update();
     if(IsHost()) transport.Poll(); else g->session.Poll();
@@ -2418,11 +2419,14 @@ void cCoopNetwork::ApplyMedia(const online::MediaState& s) {
     if(s.kind==online::MediaKind::Sound) {
         auto* sound=world->GetSoundEntity(s.name);
         if(s.flags&128) {
-            // Solo fermato: un suono della mappa può essere usato da altri oggetti.
-            if(sound && !sound->IsStopped()) sound->Stop(false);
+            // Creato dalla replica: si elimina (prima restava, e le entità del
+            // client crescevano). Della mappa: solo fermato, altri oggetti
+            // possono usarlo.
+            if(sound && replicatedSounds.erase(s.name)) { sound->Stop(false); world->DestroySoundEntity(sound); }
+            else if(sound && !sound->IsStopped()) sound->Stop(false);
             return;
         }
-        if(!sound && (s.flags&1)) sound=world->CreateSoundEntity(s.name,s.file,false);
+        if(!sound && (s.flags&1)) { sound=world->CreateSoundEntity(s.name,s.file,false); if(sound) replicatedSounds.insert(s.name); }
         if(!sound) return;
         sound->SetMatrix(Unpack(s.transform)); sound->SetVolume(s.values[0]/1000.0f);
         if((s.flags&1) && sound->IsStopped()) sound->Play(false);
@@ -2444,8 +2448,17 @@ void cCoopNetwork::OnPostSceneDraw() {
         fpsLastFrame=now; ++fpsFrames;
         if(now-fpsWindowStart>=5000000) {
             const double seconds=(now-fpsWindowStart)/1e6;
-            Log("[COOP/FPS] role=%s fps=%.1f frame_ms_mean=%.2f frame_ms_max=%.1f frames_over_33ms=%u\n",IsHost()?"host":IsClient()?"client":"single",
-                fpsFrames/seconds,seconds*1000.0/std::max(1u,fpsFrames),fpsGapMax/1000.0,fpsSlowFrames);
+            // Suoni: entità presenti e in riproduzione (il mixer ha 32 voci).
+            unsigned soundEntities=0, soundsPlaying=0;
+            if(auto* world=init->mpGame->GetScene()->GetWorld3D()) {
+                auto sounds=world->GetSoundEntityIterator();
+                std::string playing;
+                while(sounds.HasNext()) { auto* sound=sounds.Next(); ++soundEntities; if(!sound->IsStopped()) { ++soundsPlaying; if(playing.size()<400) playing+=sound->GetName()+"("+sound->GetData()->GetName()+") "; } }
+                if(getenv("PENUMBRA_COOP_QA") && soundsPlaying) Log("[COOP/SOUND] role=%s playing=%s\n",IsHost()?"host":IsClient()?"client":"single",playing.c_str());
+            }
+            Log("[COOP/FPS] role=%s fps=%.1f frame_ms_mean=%.2f frame_ms_max=%.1f frames_over_33ms=%u sound_entities=%u sounds_playing=%u channels_playing=%d\n",IsHost()?"host":IsClient()?"client":"single",
+                fpsFrames/seconds,seconds*1000.0/std::max(1u,fpsFrames),fpsGapMax/1000.0,fpsSlowFrames,soundEntities,soundsPlaying,
+                int(init->mpGame->GetSound()->GetSoundHandler()->GetWorldEntryList()->size()+init->mpGame->GetSound()->GetSoundHandler()->GetGuiEntryList()->size()));
             fpsWindowStart=now; fpsFrames=0; fpsGapMax=0; fpsSlowFrames=0;
         }
     }

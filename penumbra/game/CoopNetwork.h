@@ -163,6 +163,8 @@ private:
     std::string pendingNote;
     // Client: messaggi arrivati mentre il taccuino è aperto (li mostra alla chiusura).
     std::vector<hpl::tWString> deferredMessages;
+    // Client: suoni creati dalla replica (si eliminano quando l'host li elimina).
+    std::set<std::string> replicatedSounds;
     float pendingNoteTime = 0;
     // Silhouette di un altro giocatore, per ID: sull'host gli ospiti, sul
     // client l'host (e, dal passo 4, gli altri ospiti).

@@ -85,8 +85,14 @@ namespace hpl {
 
 	//-----------------------------------------------------------------------
 
+	// Co-op, client: i suoni di urto, strisciamento e rotolamento arrivano
+	// dall'host; quelli della fisica locale (oggetti spostati dalla rete) li
+	// raddoppiavano.
+	bool gbPhysicsSoundsMuted = false;
+
 	void cSurfaceData::OnImpact(float afSpeed,const cVector3f &avPos,int alContacts, iPhysicsBody *apBody)
 	{
+		if(gbPhysicsSoundsMuted) return;
 		if(mpPhysics->CanPlayImpact()==false){
 			return;
 		}
@@ -131,6 +137,7 @@ namespace hpl {
 	void cSurfaceData::OnSlide(float afSpeed,const cVector3f &avPos,int alContacts, iPhysicsBody *apBody,
 								iPhysicsBody *apSlideAgainstBody)
 	{
+		if(gbPhysicsSoundsMuted) return;
 		if(alContacts < mlMinScrapeContacts) return;
 
 		//Make sure that only one body can update the scrape.
@@ -332,7 +339,7 @@ namespace hpl {
 
 	void cSurfaceData::UpdateRollEffect(iPhysicsBody *apBody)
 	{
-		if(msRollSoundName == "" || mRollAxisFlags ==0) return;
+		if(gbPhysicsSoundsMuted || msRollSoundName == "" || mRollAxisFlags ==0) return;
 
 		/////////////////////////////////
 		//Get the max angular speed
