@@ -17,9 +17,11 @@ public sealed class CoopLauncher : Form {
     readonly CheckBox useSteam = new CheckBox();
     readonly CheckBox resume = new CheckBox();
     readonly NumericUpDown players = new NumericUpDown();
+    readonly TextBox nickname = new TextBox();
+    readonly CheckBox lobby = new CheckBox();
     readonly string state = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"PenumbraOnlineCoop");
     public CoopLauncher() {
-        Text="Penumbra: Overture — Co-op sperimentale"; ClientSize=new Size(690,369); Font=new Font("Segoe UI",10);
+        Text="Penumbra: Overture — Co-op sperimentale"; ClientSize=new Size(690,409); Font=new Font("Segoe UI",10);
         FormBorderStyle=FormBorderStyle.FixedDialog; MaximizeBox=false; StartPosition=FormStartPosition.CenterScreen;
         Controls.Add(new Label { Text="Cartella di Penumbra: Overture", Location=new Point(20,18), AutoSize=true });
         folder.SetBounds(20,47,485,28); Controls.Add(folder);
@@ -36,10 +38,14 @@ public sealed class CoopLauncher : Form {
         // Giocatori in totale, host compreso: lo sceglie solo l'host.
         Controls.Add(new Label { Text="Giocatori (host)", Location=new Point(465,205), AutoSize=true });
         players.SetBounds(600,202,70,28); players.Minimum=2; players.Maximum=4; players.Value=2; Controls.Add(players);
-        Controls.Add(new Label { Text="Da 2 a 4 giocatori, nemici e salvataggio autorevoli sull\x27host.\r\nPrototipo: avatar provvisorio, inventario comune, campagna da validare.", Location=new Point(20,239), Size=new Size(650,52) });
-        var host=new Button { Text="Ospita partita", Location=new Point(20,313), Size=new Size(205,36) };
-        var join=new Button { Text="Connettiti all'host", Location=new Point(240,313), Size=new Size(220,36) };
-        var logs=new Button { Text="Apri log della mod", Location=new Point(475,313), Size=new Size(195,36) };
+        // Nickname mostrato nella lobby; lobby prepartita (pronto, avvio dell'host).
+        Controls.Add(new Label { Text="Nickname", Location=new Point(20,242), AutoSize=true });
+        nickname.SetBounds(110,239,250,28); nickname.MaxLength=24; Controls.Add(nickname);
+        lobby.Text="Lobby prepartita (Pronto / Avvia)"; lobby.SetBounds(390,239,280,28); Controls.Add(lobby);
+        Controls.Add(new Label { Text="Da 2 a 4 giocatori, nemici e salvataggio autorevoli sull\x27host. Nella lobby: R = pronto,\r\nINVIO (host) = avvia quando tutti sono pronti. Avatar provvisorio, campagna da validare.", Location=new Point(20,279), Size=new Size(650,52) });
+        var host=new Button { Text="Ospita partita", Location=new Point(20,353), Size=new Size(205,36) };
+        var join=new Button { Text="Connettiti all'host", Location=new Point(240,353), Size=new Size(220,36) };
+        var logs=new Button { Text="Apri log della mod", Location=new Point(475,353), Size=new Size(195,36) };
         host.Click+=delegate { Start("host"); }; join.Click+=delegate { Start("client"); };
         logs.Click+=delegate { Directory.CreateDirectory(state); Process.Start(new ProcessStartInfo(state) { UseShellExecute=true }); };
         Controls.Add(host); Controls.Add(join); Controls.Add(logs);
@@ -48,6 +54,8 @@ public sealed class CoopLauncher : Form {
         var preference=Path.Combine(state,"use-steam.txt"); if(File.Exists(preference)) useSteam.Checked=File.ReadAllText(preference).Trim()=="1";
         // Schermo intero come nel gioco originale, e la scelta viene ricordata.
         var screen=Path.Combine(state,"fullscreen.txt"); fullscreen.Checked=!File.Exists(screen) || File.ReadAllText(screen).Trim()=="1";
+        var name=Path.Combine(state,"nickname.txt"); nickname.Text=File.Exists(name)?File.ReadAllText(name).Trim():Environment.UserName;
+        var lobbyChoice=Path.Combine(state,"lobby.txt"); lobby.Checked=!File.Exists(lobbyChoice) || File.ReadAllText(lobbyChoice).Trim()=="1";
         var count=Path.Combine(state,"players.txt"); int savedPlayers;
         if(File.Exists(count) && Int32.TryParse(File.ReadAllText(count).Trim(),out savedPlayers) && savedPlayers>=2 && savedPlayers<=4) players.Value=savedPlayers;
     }
@@ -136,6 +144,12 @@ public sealed class CoopLauncher : Form {
             launch.EnvironmentVariables["PENUMBRA_COOP_PORT"]=port.Value.ToString();
             launch.EnvironmentVariables["PENUMBRA_COOP_FULLSCREEN"]=fullscreen.Checked?"1":"0";
             launch.EnvironmentVariables["PENUMBRA_COOP_PROFILE_ROOT"]=Path.Combine(state,role);
+            var clean=new StringBuilder(); foreach(var c in nickname.Text.Trim()) if(c>=' ' && c<='~' && clean.Length<24) clean.Append(c);
+            if(clean.Length==0) throw new IOException("Inserisci un nickname (lettere e numeri senza accenti, al massimo 24).");
+            launch.EnvironmentVariables["PENUMBRA_COOP_NAME"]=clean.ToString();
+            launch.EnvironmentVariables["PENUMBRA_COOP_LOBBY"]=lobby.Checked?"1":"0";
+            File.WriteAllText(Path.Combine(state,"nickname.txt"),clean.ToString(),Encoding.UTF8);
+            File.WriteAllText(Path.Combine(state,"lobby.txt"),lobby.Checked?"1":"0");
             File.WriteAllText(Path.Combine(state,"fullscreen.txt"),fullscreen.Checked?"1":"0");
             ImportOriginalSettings(role);
             if(useSteam.Checked) {

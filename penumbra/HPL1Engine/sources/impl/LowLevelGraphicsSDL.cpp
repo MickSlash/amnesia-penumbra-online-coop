@@ -917,8 +917,12 @@ namespace hpl {
 	{
 		glFlush();
 	}
+	// Mod: screenshot su richiesta (tasto diagnostico F9), del fotogramma finito.
+	std::string gsScreenshotRequest;
+
 	void cLowLevelGraphicsSDL::SwapBuffers()
 	{
+		if(!gsScreenshotRequest.empty()) { SaveScreenToBMP(gsScreenshotRequest); gsScreenshotRequest.clear(); }
 		// Prove (PENUMBRA_COOP_FINAL_SCREENSHOT=file.bmp): il fotogramma finito,
 		// effetti e interfaccia compresi, quello che vede il giocatore, dopo
 		// PENUMBRA_COOP_DEBUG_FRAME fotogrammi (predefiniti 900).

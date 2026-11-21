@@ -183,6 +183,34 @@ bool DecodeMedia(const uint8_t* p, size_t n, MediaState& s) {
         cursor != n || !ValidMedia(value)) return false;
     s = std::move(value); return true;
 }
+bool ValidName(const std::string& name) {
+    if(name.empty() || name.size() > MaxNameBytes) return false;
+    for(unsigned char c : name) if(c < 32 || c > 126) return false;
+    return true;
+}
+std::vector<uint8_t> EncodeLobby(const LobbyState& lobby) {
+    if(lobby.phase > 2 || lobby.players.size() > MaxPlayers) return {};
+    auto out = Header(Message::Lobby); out.push_back(lobby.phase); out.push_back(uint8_t(lobby.players.size()));
+    for(const auto& p : lobby.players) {
+        if(p.id < HostPlayerId || p.id > MaxPlayers || !ValidName(p.name)) return {};
+        out.push_back(p.id); out.push_back(p.ready ? 1 : 0); String(out, p.name);
+    }
+    return out;
+}
+bool DecodeLobby(const uint8_t* p, size_t n, LobbyState& lobby) {
+    if(!ValidHeader(p, n) || n < 7 || n > 512 || p[4] != uint8_t(Message::Lobby) || p[5] > 2 || p[6] > MaxPlayers) return false;
+    LobbyState value; value.phase = p[5]; size_t cursor = 7;
+    for(unsigned i = 0; i < p[6]; ++i) {
+        if(n - cursor < 2) return false;
+        LobbyPlayer player; player.id = p[cursor]; player.ready = p[cursor+1] != 0;
+        if(player.id < HostPlayerId || player.id > MaxPlayers || p[cursor+1] > 1) return false;
+        cursor += 2;
+        if(!ReadString(p, n, cursor, player.name, MaxNameBytes) || !ValidName(player.name)) return false;
+        value.players.push_back(player);
+    }
+    if(cursor != n) return false;
+    lobby = std::move(value); return true;
+}
 std::vector<uint8_t> EncodePresentation(const Presentation& event) {
     if(!ValidPresentation(event)) return {};
     auto out = Header(Message::Presentation); U32(out, event.epoch); out.push_back(uint8_t(event.kind)); out.push_back(event.target);
@@ -436,7 +464,7 @@ void Session::Stop() {
     lastPoll_ = lastPacket_ = lastDiagnostic_ = 0;
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = snapshotBackups_ = 0; map_ = MapState();
     entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
-    presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+    presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false; remoteName_.clear(); hasLobby_ = false;
     closing_ = partnerLeftVoluntarily_ = false;
     loading_ = false; loadingStarted_ = worldAppliedEpoch_ = mapReadyAt_ = oldestBulkQueue_ = oldestBulkAt_ = lastSocketError_ = 0;
 }
@@ -503,7 +531,7 @@ void Session::ClearPeerState() {
     peer_ = nullptr; ready_ = hasInput_ = false; inputQueue_.Clear(); sentInputs_.clear();
     hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
     entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
-    presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+    presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false; remoteName_.clear(); hasLobby_ = false;
     loading_ = false; worldAppliedEpoch_ = mapReadyAt_ = oldestBulkQueue_ = oldestBulkAt_ = 0;
 }
 void Session::Reject(const char* why) { fatal_ = true;
@@ -534,8 +562,15 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         ready_ = true; fatal_ = false; ++generation_; SetLobbyReady(localReady_);
         log_("[NET/CONNECTION] Protocol handshake accepted; Player assigned ID " + std::to_string(guestId_)); return;
     }
-    if(ready_ && channel == 0 && n == 8 && p[4] == uint8_t(Message::Peer) && p[5] <= 1 && R16(p + 6)) {
-        remoteReady_ = p[5] != 0; remotePort_ = R16(p + 6); return;
+    if(ready_ && channel == 0 && n >= 10 && p[4] == uint8_t(Message::Peer) && p[5] <= 1 && R16(p + 6)) {
+        size_t cursor = 8; std::string name;
+        if(!ReadString(p, n, cursor, name, MaxNameBytes) || cursor != n || (!name.empty() && !ValidName(name))) { Reject("invalid peer state"); return; }
+        remoteReady_ = p[5] != 0; remotePort_ = R16(p + 6); remoteName_ = name; return;
+    }
+    if(ready_ && role_ == Role::Client && channel == 0 && p[4] == uint8_t(Message::Lobby)) {
+        LobbyState lobby;
+        if(!DecodeLobby(p, n, lobby)) { Reject("invalid lobby state"); return; }
+        lobby_ = std::move(lobby); hasLobby_ = true; return;
     }
     if(ready_ && role_ == Role::Client && channel == 0 && n == 5 && p[4] == uint8_t(Message::Loading)) {
         SetLoading(true); return;
@@ -672,7 +707,7 @@ void Session::Receive(const uint8_t* p, size_t n, uint8_t channel) {
         if (!DecodeMap(p, n, map)) { Reject("invalid map path or epoch"); return; }
         if (!hasMap_ || (map.epoch - map_.epoch != 0 && map.epoch - map_.epoch < 0x80000000u)) {
             map_ = map; hasMap_ = true; hasSnapshot_ = false; entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
-            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false; remoteName_.clear(); hasLobby_ = false;
             worldAppliedEpoch_ = 0; SetLoading(true);
         }
         return;
@@ -745,7 +780,7 @@ void Session::HandleEvent(const ENetEvent& e) {
             peer_ = e.peer; ready_ = hasInput_ = hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0; started_ = enet_time_get(); inputQueue_.Clear(); sentInputs_.clear();
             loading_ = false; worldAppliedEpoch_ = mapReadyAt_ = 0;
             entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
-            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false; remoteName_.clear(); hasLobby_ = false;
             enet_peer_timeout(peer_, 8, 3000, 10000);
             // BulkReady regulates the large reliable stream. RTT spikes during
             // loading/ACK bursts must not make ENet discard every player pose.
@@ -767,7 +802,7 @@ void Session::HandleEvent(const ENetEvent& e) {
             hasSnapshot_ = hasMap_ = false; readyEpoch_ = 0;
             loading_ = false; worldAppliedEpoch_ = 0;
             entities_.clear(); entityMotion_.clear(); entitySequences_.clear(); actions_.clear(); hasAction_ = false; worldReadyEpoch_ = 0; hasInventory_ = false; hasJournal_ = false; checkpointReceiver_.Reset();
-            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false;
+            presentation_.clear(); media_.clear(); life_.clear(); hasLife_ = false; remoteName_.clear(); hasLobby_ = false;
         }
 }
 void Session::Maintain(uint32_t now) {
@@ -842,7 +877,16 @@ uint32_t Session::PingVariance() const { return peer_ && ready_ ? peer_->roundTr
 void Session::SetLobbyReady(bool ready) {
     localReady_ = ready;
     if(!ready_) return;
-    auto out = Header(Message::Peer); out.push_back(ready ? 1 : 0); U16(out, listenPort_); Send(out, 0, true);
+    auto out = Header(Message::Peer); out.push_back(ready ? 1 : 0); U16(out, listenPort_); String(out, localName_); Send(out, 0, true);
+}
+void Session::SetLocalName(const std::string& name) {
+    localName_ = ValidName(name) ? name : std::string();
+    if(ready_) SetLobbyReady(localReady_);
+}
+bool Session::SendLobby(const LobbyState& lobby) {
+    if(role_ != Role::Host || !ready_) return false;
+    const auto bytes = EncodeLobby(lobby);
+    return !bytes.empty() && Send(bytes, 0, true);
 }
 bool Session::SendSnapshot(const Snapshot& s) { return role_ == Role::Host && ready_ && IsMapReady(s.epoch) && Send(EncodeSnapshot(s), 1, false); }
 bool Session::SendSnapshotBackup(const Snapshot& s) {

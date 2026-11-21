@@ -40,6 +40,12 @@ public:
     bool Ready() const;
     void Update(float dt);
     void OnPostSceneDraw();
+    void OnDraw();
+    // Lobby prepartita (PENUMBRA_COOP_LOBBY=1, la imposta il launcher): l'host
+    // non carica la prima mappa finché tutti non sono pronti e la tiene ferma
+    // finché tutti non l'hanno caricata.
+    bool LobbyHoldsStart() const { return lobbyEnabled && IsHost() && lobbyPhase==0; }
+    bool LobbyActive() const { return lobbyEnabled && lobbyPhase!=2; }
     void BeforeMapLoad();
     void AfterMapLoad(const hpl::tString& file);
     bool ClientAction(online::PlayerAction action, bool pressed, const std::string& item = "",const std::string& second = "");
@@ -226,6 +232,22 @@ private:
     void ApplyMedia(const online::MediaState& state);
     void PublishEnvironment();
     void UpdateLife(float dt);
+    void UpdateLobby(float dt);
+    void SetLobbyReady(bool ready);
+    void StartFromLobby();
+    void RunLobbyQA(float dt);
+    // QA "lamp": la lanterna della cabina spinta dall'host (riferimento, come
+    // nel gioco originale) e poi dall'ospite; spostamento e catena.
+    void RunLampQA(float dt);
+    std::vector<hpl::cVector3f> qaLampRest; float qaLampRestLink = 0, qaLampMax = 0, qaLampLinkMax = 0;
+    bool renderDiagKey = false;
+    bool lobbyEnabled = false, lobbyReady = false, lobbyKeyR = false, lobbyKeyEnter = false, lobbyPostSaved = false, lobbyPostActive = true;
+    uint8_t lobbyPhase = 0; // 0 lobby, 1 caricamento, 2 partita (online::LobbyState::phase)
+    std::string lobbyName, lobbyNotice;
+    float lobbySendTime = 0, lobbyWait = 0, lobbyNoticeTime = 0;
+    online::LobbyState lobbyView;
+    std::set<uint8_t> lobbyParticipants;
+    std::string lobbyLogged;
     // Host: avvisi di progressione per il gruppo (vedi UpdateLevelHints).
     void UpdateLevelHints(float dt);
     float levelHintWait = 0;

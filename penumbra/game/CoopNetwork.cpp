@@ -33,7 +33,7 @@
 
 using namespace hpl;
 namespace hpl { extern bool gbGameScriptExecution; }
-namespace hpl { extern bool gbQuitRequested; extern bool gbPhysicsSoundsMuted; }
+namespace hpl { extern bool gbQuitRequested; extern bool gbPhysicsSoundsMuted; extern std::string gsScreenshotRequest; }
 namespace hpl { extern bool (*gGameGuiSoundCallback)(const tString&,float); }
 namespace {
 cCoopNetwork* activeNetwork=nullptr;
@@ -232,6 +232,16 @@ cCoopNetwork::cCoopNetwork(cInit* i) : iUpdateable("OvertureOnline"), init(i), t
         hpl::gbGameScriptExecution=false;
     } else FatalError("Invalid cooperative role\n");
     Log("[COOP] Experimental Overture protocol %u; campaign authority=host; players=%u\n",unsigned(online::ProtocolVersion),unsigned(guests.size()+1));
+    {
+        // Nickname: caratteri stampabili ASCII, al massimo 24.
+        const char* name=getenv("PENUMBRA_COOP_NAME"); std::string clean;
+        if(name) for(const char* c=name;*c && clean.size()<online::MaxNameBytes;++c) if(*c>=32 && *c<127) clean+=*c;
+        while(!clean.empty() && clean.back()==' ') clean.pop_back();
+        lobbyName=clean.empty()?(IsHost()?"Host":"Client"):clean;
+        for(auto& guest:guests) guest->session.SetLocalName(lobbyName);
+        lobbyEnabled=getenv("PENUMBRA_COOP_LOBBY") && std::string(getenv("PENUMBRA_COOP_LOBBY"))=="1";
+        if(lobbyEnabled) { for(auto& guest:guests) guest->session.SetLobbyReady(false); Log("[COOP/LOBBY] Lobby open role=%s name=%s\n",IsHost()?"host":"client",lobbyName.c_str()); }
+    }
     if(IsHost()) cSoundEntity::AddGlobalCallback(this);
     activeNetwork=this; hpl::gGameGuiSoundCallback=ScriptSound;
     steam.Start();
@@ -964,6 +974,24 @@ void cCoopNetwork::Update(float dt) {
     // (questo aggiornamento gira sempre, anche nei menu e in gioco singolo).
     if(hpl::gbQuitRequested) { hpl::gbQuitRequested=false; Log("[COOP] Window close requested; exiting\n"); init->mpGame->Exit(); }
     hpl::gbPhysicsSoundsMuted=IsClient(); // suoni della fisica: sul client arrivano dall'host
+    // F9: stato degli effetti grafici nel log e screenshot (texture che sembrano
+    // degradate: premere F9, poi ESC e di nuovo F9, e confrontare).
+    {
+        const bool f9=init->mpGame->GetInput()->GetKeyboard()->KeyIsDown(eKey_F9);
+        if(f9 && !renderDiagKey) {
+            auto* post=init->mpGame->GetGraphics()->GetRendererPostEffects(); auto* dof=init->mpEffectHandler->GetDepthOfField();
+            auto* r3d=init->mpGame->GetGraphics()->GetRenderer3D(); const cVector2f size=init->mpGame->GetGraphics()->GetLowLevel()->GetScreenSize();
+            char name[64]; std::snprintf(name,sizeof name,"render_%llu.bmp",(unsigned long long)Milliseconds());
+            const tString path=cString::To8Char(CoopPersonalDirectory()+PERSONAL_RELATIVEROOT PERSONAL_RELATIVEGAME)+name;
+            Log("[COOP/RENDER] F9 screen=%.0fx%.0f post=%d bloom=%d motion_blur=%d image_trail=%d dof_post=%d dof_max_blur=%.2f dof_effect=%d dof_disabled=%d fog=%d menu=%d message=%d player_state=%d map=%s screenshot=%s\n",
+                size.x,size.y,post->GetActive()?1:0,post->GetBloomActive()?1:0,post->GetMotionBlurActive()?1:0,post->GetImageTrailActive()?1:0,
+                post->GetDepthOfFieldActive()?1:0,post->GetDepthOfFieldMaxBlur(),dof->IsActive()?1:0,dof->IsDisabled()?1:0,r3d->GetFogActive()?1:0,
+                init->mpMainMenu&&init->mpMainMenu->IsActive()?1:0,init->mpGameMessageHandler->HasMessage()?1:0,int(init->mpPlayer->GetState()),
+                init->mpMapHandler->GetCurrentMapName().c_str(),path.c_str());
+            hpl::gsScreenshotRequest=path;
+        }
+        renderDiagKey=f9;
+    }
     if(!IsOnline()) return;
     steam.Update();
     if(IsHost()) transport.Poll(); else g->session.Poll();
@@ -997,6 +1025,7 @@ void cCoopNetwork::Update(float dt) {
         if(IsHost() && &guest!=guests[0].get() && guest.player && guest.player->GetCharacterBody()) { ExitWorld(guest); continue; }
         if(guest.player && guest.player->GetCharacterBody()) { PlayerScope scope(init,guest.player,guest.hands); guest.player->SetActive(false); guest.player->GetCharacterBody()->SetMoveSpeed(eCharDir_Forward,0); guest.player->GetCharacterBody()->SetMoveSpeed(eCharDir_Right,0); }
     }
+    UpdateLobby(dt);
     if(!anyConnected) return;
     const auto perfStart=std::chrono::steady_clock::now();
     (IsHost()?g->diag.clock:clientDiag.clock).Tick(Milliseconds());
@@ -1700,8 +1729,13 @@ bool cCoopNetwork::PublishEntity(iGameEntity* entity,bool baseline) {
         // come posa non affidabile dopo la conferma del mondo.
         if(baseline && found!=g->published.end() && !lifecycle) return true;
         if(lifecycle || moved) {
+            // Ripartenza dopo una pausa (nessuna posa da più di 4 tick): il client
+            // sa che la posa precedente è rimasta valida fino a poco fa (bit 64,
+            // solo in questo invio; non entra nel confronto dello stato).
+            const bool resumed=!lifecycle && !baseline && found!=g->published.end() && int32_t(hostTick-found->second.hostTick)>4;
             e.sequence=++g->sequence; e.hostTick=hostTick;
-            const bool sent=(baseline || lifecycle)?g->session.SendEntity(e):g->session.SendEntityMotion(e);
+            online::EntityState wire=e; if(resumed) wire.flags|=64;
+            const bool sent=(baseline || lifecycle)?g->session.SendEntity(e):g->session.SendEntityMotion(wire);
             if(!sent && online::EncodeEntity(e).empty() && unsendableLogged.insert(std::to_string(g->map.epoch)+"/"+name).second)
                 Log("[NET/WORLD] Cannot encode entity name=%s file=%s type=%u bodies=%u animations=%u health=%d state=%u target=%u; the baseline cannot complete\n",
                     name.c_str(),e.file.c_str(),unsigned(e.type),unsigned(e.bodies.size()),unsigned(e.animations.size()),e.health,unsigned(e.enemyState),unsigned(e.target));
@@ -1786,6 +1820,11 @@ void cCoopNetwork::ApplyEntity(const online::EntityState& s) {
         m.lastArrival=now;
     }
     if(!s.liveMotion) history.Clear();
+    // Un oggetto fermo non riceve pose (l'host invia solo i cambiamenti): quando l'host
+    // lo segnala in ripartenza (bit 64), la sua posa precedente valeva fino a un periodo del mondo prima
+    // di questa. Senza questo campione l'interpolazione partiva dall'ultima posa
+    // vecchia di molti tick e il primo spostamento appariva in un solo tick.
+    else if((s.flags&64) && !history.Empty() && int32_t(s.hostTick-history.NewestTick())>2) { const Pose still=history.Newest(); history.Add(s.hostTick-2,still); }
     history.Add(s.hostTick,pose); NoteHostTick(s.hostTick);
 }
 // Posa di un altro giocatore sulla linea temporale dell'host, tra le due pose
@@ -1870,11 +1909,13 @@ void cCoopNetwork::UpdateAvatar(const online::PlayerState& s,float dt) {
     }
 }
 void cCoopNetwork::RunQA(float dt) {
+    if(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))=="lobby") { RunLobbyQA(dt); return; }
     if(!getenv("PENUMBRA_COOP_QA") || (!Ready() && qaTime<=0)) return;
     qaTime+=dt;
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="maps") { RunMapsQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="party") { RunPartyQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="cabin") { RunCabinQA(dt); return; }
+    if(std::string(getenv("PENUMBRA_COOP_QA"))=="lamp") { RunLampQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="hammer") { RunHammerQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="campaign") { if(hammerTime<10) RunHammerQA(dt); else RunCampaignQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="resume") { RunCampaignQA(dt); return; }
@@ -2473,6 +2514,233 @@ void cCoopNetwork::RunCabinQA(float dt) {
     if(qaCabinStep==99) { Log("[COOP/QA] FAIL cabin exit role=host\n"); qaCabinStep=100; qaCabinAt=qaTime; }
     if((qaCabinStep==9 || qaCabinStep==100) && qaTime>qaCabinAt+10) init->mpGame->Exit();
     if(qaTime>160) { Log("[COOP/QA] FAIL cabin exit role=host timeout step=%d\n",qaCabinStep); init->mpGame->Exit(); }
+}
+void cCoopNetwork::SetLobbyReady(bool ready) {
+    lobbyReady=ready;
+    for(auto& guest:guests) guest->session.SetLobbyReady(ready);
+    Log("[COOP/LOBBY] Ready=%d role=%s name=%s\n",ready?1:0,IsHost()?"host":"client",lobbyName.c_str());
+}
+void cCoopNetwork::StartFromLobby() {
+    lobbyParticipants.clear();
+    for(auto& guest:guests) if(guest->session.Connected()) lobbyParticipants.insert(guest->session.GuestPlayerId());
+    Log("[COOP/LOBBY] Start: %u guest(s) loading\n",unsigned(lobbyParticipants.size()));
+    lobbyPhase=1; lobbyWait=0; lobbySendTime=1;
+    // Fase 1 prima del caricamento (che blocca il gioco): i client mostrano "caricamento".
+    online::LobbyState s=lobbyView; s.phase=1; for(auto& guest:guests) if(guest->session.Connected()) guest->session.SendLobby(s);
+    for(auto& guest:guests) guest->session.Poll();
+    init->mpPlayer->SetActive(true);
+    init->StartCampaign();
+    // Il mondo resta fermo (script, timer, fisica) finché tutti non lo hanno caricato.
+    init->mpGame->GetScene()->SetUpdateMap(false);
+}
+void cCoopNetwork::UpdateLobby(float dt) {
+    if(!lobbyEnabled) return;
+    // Gli effetti (bloom) lavorano sul fotogramma precedente: senza scena fanno
+    // brillare il testo della lobby. Spenti durante la lobby, ripristinati dopo.
+    auto* post=init->mpGame->GetGraphics()->GetRendererPostEffects();
+    if(lobbyPhase!=2 && !lobbyPostSaved) { lobbyPostActive=post->GetActive(); lobbyPostSaved=true; post->SetActive(false); }
+    if(lobbyPhase==2) { if(lobbyPostSaved) { post->SetActive(lobbyPostActive); lobbyPostSaved=false; } return; }
+    auto* keyboard=init->mpGame->GetInput()->GetKeyboard();
+    const bool menu=init->mpMainMenu && init->mpMainMenu->IsActive();
+    const bool r=!menu && keyboard->KeyIsDown(eKey_r), enter=!menu && keyboard->KeyIsDown(eKey_RETURN);
+    const bool rPressed=r && !lobbyKeyR, enterPressed=enter && !lobbyKeyEnter; lobbyKeyR=r; lobbyKeyEnter=enter;
+    // Senza mappa il personaggio non ha corpo: niente input finché si è in lobby.
+    if(lobbyPhase==0 && IsHost() && init->mpPlayer->IsActive()) init->mpPlayer->SetActive(false);
+    if(lobbyPhase==0 && rPressed) SetLobbyReady(!lobbyReady);
+    lobbyNoticeTime=std::max(0.0f,lobbyNoticeTime-dt);
+    if(IsHost()) {
+        online::LobbyState s; s.phase=lobbyPhase;
+        s.players.push_back({online::HostPlayerId,lobbyReady,lobbyName});
+        bool allReady=lobbyReady;
+        for(auto& guest:guests) {
+            if(!guest->session.Connected()) continue;
+            const uint8_t id=guest->session.GuestPlayerId(); std::string name=guest->session.RemoteName();
+            if(name.empty()) name="Player "+std::to_string(id);
+            s.players.push_back({id,guest->session.RemoteReady(),name}); allReady=allReady && guest->session.RemoteReady();
+        }
+        std::string summary=std::to_string(s.phase)+":"; for(const auto& p:s.players) summary+=p.name+(p.ready?"+":"-")+" ";
+        const bool changed=summary!=lobbyLogged;
+        if(changed) { Log("[COOP/LOBBY] State phase=%u players=%s\n",unsigned(s.phase),summary.c_str()); lobbyLogged=summary; }
+        lobbyView=s; lobbySendTime+=dt;
+        if(changed || lobbySendTime>=1) { lobbySendTime=0; for(auto& guest:guests) if(guest->session.Connected()) guest->session.SendLobby(s); }
+        if(lobbyPhase==0 && enterPressed) {
+            if(allReady) StartFromLobby();
+            else { lobbyNotice="Non tutti sono pronti."; lobbyNoticeTime=3; Log("[COOP/LOBBY] Start refused: not everyone is ready\n"); }
+        }
+        if(lobbyPhase==1) {
+            lobbyWait+=dt;
+            bool all=true; unsigned loaded=0;
+            for(auto& guest:guests) {
+                if(!lobbyParticipants.count(guest->session.GuestPlayerId())) continue;
+                if(!guest->session.Connected()) continue; // uscito: non si aspetta
+                if(guest->map.epoch && guest->session.IsWorldApplied(guest->map.epoch)) ++loaded; else all=false;
+            }
+            if(all || lobbyWait>90) {
+                lobbyPhase=2; init->mpGame->GetScene()->SetUpdateMap(true);
+                Log("[COOP/LOBBY] Session ready: %u guest(s) loaded after %.1f s%s; gameplay starts\n",loaded,lobbyWait,all?"":" (timeout)");
+                s.phase=2; for(auto& guest:guests) if(guest->session.Connected()) guest->session.SendLobby(s);
+                lobbyView=s;
+            }
+        }
+    } else {
+        online::LobbyState s;
+        if(g->session.ReadLobby(s)) {
+            if(s.phase!=lobbyView.phase || s.players.size()!=lobbyView.players.size()) {
+                std::string summary; for(const auto& p:s.players) summary+=p.name+(p.ready?"+":"-")+" ";
+                Log("[COOP/LOBBY] State phase=%u players=%s\n",unsigned(s.phase),summary.c_str());
+            }
+            lobbyView=s;
+            if(s.phase>=1 && lobbyPhase==0) lobbyPhase=1;
+            if(s.phase==2) lobbyPhase=2;
+        }
+        if(!g->session.Connected() && lobbyPhase==0 && lobbyNoticeTime<=0) { lobbyNotice="Collegamento all'host..."; lobbyNoticeTime=0.5f; }
+    }
+}
+void cCoopNetwork::OnDraw() {
+    if(!LobbyActive() || !init->mpDefaultFont || (init->mpMainMenu && init->mpMainMenu->IsActive())) return;
+    auto* font=init->mpDefaultFont;
+    auto text=[&](float x,float y,float size,const cColor& color,eFontAlign align,const std::string& s) {
+        const tWString w=cString::To16Char(s);
+        font->Draw(cVector3f(x+1,y+1,190),cVector2f(size),cColor(0,0,0,1),align,_W("%ls"),w.c_str());
+        font->Draw(cVector3f(x,y,191),cVector2f(size),color,align,_W("%ls"),w.c_str());
+    };
+    const cColor white(1,1,1,1), grey(0.7f,0.7f,0.7f,1), green(0.4f,1,0.4f,1), red(1,0.5f,0.4f,1);
+    text(400,110,26,white,eFontAlign_Center,"PENUMBRA: OVERTURE - CO-OP");
+    if(lobbyPhase==1) {
+        text(400,200,20,white,eFontAlign_Center,IsHost()?"Caricamento: si aspetta che tutti abbiano caricato la mappa...":"Caricamento: la partita parte quando tutti hanno caricato...");
+        return;
+    }
+    text(400,150,18,grey,eFontAlign_Center,IsHost()?"Lobby - sei l'HOST":"Lobby - sei un CLIENT");
+    float y=200;
+    for(const auto& p:lobbyView.players) {
+        const bool self=IsHost()?p.id==online::HostPlayerId:p.id==g->session.GuestPlayerId();
+        text(220,y,18,self?white:grey,eFontAlign_Left,p.name+(self?" (tu)":""));
+        text(470,y,18,grey,eFontAlign_Left,p.id==online::HostPlayerId?"HOST":"CLIENT");
+        text(580,y,18,p.ready?green:red,eFontAlign_Left,p.ready?"PRONTO":"NON PRONTO");
+        y+=28;
+    }
+    if(lobbyView.players.empty()) text(400,y,18,grey,eFontAlign_Center,IsHost()?"In attesa dei giocatori...":"Collegamento all'host...");
+    y=std::max(y+30,360.0f);
+    text(400,y,16,white,eFontAlign_Center,lobbyReady?"R: annulla Pronto":"R: Pronto");
+    if(IsHost()) text(400,y+24,16,white,eFontAlign_Center,"INVIO: avvia la partita (quando tutti sono pronti)");
+    else text(400,y+24,16,grey,eFontAlign_Center,"L'host avvia la partita quando tutti sono pronti.");
+    text(400,y+48,14,grey,eFontAlign_Center,"ESC: menu (per uscire)");
+    if(lobbyNoticeTime>0) text(400,y+80,16,red,eFontAlign_Center,lobbyNotice);
+}
+// QA "lobby": host e client con la lobby. Il client si dichiara pronto, annulla
+// e torna pronto; l'host prova ad avviare prima che tutti siano pronti
+// (rifiutato), poi si dichiara pronto e avvia. Il client non deve ricevere la
+// mappa prima dell'avvio; l'host deve tenere fermo il mondo finché il client
+// non l'ha caricato.
+void cCoopNetwork::RunLobbyQA(float dt) {
+    qaTime+=dt;
+    if(IsClient()) {
+        if(qaStage==0 && qaTime>2 && g->session.Connected()) { SetLobbyReady(true); qaStage=1; }
+        if(qaStage==1 && qaTime>3) { SetLobbyReady(false); qaStage=2; }
+        if(qaStage==2 && qaTime>4) { SetLobbyReady(true); qaStage=3; }
+        if(qaStage<4 && g->map.epoch && lobbyPhase==0) { Log("[COOP/QA] Lobby map received before start\n"); qaStage=99; }
+        if(qaStage==3 && lobbyPhase==2 && Ready()) { qaStage=4; qaCabinAt=qaTime; }
+        if(qaStage==4 && qaTime>qaCabinAt+3) {
+            const bool ok=lobbyView.players.size()==2 && lobbyView.players[0].name=="QAHost";
+            Log("[COOP/QA] %s lobby start role=client players=%u host_name=%s map=%s\n",ok?"PASS":"FAIL",unsigned(lobbyView.players.size()),lobbyView.players.empty()?"":lobbyView.players[0].name.c_str(),g->map.file.c_str());
+            qaStage=5;
+        }
+        if(qaStage==5 && qaTime>qaCabinAt+6) init->mpGame->Exit();
+        if(qaTime>90) { Log("[COOP/QA] FAIL lobby start role=client timeout stage=%d phase=%u\n",qaStage,unsigned(lobbyPhase)); init->mpGame->Exit(); }
+        return;
+    }
+    if(qaStage==0 && qaTime>3.5f) {
+        // Il client ha annullato e non è ancora di nuovo pronto: avvio rifiutato.
+        lobbyKeyEnter=false; online::LobbyState before=lobbyView;
+        const bool clientSeen=before.players.size()==2 && before.players[1].name=="QAClient";
+        Log("[COOP/QA] Lobby host sees players=%u client_name_ok=%d\n",unsigned(before.players.size()),clientSeen?1:0);
+        qaPuzzle=clientSeen; qaStage=1;
+    }
+    if(qaStage==1 && qaTime>5) { SetLobbyReady(true); qaStage=2; }
+    if(qaStage==2 && qaTime>6) {
+        bool all=lobbyReady; for(auto& guest:guests) if(guest->session.Connected()) all=all && guest->session.RemoteReady();
+        if(all) { qaMoved=!init->mpMapHandler->GetCurrentMapName().empty(); StartFromLobby(); qaStage=3; qaCabinAt=qaTime; }
+        else if(qaTime>20) { Log("[COOP/QA] FAIL lobby: not everyone ready\n"); qaStage=99; }
+    }
+    // Dopo l'avvio: il mondo è fermo finché il client non ha applicato la mappa.
+    if(qaStage==3) {
+        const bool paused=!init->mpGame->GetScene()->GetUpdateMap();
+        if(lobbyPhase==1 && !paused) qaReplicated=true; // errore: mondo in moto durante l'attesa
+        if(lobbyPhase==2) { Log("[COOP/QA] Lobby session ready after %.1f s world_moved_while_waiting=%d\n",qaTime-qaCabinAt,qaReplicated?1:0); qaStage=4; qaCabinAt=qaTime; }
+        if(qaTime>qaCabinAt+60) { Log("[COOP/QA] FAIL lobby: session never ready\n"); qaStage=99; }
+    }
+    if(qaStage==4 && qaTime>qaCabinAt+3) {
+        const bool ok=qaPuzzle && !qaMoved && !qaReplicated && Ready() && init->mpGame->GetScene()->GetUpdateMap();
+        Log("[COOP/QA] %s lobby start role=host client_seen=%d map_before_start=%d map=%s\n",ok?"PASS":"FAIL",qaPuzzle?1:0,qaMoved?1:0,g->map.file.c_str());
+        qaStage=5;
+    }
+    if(qaStage==99) { Log("[COOP/QA] FAIL lobby start role=host\n"); qaStage=5; qaCabinAt=qaTime-3; }
+    if(qaStage==5 && qaTime>qaCabinAt+8) init->mpGame->Exit();
+    if(qaTime>100) init->mpGame->Exit();
+}
+void cCoopNetwork::RunLampQA(float dt) {
+    auto* lamp=init->mpMapHandler->GetGameEntity("parrafinlight",false);
+    if(!lamp || lamp->GetBodyNum()<1) { if(qaTime>10) { Log("[COOP/QA] FAIL lamp: entity missing\n"); init->mpGame->Exit(); } return; }
+    auto center=[&](int n){ return lamp->GetBody(n)->GetBV()->GetWorldCenter(); };
+    auto measure=[&](){
+        // Solo gli anelli dinamici: i corpi collisore della lanterna stanno all'origine.
+        float moved=0; for(int n=0;n<lamp->GetBodyNum() && n<int(qaLampRest.size());++n) if(lamp->GetBody(n)->GetName().find("collider")==std::string::npos) moved=std::max(moved,(center(n)-qaLampRest[n]).Length());
+        float link=lamp->GetBodyNum()>2?(center(0)-center(2)).Length():0;
+        return std::make_pair(moved,link);
+    };
+    // Fasi (secondi): 0-4 riposo; 4 l'host si mette a 1,2 m e cammina 1,5 s verso
+    // la lanterna; 12 misura; 14 l'host si sposta e l'ospite viene messo a 1,2 m;
+    // 16 il client cammina 1,5 s; 24 misura.
+    const float phases[]={4,12,14,24};
+    if(qaTime>(IsHost()?3.5f:1.0f) && qaLampRest.empty()) { for(int n=0;n<lamp->GetBodyNum();++n) qaLampRest.push_back(center(n)); qaLampRestLink=measure().second; Log("[COOP/QA] Lamp rest bodies=%d link_m=%.3f role=%s\n",lamp->GetBodyNum(),qaLampRestLink,IsHost()?"host":"client"); }
+    if(qaLampRest.empty()) return;
+    auto m=measure(); qaLampMax=std::max(qaLampMax,m.first); qaLampLinkMax=std::max(qaLampLinkMax,std::fabs(m.second-qaLampRestLink));
+    auto approach=[&](cPlayer* p){
+        cVector3f target=qaLampRest.back(); cVector3f feet=p->GetCharacterBody()->GetFeetPosition();
+        cVector3f dir=feet-target; dir.y=0; if(dir.SqrLength()<1e-4f) dir=cVector3f(1,0,0); dir.Normalise();
+        feet=cVector3f(target.x,feet.y,target.z)+dir*1.2f; p->GetCharacterBody()->SetFeetPosition(feet);
+        const auto a=AimAngles(feet+cVector3f(0,1.5f,0),cVector3f(target.x,feet.y+1.5f,target.z));
+        p->GetCamera()->SetYaw(a.y); p->GetCamera()->SetPitch(0); p->GetCharacterBody()->SetYaw(a.y);
+    };
+    auto report=[&](const char* who){
+        auto now=measure();
+        Log("[COOP/QA] Lamp pushed_by=%s role=%s max_moved_m=%.3f residual_m=%.3f link_stretch_max_m=%.3f link_now_m=%.3f\n",who,IsHost()?"host":"client",qaLampMax,now.first,qaLampLinkMax,now.second);
+        for(int n=0;n<lamp->GetBodyNum();++n) {
+            const cVector3f c=center(n); cVector3f newest(0); unsigned tick=0; auto it=motion.find("parrafinlight");
+            if(it!=motion.end() && !it->second.history.Empty() && n<int(it->second.history.Newest().bodies.size())) { newest=it->second.history.Newest().bodies[n].GetTranslation(); tick=it->second.history.NewestTick(); }
+            const cVector3f local=lamp->GetBody(n)->GetLocalPosition();
+            Log("[COOP/QA] Lamp body=%d name=%s mass=%.2f center=%.3f/%.3f/%.3f local=%.3f/%.3f/%.3f newest=%.3f/%.3f/%.3f newest_tick=%u host_tick=%u\n",n,lamp->GetBody(n)->GetName().c_str(),lamp->GetBody(n)->GetMass(),c.x,c.y,c.z,local.x,local.y,local.z,newest.x,newest.y,newest.z,tick,IsHost()?hostTick:newestHostTick);
+        }
+        qaLampMax=0; qaLampLinkMax=0;
+    };
+    if(IsHost()) {
+        init->mpGameMessageHandler->Reset(); init->mpPlayer->SetActive(true); init->mpFadeHandler->FadeIn(0);
+        if(qaStage==0 && qaTime>phases[0]) { approach(init->mpPlayer); qaStage=1; qaCabinAt=qaTime; }
+        if(qaStage==1 && qaTime<qaCabinAt+1.5f) init->mpPlayer->MoveForwards(1,dt);
+        if(qaStage==1 && qaTime>phases[1]) { report("host"); qaStage=2; }
+        if(qaStage==2 && qaTime>phases[2]) {
+            cVector3f away=init->mpPlayer->GetCharacterBody()->GetFeetPosition(); cVector3f dir=away-qaLampRest.back(); dir.y=0; dir.Normalise();
+            init->mpPlayer->GetCharacterBody()->SetFeetPosition(away+dir*1.5f);
+            { PlayerScope scope(init,remotePlayer,remoteHands); approach(remotePlayer); }
+            qaStage=3;
+        }
+        if(qaStage==3 && qaTime>phases[3]) { report("guest"); qaStage=4; qaCabinAt=qaTime; }
+        if(qaStage==4 && qaTime>qaCabinAt+9) init->mpGame->Exit();
+    } else {
+        if(qaStage==0 && qaTime>phases[1]) { report("host"); qaStage=1; }
+        // Il client guarda la lanterna e cammina, come un giocatore.
+        if(qaStage==1 && qaTime>phases[2]+2) {
+            cVector3f eye=init->mpPlayer->GetCamera()->GetPosition(); cVector3f target=qaLampRest.back(); target.y=eye.y;
+            const auto a=AimAngles(eye,target); init->mpPlayer->GetCamera()->SetYaw(a.y); init->mpPlayer->GetCamera()->SetPitch(0);
+            qaPartyWalking=true; qaStage=2; qaCabinAt=qaTime;
+        }
+        if(qaStage==2 && qaTime>qaCabinAt+1.5f) { qaPartyWalking=false; qaStage=3; }
+        if(qaStage==3 && qaTime>phases[3]+0.5f) { report("guest"); qaStage=4; qaCabinAt=qaTime; }
+        if(qaStage==4 && qaTime>qaCabinAt+2) { Log("[COOP/QA] PASS lamp measurement role=client\n"); qaStage=5; }
+        if(qaStage==5 && qaTime>qaCabinAt+5) init->mpGame->Exit();
+    }
+    if(IsHost() && qaStage==4 && qaTime>qaCabinAt+1) { Log("[COOP/QA] PASS lamp measurement role=host\n"); qaStage=6; }
+    if(IsHost() && qaStage==6 && qaTime>qaCabinAt+9) init->mpGame->Exit();
 }
 void cCoopNetwork::RunHammerQA(float dt) {
     if(IsClient()) init->mbSimpleWeaponSwing=getenv("PENUMBRA_COOP_QA_SIMPLE") && std::string(getenv("PENUMBRA_COOP_QA_SIMPLE"))=="1";

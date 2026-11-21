@@ -97,6 +97,9 @@ public:
 	void Reset();
 
 	void ResetGame(bool abRunInitScript);
+	// Co-op: carica la prima mappa (o il checkpoint da riprendere). Con la
+	// lobby l'host la chiama solo quando tutti sono pronti.
+	void StartCampaign();
 
 	void RunScriptCommand(const tString& asCommand);
 

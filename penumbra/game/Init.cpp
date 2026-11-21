@@ -666,12 +666,7 @@ mpGame->GetResources()->AddResourceDir("models/player");
 	}
 	else
 	{
-		if(!mpCoop->IsClient()) {
-            const char* resume=getenv("PENUMBRA_COOP_RESUME");
-            if(mpCoop->IsHost() && resume && std::string(resume)=="1") {
-                if(!mpSaveHandler->LoadCheckpoint()) FatalError("Cannot restore cooperative checkpoint. Start a new game or restore a valid backup.\n");
-            } else mpMapHandler->Load(msStartMap,msStartLink);
-        }
+		if(!mpCoop->IsClient() && !mpCoop->LobbyHoldsStart()) StartCampaign();
 	}
 
 	if (gbUsingUserSettings) {
@@ -694,6 +689,14 @@ mpGame->GetResources()->AddResourceDir("models/player");
 }
 
 //-----------------------------------------------------------------------
+
+void cInit::StartCampaign()
+{
+	const char* resume=getenv("PENUMBRA_COOP_RESUME");
+	if(mpCoop->IsHost() && resume && std::string(resume)=="1") {
+		if(!mpSaveHandler->LoadCheckpoint()) FatalError("Cannot restore cooperative checkpoint. Start a new game or restore a valid backup.\n");
+	} else mpMapHandler->Load(msStartMap,msStartLink);
+}
 
 void cInit::ResetGame(bool abRunInitScript)
 {

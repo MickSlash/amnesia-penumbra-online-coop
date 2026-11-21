@@ -22,7 +22,7 @@ namespace online {
 // counts intentional teleports (respawn, scripts) so they are never eased.
 // 7: ID dei giocatori (1 = host, 2..4 = ospiti). Welcome assegna l'ID
 // all'ospite; gli snapshot hanno da 2 a 4 giocatori, ognuno con il suo ID.
-constexpr uint16_t ProtocolVersion = 8;
+constexpr uint16_t ProtocolVersion = 9;
 constexpr size_t MaxPlayers = 4;
 constexpr uint8_t HostPlayerId = 1;
 // Intestazione 22 byte (con il numero di giocatori) + 61 byte per giocatore.
@@ -38,7 +38,19 @@ constexpr uint32_t ConservativeDatagramBytes = 576;
 // reliable packet. A 256 KiB cap can reject the very retransmit that drains it.
 constexpr uint32_t TransportWaitingDataBytes = 4 * 1024 * 1024;
 enum class Role { Offline, Host, Client };
-enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17, Loading = 18, WorldApplied = 19, InputBatch = 20 };
+enum class Message : uint8_t { Hello = 1, Welcome = 2, Input = 3, Snapshot = 4, Map = 5, MapReady = 6, Entity = 7, Action = 8, WorldReady = 9, Inventory = 10, Presentation = 11, Life = 12, Media = 13, Journal = 14, Peer = 15, Checkpoint = 16, CheckpointAck = 17, Loading = 18, WorldApplied = 19, InputBatch = 20, Lobby = 21 };
+// Lobby prepartita (protocollo 9): l'host invia a ogni ospite la fase e i
+// giocatori collegati; ognuno invia il proprio nickname e lo stato "pronto"
+// con il messaggio Peer.
+struct LobbyPlayer { uint8_t id = 0; bool ready = false; std::string name; };
+struct LobbyState {
+    uint8_t phase = 0; // 0 lobby, 1 caricamento (si aspetta chi carica), 2 partita
+    std::vector<LobbyPlayer> players;
+};
+constexpr size_t MaxNameBytes = 24;
+std::vector<uint8_t> EncodeLobby(const LobbyState& lobby);
+bool DecodeLobby(const uint8_t* data, size_t size, LobbyState& lobby);
+bool ValidName(const std::string& name);
 struct JournalEntry {
     uint8_t kind = 0; // note, diary, quest
     bool active = true;
@@ -218,6 +230,11 @@ public:
     uint32_t Ping() const;
     uint32_t PingVariance() const;
     void SetLobbyReady(bool ready);
+    // Nickname di questo giocatore (inviato con lo stato pronto) e dell'altro capo.
+    void SetLocalName(const std::string& name);
+    const std::string& RemoteName() const { return remoteName_; }
+    bool SendLobby(const LobbyState& lobby);
+    bool ReadLobby(LobbyState& lobby) const { if(!hasLobby_) return false; lobby = lobby_; return true; }
     bool LobbyReady() const { return Connected() && localReady_ && remoteReady_; }
     bool LocalReady() const { return localReady_; }
     bool RemoteReady() const { return remoteReady_; }
@@ -286,6 +303,9 @@ private:
     uint64_t identity_ = 0, expectedIdentity_ = 0;
     uint32_t generation_ = 0;
     bool fatal_ = false, localReady_ = true, remoteReady_ = false;
+    std::string localName_, remoteName_;
+    LobbyState lobby_;
+    bool hasLobby_ = false;
     bool closing_ = false, partnerLeftVoluntarily_ = false;
     uint32_t closeStarted_ = 0;
     uint16_t listenPort_ = DefaultPort, remotePort_ = DefaultPort;
