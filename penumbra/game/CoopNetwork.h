@@ -21,6 +21,11 @@ class cSavedGame;
 class cPlayer_GlobalSave;
 class cNotebook_Note;
 
+// Massa di un corpo per mirino e scelta dell'oggetto. Sul client i corpi
+// replicati stanno a massa 0 (li muove l'host); qui torna quella originale,
+// così la mano per afferrare compare come nel gioco.
+float CoopPickMass(hpl::iPhysicsBody* body);
+
 class cCoopNetwork : public hpl::iUpdateable, public hpl::iSoundEntityGlobalCallback {
 public:
     // Stato della guida a velocità di un corpo replicato (vedi DriveBody in CoopNetwork.cpp).
@@ -358,4 +363,8 @@ private:
     // QA (full): diario personale, dopo il cambio di mappa.
     float qaDiaryAt = 0, qaDiaryOpenedAt = 0;
     bool qaDiary = false, qaDiaryOpened = false, qaDiaryHeld = false, qaDiaryDeferred = false, qaDiaryHostClosed = false;
+    // QA (full, client): mano sugli oggetti replicati; postura seguita dall'host.
+    bool qaHand = false, qaHandChecked = false, qaCrouchDown = false, qaCrouchUp = false;
+    int qaCrouchStep = 0;
+    float qaCrouchAt = 0;
 };

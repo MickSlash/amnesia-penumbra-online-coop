@@ -260,7 +260,7 @@ eCrossHairState iGameEntity::GetPickCrossHairState(iPhysicsBody *apBody)
 	//////////////////////////////////////////
 	//Interaction available
 	cGameStickArea *pStickArea = mpInit->mpMapHandler->GetBodyStickArea(apBody);
-	if(apBody->GetMass()!=0 || mType == eGameEntityType_Area || (pStickArea && pStickArea->GetCanDeatch()) )
+	if(CoopPickMass(apBody)!=0 || mType == eGameEntityType_Area || (pStickArea && pStickArea->GetCanDeatch()) )
 	{
 		if(mvCallbackScripts[eGameEntityScriptType_PlayerInteract] || mbHasInteraction)
 		{
@@ -280,7 +280,7 @@ eCrossHairState iGameEntity::GetPickCrossHairState(iPhysicsBody *apBody)
 	if(mvCallbackScripts[eGameEntityScriptType_PlayerInteract] || mbHasInteraction)
 	{
 		//if(fDistance <= mfMaxExamineDist) return eCrossHairState_Invalid;
-		if(apBody->GetMass()==0 && mvCallbackScripts[eGameEntityScriptType_PlayerInteract]==NULL)
+		if(CoopPickMass(apBody)==0 && mvCallbackScripts[eGameEntityScriptType_PlayerInteract]==NULL)
 		{
 			return eCrossHairState_None;
 		}

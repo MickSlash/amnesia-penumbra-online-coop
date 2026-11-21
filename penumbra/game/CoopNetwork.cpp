@@ -17,6 +17,7 @@
 #include "GameMusicHandler.h"
 #include "HudModel_Weapon.h"
 #include "PlayerState_Weapon.h"
+#include "ButtonHandler.h"
 #include "graphics/Renderer3D.h"
 #include "resources/TextureManager.h"
 #include <algorithm>
@@ -27,6 +28,7 @@
 #include <fstream>
 #include <set>
 #include <thread>
+#include <unordered_map>
 
 using namespace hpl;
 namespace hpl { extern bool gbGameScriptExecution; }
@@ -87,6 +89,8 @@ struct NativeStepper {
 // quindi niente compenetrazioni, e il personaggio del client può spingerlo
 // subito come sull'host. Scatto solo per errori grandi o corpo incastrato;
 // a riposo il corpo viene bloccato esattamente nella posa dell'host.
+// Client: massa originale dei corpi replicati messi a massa 0 (vedi CoopPickMass).
+std::unordered_map<const iPhysicsBody*,float> gReplicaMass;
 bool BodyDriveEnabled() { const char* v=getenv("PENUMBRA_COOP_BODY_DRIVE"); return v && std::string(v)=="1"; }
 float VectorLength(const cVector3f& v) { return std::sqrt(v.x*v.x+v.y*v.y+v.z*v.z); }
 cVector3f ClampLength(const cVector3f& v,float limit) { const float l=VectorLength(v); return l>limit && l>0 ? v*(limit/l) : v; }
@@ -489,7 +493,7 @@ void cCoopNetwork::BeforeMapLoad() {
     positioned=false; hasClientPosition=false; snapshotAge=0;
     prediction.Clear(); ResetPlayback();
     for(auto& guest:guests) { ResetGuestMap(*guest); guest->pendingSave.reset(); guest->pendingWeapon.clear(); }
-    restoredEquipment=false; baselineNames.clear(); receivedJournal=0; pendingNote.clear(); deferredMessages.clear(); replicatedSounds.clear();
+    restoredEquipment=false; baselineNames.clear(); receivedJournal=0; pendingNote.clear(); deferredMessages.clear(); replicatedSounds.clear(); gReplicaMass.clear();
     currentMusic.clear(); currentSkybox.clear();
 }
 // Punto libero vicino a `center` per il corpo `body`: prima le posizioni
@@ -1080,8 +1084,16 @@ void cCoopNetwork::UpdateGuest(float dt) {
             }
             if((input.buttons&4) && !(g->buttons&4)) remotePlayer->StartRun();
             if(!(input.buttons&4) && (g->buttons&4)) remotePlayer->StopRun();
-            if((input.buttons&2) && !(g->buttons&2)) remotePlayer->StartCrouch();
-            if(!(input.buttons&2) && (g->buttons&2)) remotePlayer->StopCrouch();
+            // Il bit 2 è lo stato del client (accovacciato o no), non il tasto:
+            // con "Accovacciati a interruttore" (predefinito) StartCrouch alterna
+            // e StopCrouch non fa nulla, e l'ospite restava giù sull'host. Lo
+            // stato si applica a ogni comando, così si riallinea da solo (anche
+            // dopo un salto, durante il quale il gioco non cambia postura).
+            {
+                const bool crouch=(input.buttons&2)!=0; const auto move=remotePlayer->GetMoveState();
+                if(crouch && move!=ePlayerMoveState_Crouch && move!=ePlayerMoveState_Jump) remotePlayer->ChangeMoveState(ePlayerMoveState_Crouch);
+                if(!crouch && move==ePlayerMoveState_Crouch) remotePlayer->ChangeMoveState(ePlayerMoveState_Walk);
+            }
             if((input.buttons&1) && !(g->buttons&1)) remotePlayer->Jump();
             remotePlayer->SetJumpButtonDown((input.buttons&1)!=0); g->buttons=input.buttons; g->lastInput=input.sequence;
             remotePlayer->MoveForwards(input.forward/1000.0f,dt); remotePlayer->MoveSideways(input.strafe/1000.0f,dt);
@@ -1435,9 +1447,11 @@ void cCoopNetwork::UpdateClient(float dt) {
         if(init->mpGame->GetUpdater()->GetCurrentContainerName()=="Default" && p->IsActive() && !init->mpGameMessageHandler->HasMessage()) {
             input.forward=(keys->IsTriggerd("Forward")?1000:0)-(keys->IsTriggerd("Backward")?1000:0);
             input.strafe=(keys->IsTriggerd("Right")?1000:0)-(keys->IsTriggerd("Left")?1000:0);
-            input.buttons=(keys->IsTriggerd("Jump")?1:0)|(p->GetMoveState()==ePlayerMoveState_Crouch?2:0)|(keys->IsTriggerd("Run")?4:0);
+            input.buttons=(keys->IsTriggerd("Jump")?1:0)|(keys->IsTriggerd("Run")?4:0);
         }
-        if(getenv("PENUMBRA_COOP_QA")) { input.forward=input.strafe=0; input.buttons=0; }
+        // La postura è uno stato: va inviata sempre, anche con un messaggio a schermo.
+        if(p->GetMoveState()==ePlayerMoveState_Crouch) input.buttons|=2;
+        if(getenv("PENUMBRA_COOP_QA")) { input.forward=input.strafe=0; input.buttons&=2; }
         if(qaPartyWalking) { input.forward=1000; p->MoveForwards(1,dt); }
         if(getenv("PENUMBRA_COOP_QA") && std::string(getenv("PENUMBRA_COOP_QA"))!="hammer" && qaTime>2 && qaTime<3) {
             input.forward=-1000; input.strafe=0; input.buttons=0; p->MoveForwards(-1,dt);
@@ -1690,6 +1704,7 @@ void cCoopNetwork::ApplyEntity(const online::EntityState& s) {
             // the way (iCharacterBody push callback); the replica is static, so
             // such light bodies must not block the client's character either.
             if(body->GetMass()>0 && body->GetMass()<=init->mpPlayer->GetCharacterBody()->GetMaxPushMass()) body->SetCollideCharacter(false);
+            if(body->GetMass()>0) gReplicaMass[body]=body->GetMass();
             body->SetMass(0); body->SetGravity(false); body->SetLinearVelocity(cVector3f(0)); body->SetAngularVelocity(cVector3f(0));
         }
         if(!s.liveMotion) body->SetMatrix(Unpack(s.bodies[n]));
@@ -1946,6 +1961,11 @@ void cCoopNetwork::RunQA(float dt) {
         }
         // Come un giocatore: prima chiude i pensieri a schermo, poi interagisce.
         if(qaStage==1 && qaTime<8 && init->mpPlayer->GetState()==ePlayerState_Message) init->mpGameMessageHandler->ShowNext();
+        if(full && qaStage==1 && qaTime>7.7f && !qaHandChecked) {
+            auto* body=init->mpPlayer->GetPickedBody(); qaHandChecked=true;
+            qaHand=body && body->GetMass()==0 && CoopPickMass(body)>0 && init->mpPlayer->GetCrossHairState()==eCrossHairState_Active;
+            Log("[COOP/QA] Replica hand picked=%s mass=%.2f original=%.2f crosshair=%d\n",body?body->GetName().c_str():"none",body?body->GetMass():0.0f,CoopPickMass(body),int(init->mpPlayer->GetCrossHairState()));
+        }
         if(qaStage==1 && qaTime>8) { ClientAction(online::PlayerAction::Interact,true); qaStage=2; }
         if(qaStage==2 && qaTime>9.5f && qaTime<10.5f) init->mpPlayer->GetCamera()->AddYaw(dt*.25f);
         if(auto* bottle=qaObject.empty()?nullptr:init->mpMapHandler->GetGameEntity(qaObject,false)) {
@@ -2009,9 +2029,18 @@ void cCoopNetwork::RunQA(float dt) {
             Log("[COOP/QA] Replica diary note_opened=%d stayed_open=%d update_deferred=%d task_after_close=%d read_kept=%d\n",qaDiaryOpened?1:0,qaDiaryHeld?1:0,qaDiaryDeferred?1:0,task?1:0,read?1:0);
             qaStage=14;
         }
+        // Postura: il client si abbassa e si rialza; l'host deve seguirlo anche con
+        // "Accovacciati a interruttore" (predefinito).
+        if(full && qaStage==14 && qaCrouchStep==0) { init->mpPlayer->ChangeMoveState(ePlayerMoveState_Crouch); qaCrouchAt=qaTime; qaCrouchStep=1; }
+        if(full && qaCrouchStep==1 && qaTime>qaCrouchAt+1.2f) { qaCrouchDown=(g->latest.players[1].flags&1)!=0; init->mpPlayer->ChangeMoveState(ePlayerMoveState_Walk); qaCrouchStep=2; }
+        if(full && qaCrouchStep==2 && qaTime>qaCrouchAt+2.6f) {
+            qaCrouchUp=!(g->latest.players[1].flags&1); qaCrouchStep=3;
+            Log("[COOP/QA] Replica crouch host_followed_down=%d host_followed_up=%d toggle=%d\n",qaCrouchDown?1:0,qaCrouchUp?1:0,init->mpButtonHandler->GetToggleCrouch()?1:0);
+        }
     }
     if(qaTime>(full?50:20)) {
-        const bool ok=qaReplicated && (!IsHost() || (qaMoved && qaGrabbed)) && (!full || (qaPuzzle && qaTransition && qaDoorMoved && qaDiary && (!IsHost() || qaDoorGrabbed)));
+        const bool ok=qaReplicated && (!IsHost() || (qaMoved && qaGrabbed)) && (!full || (qaPuzzle && qaTransition && qaDoorMoved && qaDiary && (!IsHost() || qaDoorGrabbed)))
+            && (!full || IsHost() || (qaHand && qaCrouchDown && qaCrouchUp));
         Log("[COOP/QA] %s connected baseline, movement, native grab and replica object map=%s\n",ok?"PASS":"FAIL",g->map.file.c_str()); init->mpGame->Exit();
     }
 }
@@ -2547,4 +2576,9 @@ void cCoopNetwork::OnPostSceneDraw() {
         std::string second(path); second=second.substr(0,second.find_last_of('.'))+"_outside.bmp";
         init->mpGame->GetGraphics()->GetLowLevel()->SaveScreenToBMP(second); qaScreenshots|=2;
     }
+}
+float CoopPickMass(iPhysicsBody* body) {
+    if(!body) return 0;
+    if(body->GetMass()!=0) return body->GetMass();
+    auto it=gReplicaMass.find(body); return it==gReplicaMass.end()?0:it->second;
 }

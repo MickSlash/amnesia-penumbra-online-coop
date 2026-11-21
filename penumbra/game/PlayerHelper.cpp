@@ -369,7 +369,7 @@ void cPlayerPickRayCallback::CalculateResults()
 				//No description for object and it is not possible to interact with it
 				else if(pEntity->GetDescription()==_W(""))
 				{
-					if(	mpPickedBody->GetMass()==0) bUseArea = true;
+					if(	CoopPickMass(mpPickedBody)==0) bUseArea = true;
 					
 					else if(pEntity->GetType() == eGameEntityType_Object)
 					{

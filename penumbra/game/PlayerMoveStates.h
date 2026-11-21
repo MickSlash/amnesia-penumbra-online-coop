@@ -483,7 +483,12 @@ public:
 		cVector3f vFeetPos = pBody->GetPosition() - cVector3f(0,pBody->GetShape()->GetSize().y/2,0);
 		pBody->SetActiveSize(0);
 		pBody->SetPosition(vFeetPos + cVector3f(0,pBody->GetShape()->GetSize().y/2,0));
-		
+
+		// Co-op: il client di un ospite remoto ha già controllato lo spazio sopra
+		// la testa. Sull'host oggetti leggeri appesi (lampade) che sul client sono
+		// repliche senza collisione lo terrebbero abbassato mentre lui è in piedi.
+		if(mpPlayer->IsNetworkRemote()) return;
+
 		/////////////////////////////////////////////////
 		//Check if the player will fit with the newer size
 		cInit *pInit = mpPlayer->GetInit();
