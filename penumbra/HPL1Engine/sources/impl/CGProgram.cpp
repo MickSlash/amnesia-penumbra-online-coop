@@ -22,7 +22,40 @@
 
 #include "system/String.h"
 
+#include <fstream>
+#include <regex>
+#include <sstream>
+
 namespace hpl{
+
+	// Gli shader del gioco chiamano texRECT/tex2D con coordinate float3: il
+	// compilatore Cg 1.5 le traduce nelle letture "ombra" (SHADOWRECT,
+	// SHADOW2D), che confrontano la profondità invece di leggere il colore.
+	// NVIDIA ignora il confronto su una texture a colori; il driver Intel
+	// restituisce il risultato del confronto (1, cioè bianco) e il bloom rende
+	// bianco tutto lo schermo. HPL1 non usa shadow map: il programma viene
+	// ricompilato passando soltanto x e y.
+	static tString PatchShadowLookups(const tString& asSource)
+	{
+		static const char* sHelpers =
+			"float4 hplTexRECT(samplerRECT s, float2 c) { return texRECT(s, c); }\n"
+			"float4 hplTexRECT(samplerRECT s, float3 c) { return texRECT(s, c.xy); }\n"
+			"float4 hplTexRECT(samplerRECT s, float4 c) { return texRECT(s, c.xy); }\n"
+			"float4 hplTex2D(sampler2D s, float2 c) { return tex2D(s, c); }\n"
+			"float4 hplTex2D(sampler2D s, float3 c) { return tex2D(s, c.xy); }\n"
+			"float4 hplTex2D(sampler2D s, float4 c) { return tex2D(s, c.xy); }\n"
+			"float4 hplTex1D(sampler1D s, float c) { return tex1D(s, c); }\n"
+			"float4 hplTex1D(sampler1D s, float2 c) { return tex1D(s, c.x); }\n"
+			"float4 hplTex1D(sampler1D s, float3 c) { return tex1D(s, c.x); }\n"
+			// Proiettiva senza confronto: xy / w (la variante float3 divide per z).
+			"float4 hplTex2Dproj(sampler2D s, float3 c) { return tex2Dproj(s, c); }\n"
+			"float4 hplTex2Dproj(sampler2D s, float4 c) { return tex2Dproj(s, c.xyw); }\n";
+		tString sOut = std::regex_replace(asSource, std::regex("(^|[^A-Za-z0-9_])texRECT\\s*\\("), "$1hplTexRECT(");
+		sOut = std::regex_replace(sOut, std::regex("(^|[^A-Za-z0-9_])tex2D\\s*\\("), "$1hplTex2D(");
+		sOut = std::regex_replace(sOut, std::regex("(^|[^A-Za-z0-9_])tex1D\\s*\\("), "$1hplTex1D(");
+		sOut = std::regex_replace(sOut, std::regex("(^|[^A-Za-z0-9_])tex2Dproj\\s*\\("), "$1hplTex2Dproj(");
+		return tString(sHelpers) + sOut;
+	}
 
 	//////////////////////////////////////////////////////////////////////////
 	// CONSTRUCTORS
@@ -172,7 +205,29 @@ namespace hpl{
 			return false;
 		}
 
-		//Log("Loading CG program\n");
+		// Letture "ombra" non volute: ricompila con le coordinate x e y.
+		{
+			const char* pCompiled = cgGetProgramString(mProgram, CG_COMPILED_PROGRAM);
+			if(pCompiled && strstr(pCompiled, "SHADOW") != NULL)
+			{
+				std::ifstream file(asFile.c_str(), std::ios::binary);
+				std::stringstream sSource; sSource << file.rdbuf();
+				const tString sPatched = PatchShadowLookups(sSource.str());
+				CGprogram pPatched = cgCreateProgram(mContext, CG_SOURCE, sPatched.c_str(), mProfile, asEntry.c_str(), NULL);
+				const char* pNew = (cgGetError() == CG_NO_ERROR && pPatched) ? cgGetProgramString(pPatched, CG_COMPILED_PROGRAM) : NULL;
+				if(pNew && strstr(pNew, "SHADOW") == NULL)
+				{
+					cgDestroyProgram(mProgram);
+					mProgram = pPatched;
+					Log("CG: '%s' used shadow texture lookups; recompiled reading colour\n", asFile.c_str());
+				}
+				else
+				{
+					if(pPatched) cgDestroyProgram(pPatched);
+					Log("CG: '%s' uses shadow texture lookups and could not be recompiled\n", asFile.c_str());
+				}
+			}
+		}
 
 		cgGLLoadProgram(mProgram);
 

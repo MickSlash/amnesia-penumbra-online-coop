@@ -55,7 +55,7 @@ Fase 3: fatti gli inventari per giocatore (passi 1-5 di `COOP_ARCHITECTURE.md`, 
 Prossimo:
 - spettatore per chi è a terra;
 - partita giocata a mano su due PC;
-- schede Intel HD: qualità shader "Media" automatica, o correzione dei programmi "Alta".
+- video affiancati di host e client durante le prove su due PC.
 
 ### Rimandato, con motivo
 
@@ -67,6 +67,7 @@ Prossimo:
 
 ## Fatto di recente
 
+- Schede Intel HD: corretto lo schermo bianco (bloom) e la sovraesposizione della qualità "Alta", causati da letture "ombra" involontarie negli shader.
 - Prime prove su due PC reali via Radmin VPN: `full`, `hammer`, `campaign` e `resume` PASS su entrambi i ruoli.
 - Diario personale: le note sono di tutti, ma si aprono a chi le raccoglie; ognuno ha le sue note da leggere, anche nei salvataggi (protocollo 8).
 - Passare un oggetto a un compagno con il gesto del gioco: oggetto scelto, mira, clic. Una unità delle pile; gli oggetti di gruppo restano a tutti.

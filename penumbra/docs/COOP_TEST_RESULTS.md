@@ -748,3 +748,68 @@ su due PC reali.
 - **Per ora:** su queste schede va impostata "Media" nelle opzioni grafiche.
 
 Non provato: una partita giocata a mano fra i due PC.
+
+## 19. Aggiornamento 21 novembre — schermo bianco sulle schede Intel HD
+
+### Sintomo
+
+- **Cosa si vedeva:** sul secondo PC (Intel HD Graphics 4400) la finestra
+  del gioco era bianca, in finestra e a schermo intero, avviato a mano o in
+  automatico.
+- **Perché le prove non lo vedevano:** gli screenshot venivano presi a metà
+  fotogramma, prima degli effetti finali, e risultavano corretti.
+- **Qualità "Alta":** anche negli screenshot la scena era sovraesposta.
+
+### Ricerca della causa
+
+1. **Fotogramma finito:** uno screenshot preso subito prima dello scambio
+   dei buffer (`PENUMBRA_COOP_FINAL_SCREENSHOT`) è bianco; con gli effetti
+   finali spenti è corretto; con il solo bloom spento è corretto.
+2. **Texture del bloom, salvate passo per passo:** la copia dello schermo
+   è corretta (luminosità media 61). Il primo passaggio di sfocatura è
+   bianco (255), anche con spostamento zero. Con la pipeline fissa al posto
+   dei programmi la sfocatura è corretta (62).
+3. **Codice compilato dal Cg 1.5 del gioco per `PostEffect_Blur_Rect_fp`:**
+   `TEX ..., texture[0], SHADOWRECT` con
+   `OPTION ARB_fragment_program_shadow`.
+   - Lo shader chiama `texRECT` con coordinate `float3`, e Cg sceglie la
+     variante "ombra", che confronta la profondità invece di leggere il
+     colore.
+   - Lo stesso vale per `tex2D` con `float3` e per `tex2Dproj` con `float4`.
+4. **Driver:**
+   - AMD e NVIDIA ignorano il confronto su una texture a colori;
+   - Intel restituisce il risultato del confronto, cioè 1: bianco.
+
+Programmi coinvolti:
+- sfocatura e bloom;
+- le luci `Diffuse_Light`, `Bump_Light`, `BumpSpec_Light` e
+  `BumpColorSpec_Light`, con le varianti Spot (qualità "Alta").
+
+### Correzione
+
+- **Dove:** `cCGProgram::CreateFromFile`.
+- **Quando interviene:** se il codice compilato contiene letture `SHADOW`,
+  il sorgente viene ricompilato in memoria. `texRECT`, `tex2D` e `tex1D`
+  ricevono solo le coordinate utili; `tex2Dproj` con `float4` riceve
+  `xyw`, cioè la proiezione senza confronto.
+- **Cosa resta uguale:** i file del gioco non cambiano. HPL1 non usa shadow
+  map, quindi nessun confronto era voluto.
+- **Diagnostica:**
+  - il log riporta ogni programma ricompilato;
+  - all'avvio scrive marca, modello e versione del driver OpenGL.
+- **Nuove variabili per le prove:** `PENUMBRA_COOP_QA_FULLSCREEN`,
+  `PENUMBRA_COOP_QA_WIDTH`/`HEIGHT`, `PENUMBRA_COOP_QA_OFFLINE_SECONDS`,
+  `PENUMBRA_COOP_FINAL_SCREENSHOT` e `PENUMBRA_COOP_DEBUG_FRAME`.
+
+### Misure
+
+- **Secondo PC (Intel HD 4400, driver 20.19.15.5171):**
+  - fotogramma finito corretto con qualità 3 e 2, bloom compreso;
+  - prove `baseline` e `full` su due PC via Radmin: PASS su entrambi i ruoli.
+- **PC di sviluppo (AMD):**
+  - screenshot di cabina ed esterno identici a prima della correzione;
+  - suite tutta PASS e senza crash dump: `full`, `hammer`, `campaign`,
+    `resume`, `party -Players 3`, `party -Players 4`, `maps` (25/25) e
+    `ctest`.
+
+Non provato: le altre mappe con acqua e rifrazione sulla Intel.

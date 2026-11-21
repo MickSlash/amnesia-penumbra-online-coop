@@ -307,9 +307,11 @@ bool cInit::Init(tString asCommandLine)
 		mpConfig->SetBool("Game", "ShowPreMenu", false);
 		mpConfig->SetBool("Game", "ShowMenu", false);
 		mpConfig->SetBool("Game", "ShowIntro", false);
-		mpConfig->SetBool("Screen", "FullScreen", false);
-		mpConfig->SetInt("Screen", "Width", 640);
-		mpConfig->SetInt("Screen", "Height", 480);
+		// PENUMBRA_COOP_QA_FULLSCREEN=1: schermo intero, per le prove su un PC reale.
+		mpConfig->SetBool("Screen", "FullScreen", getenv("PENUMBRA_COOP_QA_FULLSCREEN") && std::string(getenv("PENUMBRA_COOP_QA_FULLSCREEN"))=="1");
+		// PENUMBRA_COOP_QA_WIDTH/HEIGHT: risoluzione delle prove (predefinita 640x480).
+		mpConfig->SetInt("Screen", "Width", getenv("PENUMBRA_COOP_QA_WIDTH") ? atoi(getenv("PENUMBRA_COOP_QA_WIDTH")) : 640);
+		mpConfig->SetInt("Screen", "Height", getenv("PENUMBRA_COOP_QA_HEIGHT") ? atoi(getenv("PENUMBRA_COOP_QA_HEIGHT")) : 480);
 		mpConfig->SetBool("Haptics", "Active", false);
 		mpConfig->SetString("Map", "File", "level00_01_boat_cabin.dae");
 		mpConfig->SetString("Map", "StartPos", "link1");
@@ -714,7 +716,9 @@ void cInit::Update(float afTimeStep)
 {
 	if (getenv("PENUMBRA_COOP_QA")) {
 		static float elapsed = 0; elapsed += afTimeStep;
-		if (!mpCoop->IsOnline() && elapsed > 8.0f) mpGame->Exit();
+		// PENUMBRA_COOP_QA_OFFLINE_SECONDS: durata di una prova senza rete (predefinita 8 s).
+		const float fOffline = getenv("PENUMBRA_COOP_QA_OFFLINE_SECONDS") ? (float)atof(getenv("PENUMBRA_COOP_QA_OFFLINE_SECONDS")) : 8.0f;
+		if (!mpCoop->IsOnline() && elapsed > fOffline) mpGame->Exit();
 	}
 	if(mpGlobalScript)
 	{

@@ -19,7 +19,7 @@ Le prove automatiche `full`, `hammer`, `campaign` e `resume` passano anche fra d
 | 2 giocatori | ✅ | |
 | 3–4 giocatori | 🟡 | trasporto, movimento, silhouette, nemici, attacchi ad area e checkpoint per tutti (prova `party` con 2, 3 e 4 istanze sullo stesso PC); inventari e diario per giocatore; l'host sceglie 2-4 giocatori nel launcher |
 | IP diretto (UDP 27120), LAN, VPN | ✅ | prove automatiche su due PC via Radmin VPN (client in Wi-Fi): RTT mediano 19-27 ms, nessuna perdita rilevante |
-| Schede Intel HD (driver OpenGL Intel) | 🟡 | con qualità shader "Alta" (3) i materiali con rilievo risultano sovraesposti; con "Media" (2) il disegno è corretto |
+| Schede Intel HD (driver OpenGL Intel) | ✅ | gli shader con letture "ombra" involontarie vengono ricompilati al caricamento: bloom e qualità "Alta" corretti sulla HD 4400 |
 | Ospitare/entrare dal menu del gioco | ❌ | si fa dal launcher (solo italiano) |
 | Lobby, inviti e relay Steam | ❌ | solo presenza Steam (App ID 22180); richiede uno studio dei requisiti Steamworks |
 | Elenco giocatori e stato connessione | ❌ | |
