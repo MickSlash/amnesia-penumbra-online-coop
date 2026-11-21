@@ -30,6 +30,7 @@
 
 using namespace hpl;
 namespace hpl { extern bool gbGameScriptExecution; }
+namespace hpl { extern bool gbQuitRequested; }
 namespace hpl { extern bool (*gGameGuiSoundCallback)(const tString&,float); }
 namespace {
 cCoopNetwork* activeNetwork=nullptr;
@@ -600,13 +601,20 @@ void cCoopNetwork::AfterMapLoad(const tString& file) {
 }
 bool cCoopNetwork::ClientAction(online::PlayerAction action, bool pressed,const std::string& item,const std::string& second) {
     if(!IsClient()) return false;
+    // Un clic (sinistro o destro) che chiude un messaggio del client resta sul
+    // client: sull'host diventerebbe un'interazione (afferrare un oggetto) o
+    // chiuderebbe il messaggio dell'host. Anche il rilascio non viene inviato.
+    if((action==online::PlayerAction::Interact || action==online::PlayerAction::Attack) && item.empty()) {
+        bool& consumed=action==online::PlayerAction::Interact?interactForMessage:examineForMessage;
+        if(pressed && init->mpPlayer->GetState()==ePlayerState_Message) { consumed=true; init->mpGameMessageHandler->ShowNext(); return true; }
+        if(!pressed && consumed) { consumed=false; return true; }
+    }
     if(action==online::PlayerAction::Interact) { interactHeld=pressed; if(!pressed) gestureYaw=gesturePitch=0; }
     online::ActionRequest request; request.epoch=g->map.epoch; request.sequence=++actionSequence; request.action=action; request.pressed=pressed; request.item=item; request.secondItem=second;
     if(action==online::PlayerAction::Interact && pressed && init->mpPlayer->GetState()==ePlayerState_UseItem && init->mpPlayer->GetCurrentItem())
         request.item=init->mpPlayer->GetCurrentItem()->GetName();
     if(Ready()) g->session.SendAction(request);
     if(action==online::PlayerAction::Interact && pressed && !request.item.empty()) init->mpPlayer->ChangeState(ePlayerState_Normal);
-    if(action==online::PlayerAction::Interact && pressed && init->mpGameMessageHandler->HasMessage()) init->mpGameMessageHandler->ShowNext();
     // Predict the first-person swing immediately; world damage runs only on the host.
     return !(action==online::PlayerAction::Interact && init->mpPlayer->GetState()==ePlayerState_WeaponMelee);
 }
@@ -864,6 +872,8 @@ bool cCoopNetwork::ClientLook(float yaw,float pitch) {
 bool cCoopNetwork::RelayMessage(const tWString& text) {
     if(!IsHost()) return false;
     auto* owner=GuestFor(init->mpPlayer);
+    // Un messaggio personale dell'host resta sull'host.
+    if(!owner && personalMessage) return false;
     online::Presentation e; e.kind=online::PresentationKind::Message; e.target=owner?owner->session.GuestPlayerId():0; e.text[0]=cString::To8Char(text); Present(e);
     return owner!=nullptr;
 }
@@ -883,6 +893,9 @@ void cCoopNetwork::RelayGuiSound(const std::string& file,float volume) {
     online::Presentation e; e.kind=online::PresentationKind::GuiSound; e.target=owner?owner->session.GuestPlayerId():0; e.text[0]=file; e.values[0]=int32_t(std::clamp(volume,0.0f,1.0f)*1000); Present(e);
 }
 void cCoopNetwork::Update(float dt) {
+    // Finestra chiusa con la X o Alt+F4: stessa uscita ordinata del menu
+    // (questo aggiornamento gira sempre, anche nei menu e in gioco singolo).
+    if(hpl::gbQuitRequested) { hpl::gbQuitRequested=false; Log("[COOP] Window close requested; exiting\n"); init->mpGame->Exit(); }
     if(!IsOnline()) return;
     steam.Update();
     if(IsHost()) transport.Poll(); else g->session.Poll();
@@ -1043,7 +1056,6 @@ void cCoopNetwork::UpdateGuest(float dt) {
         }
         if(action.epoch!=g->map.epoch || !canPlay || remotePlayer->IsDead()) continue;
         if(action.action==online::PlayerAction::Checkpoint) { checkpointRequested=true; continue; }
-        if(action.action==online::PlayerAction::Interact && action.pressed && init->mpGameMessageHandler->HasMessage()) { init->mpGameMessageHandler->ShowNext(); continue; }
         PlayerScope scope(init,remotePlayer,remoteHands);
         if(action.action==online::PlayerAction::Interact) {
             if(action.pressed && !action.item.empty()) UseItemAction(remotePlayer,action.item);
@@ -1865,6 +1877,8 @@ void cCoopNetwork::RunQA(float dt) {
             init->mpPlayer->GetCamera()->SetYaw(s.yaw/1000.0f); init->mpPlayer->GetCamera()->SetPitch(s.pitch/1000.0f); qaStage=1;
             auto it=init->mpMapHandler->GetGameEntityIterator(); while(it.HasNext()) { auto* e=it.Next(); if(e->GetName().find("whiskey")!=std::string::npos && e->GetBodyNum()) { qaObject=e->GetName(); qaObjectPosition=e->GetBody(0)->GetLocalPosition(); break; } }
         }
+        // Come un giocatore: prima chiude i pensieri a schermo, poi interagisce.
+        if(qaStage==1 && qaTime<8 && init->mpPlayer->GetState()==ePlayerState_Message) init->mpGameMessageHandler->ShowNext();
         if(qaStage==1 && qaTime>8) { ClientAction(online::PlayerAction::Interact,true); qaStage=2; }
         if(qaStage==2 && qaTime>9.5f && qaTime<10.5f) init->mpPlayer->GetCamera()->AddYaw(dt*.25f);
         if(auto* bottle=qaObject.empty()?nullptr:init->mpMapHandler->GetGameEntity(qaObject,false)) {
@@ -2349,12 +2363,26 @@ void cCoopNetwork::PublishMedia() {
     }
     auto* world=init->mpGame->GetScene()->GetWorld3D();
     auto sounds=world->GetSoundEntityIterator();
+    // Più suoni possono avere lo stesso nome (ogni cigolio di porta è
+    // "MoveSound"): i doppioni viaggiano come "nome#n".
+    std::map<std::string,int> seen;
+    std::set<std::string> present;
     while(sounds.HasNext()) {
-        auto* sound=sounds.Next(); online::MediaState s; s.epoch=g->map.epoch; s.id=EntityID(sound->GetName()); s.kind=online::MediaKind::Sound;
-        s.name=sound->GetName(); s.file=sound->GetData()->GetName(); s.flags=sound->IsStopped()?0:1;
-        s.transform=Pack(sound->GetWorldMatrix()); s.values[0]=int32_t(sound->GetVolume()*1000);
-        auto bytes=online::EncodeMedia(s); auto key="s/"+s.name;
+        auto* sound=sounds.Next(); online::MediaState s; s.epoch=g->map.epoch; s.kind=online::MediaKind::Sound;
+        const int copy=seen[sound->GetName()]++;
+        s.name=copy?sound->GetName()+"#"+std::to_string(copy):sound->GetName(); s.id=EntityID(s.name);
+        s.file=sound->GetData()->GetName(); s.flags=sound->IsStopped()?0:1;
+        // Volume al centesimo: una dissolvenza non genera un invio a ogni fotogramma.
+        s.transform=Pack(sound->GetWorldMatrix()); s.values[0]=int32_t(std::lround(sound->GetVolume()*100))*10;
+        auto bytes=online::EncodeMedia(s); auto key="s/"+s.name; present.insert(key);
         if(g->mediaBytes[key]!=bytes && g->session.SendMedia(s)) g->mediaBytes[key]=bytes;
+    }
+    // Suoni distrutti sull'host (per esempio il cigolio di una porta che si è
+    // fermata): il client li ferma, altrimenti un loop continuerebbe per sempre.
+    for(auto it=g->mediaBytes.begin();it!=g->mediaBytes.end();) {
+        if(it->first.compare(0,2,"s/")!=0 || present.count(it->first)) { ++it; continue; }
+        online::MediaState gone; gone.epoch=g->map.epoch; gone.kind=online::MediaKind::Sound; gone.name=it->first.substr(2); gone.id=EntityID(gone.name); gone.flags=128;
+        if(g->session.SendMedia(gone)) it=g->mediaBytes.erase(it); else break;
     }
     auto* song=init->mpGame->GetSound()->GetMusicHandler()->GetCurrentSong();
     online::MediaState s; s.epoch=g->map.epoch; s.id=1; s.kind=online::MediaKind::Music; s.name="campaign_music";
@@ -2384,6 +2412,11 @@ void cCoopNetwork::ApplyMedia(const online::MediaState& s) {
         world->CreateParticleSystem(s.name,s.file,cVector3f(1,1,1),Unpack(s.transform));
     if(s.kind==online::MediaKind::Sound) {
         auto* sound=world->GetSoundEntity(s.name);
+        if(s.flags&128) {
+            // Solo fermato: un suono della mappa può essere usato da altri oggetti.
+            if(sound && !sound->IsStopped()) sound->Stop(false);
+            return;
+        }
         if(!sound && (s.flags&1)) sound=world->CreateSoundEntity(s.name,s.file,false);
         if(!sound) return;
         sound->SetMatrix(Unpack(s.transform)); sound->SetVolume(s.values[0]/1000.0f);
