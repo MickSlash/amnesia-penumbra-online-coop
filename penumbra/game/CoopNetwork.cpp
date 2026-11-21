@@ -1045,7 +1045,21 @@ void cCoopNetwork::UpdateHost(float dt) {
         checkpointRequested=false; checkpointCooldown=2;
         if(init->mpSaveHandler->SaveCheckpoint()) { online::Presentation e; e.kind=online::PresentationKind::Hint; e.text[0]="Checkpoint co-op salvato sull\x27host."; Present(e); init->mpEffectHandler->GetSubTitle()->Add(cString::To16Char(e.text[0]),3,false); }
     }
-    if(anyReady) UpdateLife(dt);
+    if(anyReady) { UpdateLife(dt); UpdateLevelHints(dt); }
+}
+// Cabina (primo livello): lo script apre l'uscita solo quando il gruppo ha
+// torcia, taccuino e glowstick, e non dice cosa manca. In co-op gli oggetti
+// finiscono a giocatori diversi: se manca solo il taccuino da 30 s, lo si
+// ricorda a tutti (poi ogni 90 s). La condizione dello script non cambia.
+void cCoopNetwork::UpdateLevelHints(float dt) {
+    auto* door=init->mpMapHandler->GetGameEntity("exitdoor",false);
+    const bool cabin=init->mpMapHandler->GetCurrentMapName().find("level00_01_boat_cabin")!=std::string::npos;
+    if(!cabin || !door || door->IsActive() || !PartyHasItem("flashlight") || !PartyHasItem("glowstick") || PartyHasItem("notebook")) { levelHintWait=0; return; }
+    levelHintWait+=dt; if(levelHintWait<30) return;
+    levelHintWait=-60;
+    online::Presentation e; e.kind=online::PresentationKind::Hint; e.text[0]="To leave the cabin, someone still has to pick up the notebook.";
+    Present(e); init->mpEffectHandler->GetSubTitle()->Add(cString::To16Char(e.text[0]),6,false);
+    ++levelHints; Log("[COOP/HINT] Hint to all: %s\n",e.text[0].c_str());
 }
 // Simulazione e invio per l'ospite legato (g, remotePlayer, remoteHands).
 void cCoopNetwork::UpdateGuest(float dt) {
@@ -1801,6 +1815,7 @@ void cCoopNetwork::RunQA(float dt) {
     qaTime+=dt;
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="maps") { RunMapsQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="party") { RunPartyQA(dt); return; }
+    if(std::string(getenv("PENUMBRA_COOP_QA"))=="cabin") { RunCabinQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="hammer") { RunHammerQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="campaign") { if(hammerTime<10) RunHammerQA(dt); else RunCampaignQA(dt); return; }
     if(std::string(getenv("PENUMBRA_COOP_QA"))=="resume") { RunCampaignQA(dt); return; }
@@ -2224,6 +2239,125 @@ void cCoopNetwork::RunPartyQA(float dt) {
         return;
     }
     if(!qaPartyStarted && qaTime>90) { Log("[COOP/QA] FAIL party of %u players role=client snapshot_players=%u\n",expected,unsigned(g->latest.playerCount)); init->mpGame->Exit(); }
+}
+void cCoopNetwork::RunCabinQA(float dt) {
+    // Entrambi chiudono i pensieri con un clic, come un giocatore.
+    const int phase=int(qaTime/2);
+    if(qaTime>7 && phase!=qaCabinPhase && init->mpGameMessageHandler->HasMessage()) {
+        if(IsHost()) init->mpPlayer->StartInteract(); else ClientAction(online::PlayerAction::Interact,true);
+        qaCabinPhase=phase;
+    }
+    const bool hostExits=getenv("PENUMBRA_COOP_QA_EXIT") && std::string(getenv("PENUMBRA_COOP_QA_EXIT"))=="host";
+    const bool outside=g->map.file=="maps/level01_01_outside.dae";
+    auto items=[&](cInventory* inv) {
+        std::string s; for(const char* n:{"flashlight","notebook","glowstick","battery1"}) if(inv && inv->GetItem(n)) { s+=n; s+=' '; }
+        return s;
+    };
+    if(IsClient()) {
+        if(outside && Ready()) {
+            if(qaCabinAt<=0) qaCabinAt=qaTime;
+            if(qaCabinStep==0 && qaTime>qaCabinAt+3) {
+                const bool ok=init->mpInventory->GetItem("flashlight") && init->mpInventory->GetItem("notebook") && init->mpInventory->GetItem("glowstick");
+                Log("[COOP/QA] %s cabin exit role=client map=%s items=[%s]\n",ok?"PASS":"FAIL",g->map.file.c_str(),items(init->mpInventory).c_str());
+                qaCabinStep=1;
+            }
+        }
+        if(qaTime>150) { Log("[COOP/QA] FAIL cabin exit role=client timeout map=%s\n",g->map.file.c_str()); init->mpGame->Exit(); }
+        if(qaCabinStep==1 && qaTime>qaCabinAt+8) init->mpGame->Exit();
+        return;
+    }
+    // Host: il personaggio `p` si mette vicino all'oggetto e lo guarda; il
+    // raggio di scelta del gioco (stato normale) lo trova al tick successivo.
+    auto place=[&](cPlayer* p,iGameEntity* e,float distance) {
+        const cVector3f target=e->GetBody(0)->GetBV()->GetWorldCenter();
+        cVector3f feet=p->GetCharacterBody()->GetFeetPosition(); cVector3f dir=feet-target; dir.y=0;
+        if(dir.SqrLength()<1e-4f) dir=cVector3f(0,0,1);
+        dir.Normalise(); feet=cVector3f(target.x,feet.y,target.z)+dir*distance;
+        p->GetCharacterBody()->SetFeetPosition(feet);
+        p->GetCharacterBody()->SetMoveSpeed(eCharDir_Forward,0); p->GetCharacterBody()->SetMoveSpeed(eCharDir_Right,0);
+    };
+    auto aim=[&](cPlayer* p,iGameEntity* e) {
+        const auto a=AimAngles(p->GetCamera()->GetPosition(),e->GetBody(0)->GetBV()->GetWorldCenter());
+        p->GetCamera()->SetYaw(a.y); p->GetCamera()->SetPitch(a.x); p->GetCharacterBody()->SetYaw(a.y);
+    };
+    auto take=[&](cPlayer* p,cPlayerHands* h,const char* name) {
+        // Oggetti chiusi in cassetti o armadietti: raccolta diretta.
+        auto* e=init->mpMapHandler->GetGameEntity(name,false); if(!e || !e->IsActive()) return false;
+        PlayerScope scope(init,p,h); place(p,e,0.7f);
+        p->SetPickedBody(e->GetBody(0)); p->GetPickRay()->mvPickedPos=e->GetBody(0)->GetBV()->GetWorldCenter(); e->PlayerInteract();
+        return true;
+    };
+    auto* hostInv=mainInventory; auto* guestInv=InventoryFor(remotePlayer);
+    const char* who=hostExits?"host":"guest";
+    if(qaTime<1) { init->mpEffectHandler->GetDepthOfField()->SetActive(false,0); }
+    if(qaCabinStep==0 && qaTime>9 && init->mpPlayer->IsActive() && remotePlayer->IsActive() && !init->mpGameMessageHandler->HasMessage()) {
+        Log("[COOP/QA] Cabin unlocked host_active=1 guest_active=1 t=%.1f\n",qaTime); qaCabinStep=1; qaCabinAt=qaTime;
+    }
+    if(qaCabinStep==0 && qaTime>45) { Log("[COOP/QA] FAIL cabin intro never unlocked host_active=%d guest_active=%d message=%d\n",init->mpPlayer->IsActive()?1:0,remotePlayer->IsActive()?1:0,init->mpGameMessageHandler->HasMessage()?1:0); qaCabinStep=99; }
+    // 1: l'ospite raccoglie il taccuino sul tavolo, col raggio di scelta del gioco.
+    const bool late=getenv("PENUMBRA_COOP_QA_CABIN_LATE") && std::string(getenv("PENUMBRA_COOP_QA_CABIN_LATE"))=="1";
+    if(qaCabinStep==1 && late) { qaCabinStep=2; qaCabinAt=qaTime; }
+    if(qaCabinStep==1) {
+        auto* book=init->mpMapHandler->GetGameEntity("notebook",false);
+        if(book) { PlayerScope scope(init,remotePlayer,remoteHands); qaAimLocked=true; if(qaTime<qaCabinAt+0.2f) place(remotePlayer,book,0.8f); aim(remotePlayer,book); }
+        if(qaTime>qaCabinAt+1.2f) {
+            const bool picked=remotePlayer->GetPickedBody() && book && remotePlayer->GetPickedBody()==book->GetBody(0);
+            { PlayerScope scope(init,remotePlayer,remoteHands); remotePlayer->StartInteract(); remotePlayer->StopInteract(); }
+            qaAimLocked=false;
+            Log("[COOP/QA] Cabin guest notebook picked_body=%d in_guest_inventory=%d\n",picked?1:0,guestInv&&guestInv->GetItem("notebook")?1:0);
+            qaCabinStep=2; qaCabinAt=qaTime;
+        }
+    }
+    // 2: l'host prende la torcia dal cassetto; 3: apre l'armadietto con la chiave.
+    if(qaCabinStep==2 && qaTime>qaCabinAt+2) { take(init->mpPlayer,hostHands,"flashlight"); qaCabinStep=3; qaCabinAt=qaTime; }
+    if(qaCabinStep==3) {
+        auto* lock=init->mpMapHandler->GetGameEntity("lock1",false);
+        if(lock && qaTime<qaCabinAt+0.2f) place(init->mpPlayer,lock,0.8f);
+        if(lock) aim(init->mpPlayer,lock);
+        if(qaTime>qaCabinAt+1.2f) {
+            if(auto* key=hostInv->GetItem("padlock_key")) { init->mpPlayer->SetCurrentItem(key); init->mpPlayer->ChangeState(ePlayerState_UseItem); init->mpPlayer->StartInteract(); }
+            qaCabinStep=4; qaCabinAt=qaTime;
+        }
+    }
+    if(qaCabinStep==4 && qaTime>qaCabinAt+2) {
+        auto* lock=init->mpMapHandler->GetGameEntity("lock1",false);
+        Log("[COOP/QA] Cabin host key opened_locker=%d key_left=%d\n",lock&&!lock->IsActive()?1:0,hostInv->GetItem("padlock_key")?1:0);
+        take(remotePlayer,remoteHands,"glowstick");
+        Log("[COOP/QA] Cabin inventories host=[%s] guest=[%s]\n",items(hostInv).c_str(),items(guestInv).c_str());
+        qaCabinStep=5; qaCabinAt=qaTime;
+    }
+    // 5: lo script apre l'uscita 6,5 s dopo che il gruppo ha i tre oggetti.
+    if(qaCabinStep==5) {
+        auto* door=init->mpMapHandler->GetGameEntity("exitdoor",false);
+        if(late && levelHints && guestInv && !guestInv->GetItem("notebook") && !hostInv->GetItem("notebook")) {
+            Log("[COOP/QA] Cabin notebook hint shown after %.1f s\n",qaTime-qaCabinAt); take(remotePlayer,remoteHands,"notebook"); qaCabinAt=qaTime;
+        }
+        if(door && door->IsActive()) { Log("[COOP/QA] Cabin exit door enabled after %.1f s\n",qaTime-qaCabinAt); qaCabinStep=6; qaCabinAt=qaTime; }
+        else if(qaTime>qaCabinAt+(late && !levelHints?45:15)) { Log("[COOP/QA] FAIL cabin exit door never enabled host=[%s] guest=[%s]\n",items(hostInv).c_str(),items(guestInv).c_str()); qaCabinStep=99; }
+    }
+    // 6: chi esce guarda la porta e interagisce.
+    if(qaCabinStep==6) {
+        cPlayer* p=hostExits?init->mpPlayer:remotePlayer; cPlayerHands* h=hostExits?hostHands:remoteHands;
+        auto* door=init->mpMapHandler->GetGameEntity("exitdoor",false);
+        { PlayerScope scope(init,p,h); qaAimLocked=true; if(door && qaTime<qaCabinAt+0.2f) place(p,door,0.9f); if(door) aim(p,door); }
+        if(qaTime>qaCabinAt+1.2f) {
+            const bool picked=door && p->GetPickedBody()==door->GetBody(0);
+            Log("[COOP/QA] Cabin %s uses exit door picked_body=%d crosshair=%d\n",who,picked?1:0,int(p->GetCrossHairState()));
+            { PlayerScope scope(init,p,h); p->StartInteract(); p->StopInteract(); }
+            qaAimLocked=false; qaCabinStep=7; qaCabinAt=qaTime;
+        }
+    }
+    if(qaCabinStep==7 && outside && Ready()) { qaCabinStep=8; qaCabinAt=qaTime; }
+    if(qaCabinStep==7 && qaTime>qaCabinAt+20) { Log("[COOP/QA] FAIL cabin exit: no map change map=%s\n",g->map.file.c_str()); qaCabinStep=99; }
+    if(qaCabinStep==8 && qaTime>qaCabinAt+2) {
+        const bool ok=hostInv->GetItem("flashlight") && hostInv->GetItem("notebook") && hostInv->GetItem("glowstick")
+            && guestInv && guestInv->GetItem("flashlight") && guestInv->GetItem("notebook") && guestInv->GetItem("glowstick");
+        Log("[COOP/QA] %s cabin exit role=host exit_by=%s map=%s host=[%s] guest=[%s]\n",ok?"PASS":"FAIL",who,g->map.file.c_str(),items(hostInv).c_str(),items(guestInv).c_str());
+        qaCabinStep=9; qaCabinAt=qaTime;
+    }
+    if(qaCabinStep==99) { Log("[COOP/QA] FAIL cabin exit role=host\n"); qaCabinStep=100; qaCabinAt=qaTime; }
+    if((qaCabinStep==9 || qaCabinStep==100) && qaTime>qaCabinAt+10) init->mpGame->Exit();
+    if(qaTime>160) { Log("[COOP/QA] FAIL cabin exit role=host timeout step=%d\n",qaCabinStep); init->mpGame->Exit(); }
 }
 void cCoopNetwork::RunHammerQA(float dt) {
     if(IsClient()) init->mbSimpleWeaponSwing=getenv("PENUMBRA_COOP_QA_SIMPLE") && std::string(getenv("PENUMBRA_COOP_QA_SIMPLE"))=="1";

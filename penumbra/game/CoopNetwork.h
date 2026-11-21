@@ -220,6 +220,10 @@ private:
     void ApplyMedia(const online::MediaState& state);
     void PublishEnvironment();
     void UpdateLife(float dt);
+    // Host: avvisi di progressione per il gruppo (vedi UpdateLevelHints).
+    void UpdateLevelHints(float dt);
+    float levelHintWait = 0;
+    unsigned levelHints = 0;
     // Spettatore: chi è a terra guarda dagli occhi di un compagno vivo
     // (clic: compagno successivo) finché non torna in vita. Solo telecamera
     // locale: nessun effetto su fisica, nemici o progressione.
@@ -234,6 +238,12 @@ private:
     void RunCampaignQA(float dt);
     void RunMapsQA(float dt);
     void RunPartyQA(float dt);
+    // QA "cabin": il primo livello giocato come in una partita vera (pensieri,
+    // oggetti raccolti da entrambi, chiave, porta d'uscita) fino alla mappa
+    // successiva, con il controllo degli inventari.
+    void RunCabinQA(float dt);
+    int qaCabinStep = 0, qaCabinPhase = -1;
+    float qaCabinAt = 0;
     // QA: mette `body` fermo in un punto libero vicino a `of` (0.9-1.5 m,
     // davanti se possibile); restituisce i piedi.
     hpl::cVector3f QAPlaceInFront(cPlayer* of, hpl::iCharacterBody* body);

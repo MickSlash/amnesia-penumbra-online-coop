@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$GameDirectory,[int]$Port=27121,[ValidateSet('baseline','full','intro','hammer','campaign','resume','maps','party')][string]$Mode='baseline',[ValidateRange(2,4)][int]$Players=2,[string]$Root='', [string]$Executable='', [int]$OneWayDelayMs=0, [int]$JitterMs=0, [int]$DropEvery=20,[ValidateSet('','host','client')][string]$Hitch='',[ValidateRange(100,1000)][int]$Walk=500,[switch]$ClientSimpleSwing,[string]$PreviousRun="")
+param([Parameter(Mandatory=$true)][string]$GameDirectory,[int]$Port=27121,[ValidateSet('baseline','full','intro','hammer','campaign','resume','maps','party','cabin')][string]$Mode='baseline',[ValidateRange(2,4)][int]$Players=2,[string]$Root='', [string]$Executable='', [int]$OneWayDelayMs=0, [int]$JitterMs=0, [int]$DropEvery=20,[ValidateSet('','host','client')][string]$Hitch='',[ValidateRange(100,1000)][int]$Walk=500,[switch]$ClientSimpleSwing,[string]$PreviousRun="")
 $ErrorActionPreference='Stop'
 $root=if($Root) { [IO.Path]::GetFullPath($Root) } else { (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path }
 $run=Join-Path $root ('build/qa/coop-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -53,7 +53,7 @@ for($n=2;$n-lt$Players;++$n) {
     $processes+=$extra; $roles+="client$n"
 }
 @($processes | ForEach-Object Id) | Set-Content (Join-Path $run 'pids.txt')
-$deadline=(Get-Date).AddSeconds($(if($Mode-eq'maps'){900}elseif($Mode-eq'party'){260}elseif($Mode-eq'campaign'){180}elseif($Mode-eq'hammer'){95}elseif($Mode-eq'full'){80}else{65}))
+$deadline=(Get-Date).AddSeconds($(if($Mode-eq'maps'){900}elseif($Mode-eq'party'){260}elseif($Mode-eq'cabin'){185}elseif($Mode-eq'campaign'){180}elseif($Mode-eq'hammer'){95}elseif($Mode-eq'full'){80}else{65}))
 while((Get-Date)-lt $deadline -and @($processes | Where-Object { !$_.HasExited }).Count) { Start-Sleep -Milliseconds 250 }
 $passed=$true
 foreach($process in $processes) {

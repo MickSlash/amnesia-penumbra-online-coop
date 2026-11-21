@@ -14,7 +14,7 @@ param(
     [Parameter(Mandatory=$true)][string]$HostAddress,        # indirizzo di questo PC per la partita
     [string]$RemoteDir = '',                                 # predefinita: Desktop\PenumbraCoopTest
     [string]$Key = "$env:USERPROFILE\.ssh\id_ed25519_penumbra_test",
-    [ValidateSet('baseline','full','hammer','campaign','resume')][string]$Mode = 'full',
+    [ValidateSet('baseline','full','hammer','campaign','resume','cabin')][string]$Mode = 'full',
     [int]$Seconds = 0,
     [string]$PreviousRun = '',
     [string]$ClientSettings = '',                            # settings.cfg da usare sul client
@@ -30,7 +30,7 @@ $ssh = @('-i', $Key, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15')
 $user = $Remote.Split('@')[0]
 if (!$RemoteDir) { $RemoteDir = "C:\Users\$user\Desktop\PenumbraCoopTest" }
 $remoteSlash = $RemoteDir.Replace('\', '/')
-if (!$Seconds) { $Seconds = @{ baseline = 50; full = 90; hammer = 110; campaign = 180; resume = 70 }[$Mode] }
+if (!$Seconds) { $Seconds = @{ baseline = 50; full = 90; hammer = 110; campaign = 180; resume = 70; cabin = 185 }[$Mode] }
 $id = 'twopc-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
 $run = Join-Path $root "build\qa\$id"
 New-Item -ItemType Directory -Force $run | Out-Null
