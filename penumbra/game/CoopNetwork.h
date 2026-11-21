@@ -62,6 +62,14 @@ public:
     bool RemoteSimpleSwing() const { auto* guest=GuestFor(init->mpPlayer); return guest && guest->simpleSwing; }
     bool RemoteExamineDown() const { auto* guest=GuestFor(init->mpPlayer); return guest && guest->examineDown; }
     bool RelayMessage(const hpl::tWString& text);
+    // Messaggi personali (descrizione di un oggetto esaminato, "non puoi usarlo"):
+    // li vede solo chi li ha provocati, non tutto il gruppo come i pensieri.
+    struct PersonalMessage {
+        cCoopNetwork* coop;
+        explicit PersonalMessage(cCoopNetwork* c) : coop(c) { if(coop) coop->personalMessage=true; }
+        ~PersonalMessage() { if(coop) coop->personalMessage=false; }
+    };
+    bool personalMessage = false;
     void RelayFade(bool fadeOut, float seconds);
     void RelayGuiSound(const std::string& file, float volume);
     void OnStart(hpl::cSoundEntity* sound);
@@ -155,6 +163,8 @@ private:
     std::string pendingNote;
     // Client: messaggi arrivati mentre il taccuino è aperto (li mostra alla chiusura).
     std::vector<hpl::tWString> deferredMessages;
+    // Client: suoni creati dalla replica (si eliminano quando l'host li elimina).
+    std::set<std::string> replicatedSounds;
     float pendingNoteTime = 0;
     // Silhouette di un altro giocatore, per ID: sull'host gli ospiti, sul
     // client l'host (e, dal passo 4, gli altri ospiti).
@@ -205,6 +215,16 @@ private:
     void ApplyMedia(const online::MediaState& state);
     void PublishEnvironment();
     void UpdateLife(float dt);
+    // Spettatore: chi è a terra guarda dagli occhi di un compagno vivo
+    // (clic: compagno successivo) finché non torna in vita. Solo telecamera
+    // locale: nessun effetto su fisica, nemici o progressione.
+    void UpdateSpectator(float dt);
+    void StopSpectating(cPlayer* me);
+    bool spectating = false;
+    uint8_t spectatorTarget = 0;
+    hpl::cVector3f spectatorPos;
+    float spectatorYaw = 0, spectatorPitch = 0, spectatorTime = 0;
+    bool spectatorFollowLogged = false;
     void PublishJournal();
     void RunCampaignQA(float dt);
     void RunMapsQA(float dt);
@@ -263,7 +283,9 @@ private:
     // Replicated prop and enemy poses on the host timeline, played back by
     // `playback` (protocol 5, Interpolation.h).
     struct Pose { std::vector<hpl::cMatrixf> bodies; hpl::cMatrixf mesh; bool meshMotion = false; };
-    struct Motion { online::PoseHistory<Pose,16> history; std::vector<DriveState> drive; };
+    // settledTick: ultima posa dell'host già applicata a un oggetto fermo
+    // (non va riposizionato a ogni fotogramma finché non arriva una posa nuova).
+    struct Motion { online::PoseHistory<Pose,16> history; std::vector<DriveState> drive; uint32_t settledTick = 0; bool settled = false; };
     std::map<std::string, Motion> motion;
     online::PoseHistory<online::PlayerState,32> partnerHistory;
     // Client: gli altri ospiti (players[2..] degli snapshot), per ID.
@@ -297,6 +319,7 @@ private:
     uint8_t qaScreenshots = 0;
     float lookYaw = 0, lookPitch = 0;
     bool interactHeld = false;
+    bool interactForMessage = false, examineForMessage = false; // client: clic che ha chiuso un messaggio
     hpl::cMatrixf qaDoorMatrix;
     bool qaDoorMoved = false, qaDoorGrabbed = false;
     CoopSteam steam;
@@ -311,6 +334,9 @@ private:
     float perfTime = 0;
     uint64_t perfSum = 0, perfMax = 0;
     unsigned perfSamples = 0;
+    // FPS reali (OnPostSceneDraw), in microsecondi.
+    uint64_t fpsWindowStart = 0, fpsLastFrame = 0, fpsGapMax = 0;
+    unsigned fpsFrames = 0, fpsSlowFrames = 0;
     unsigned intervalCount = 0;
     uint64_t lastSnapshotAt = 0;
     hpl::cVector3f lastClientPosition;

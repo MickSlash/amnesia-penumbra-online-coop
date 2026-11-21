@@ -25,6 +25,7 @@
 #include "GameMusicHandler.h"
 #include "GameSwingDoor.h"
 #include "MapHandler.h"
+#include "CoopNetwork.h"
 
 //////////////////////////////////////////////////////////////////////////
 // BASE STATE
@@ -704,7 +705,9 @@ void cGameEnemy_Worm::OnUpdate(float afTimeStep)
 	////////////////////////////////////////
 	//Update movesound
 
-	if(mlCurrentState == STATE_HUNT)
+	// Co-op: sul client il suono del movimento arriva già dall'host (stesso
+	// nome "WormMove"); uno locale restava acceso per sempre.
+	if(mlCurrentState == STATE_HUNT && !(mpInit->mpCoop && mpInit->mpCoop->IsClient()))
 	{
 		if(mpMoveSound==NULL)
 		{

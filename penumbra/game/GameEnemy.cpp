@@ -784,7 +784,7 @@ void iGameEnemy::Update(float afTimeStep)
 				cWorld3D *pWorld = mpInit->mpGame->GetScene()->GetWorld3D();
 				cVector3f vPostion = mpMeshEntity->GetBoundingVolume()->GetWorldCenter();
 
-				if(msDisappearSound!="")
+				if(msDisappearSound!="" && !(mpInit->mpCoop && mpInit->mpCoop->IsClient()))
 				{
 					cSoundEntity *pSound = pWorld->CreateSoundEntity("Disappear",msDisappearSound,true);
 					if(pSound) pSound->SetPosition(vPostion);
@@ -1003,6 +1003,8 @@ void iGameEnemy::UseMoveStateAnimations()
 void iGameEnemy::PlaySound(const tString &asName)
 {
 	if(asName == "") return;
+	// Co-op: i suoni dei nemici del client arrivano dall'host (doppioni).
+	if(mpInit->mpCoop && mpInit->mpCoop->IsClient()) return;
 
 	cWorld3D *pWorld = mpInit->mpGame->GetScene()->GetWorld3D();
 

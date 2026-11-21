@@ -284,6 +284,14 @@ bool cInit::Init(tString asCommandLine)
 	// LOG FILE SETUP /////////////////////
 	SetLogFile(sPersonalDir+PERSONAL_RELATIVEROOT PERSONAL_RELATIVEGAME _W("hpl.log"));
 	SetUpdateLogFile(sPersonalDir+PERSONAL_RELATIVEROOT PERSONAL_RELATIVEGAME _W("hpl_update.log"));
+	// Intestazione della sessione: identifica PC, ruolo e protocollo nei log
+	// (ogni riga ha già l'orario locale; il log precedente è hpl.1.log).
+	{
+		const char* sRole = getenv("PENUMBRA_COOP_ROLE");
+		time_t tNow = time(NULL); char sDate[32]; strftime(sDate, sizeof(sDate), "%Y-%m-%d %H:%M:%S", localtime(&tNow));
+		Log("[COOP/SESSION] id=%08X role=%s protocol=%u started=%s\n", unsigned(tNow ^ (unsigned)GetCurrentProcessId() * 2654435761u),
+			sRole && *sRole ? sRole : "single", unsigned(online::ProtocolVersion), sDate);
+	}
 
 	
 	// MAIN INIT /////////////////////
@@ -313,6 +321,9 @@ bool cInit::Init(tString asCommandLine)
 		mpConfig->SetInt("Screen", "Width", getenv("PENUMBRA_COOP_QA_WIDTH") ? atoi(getenv("PENUMBRA_COOP_QA_WIDTH")) : 640);
 		mpConfig->SetInt("Screen", "Height", getenv("PENUMBRA_COOP_QA_HEIGHT") ? atoi(getenv("PENUMBRA_COOP_QA_HEIGHT")) : 480);
 		mpConfig->SetBool("Haptics", "Active", false);
+		// Misure di prestazione: PENUMBRA_COOP_QA_UNLIMITED=1 toglie il limite a 60 FPS.
+		if (getenv("PENUMBRA_COOP_QA_UNLIMITED") && std::string(getenv("PENUMBRA_COOP_QA_UNLIMITED")) == "1")
+			mpConfig->SetBool("Graphics", "LimitFPS", false);
 		// Prove automatiche senza audio (PENUMBRA_COOP_QA_SOUND=1 lo riattiva).
 		if (!getenv("PENUMBRA_COOP_QA_SOUND") || std::string(getenv("PENUMBRA_COOP_QA_SOUND")) != "1")
 			mpConfig->SetFloat("Sound", "Volume", 0);

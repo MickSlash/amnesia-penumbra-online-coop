@@ -58,6 +58,10 @@ namespace hpl {
 
 	//-----------------------------------------------------------------------
 
+	// Chiusura della finestra (X, Alt+F4): il gioco la legge e esce in modo
+	// ordinato (prima veniva ignorata, e in finestra non si poteva chiudere).
+	bool gbQuitRequested = false;
+
 	void cLowLevelInputSDL::BeginInputUpdate()
 	{
 		//SDL_PumpEvents();
@@ -66,6 +70,7 @@ namespace hpl {
 
 		while(SDL_PollEvent(&sdlEvent)!=0)
 		{
+			if(sdlEvent.type == SDL_QUIT) gbQuitRequested = true;
 			mlstEvents.push_back(sdlEvent);
 		}
 	}

@@ -30,6 +30,7 @@
 
 using namespace hpl;
 namespace hpl { extern bool gbGameScriptExecution; }
+namespace hpl { extern bool gbQuitRequested; extern bool gbPhysicsSoundsMuted; }
 namespace hpl { extern bool (*gGameGuiSoundCallback)(const tString&,float); }
 namespace {
 cCoopNetwork* activeNetwork=nullptr;
@@ -488,7 +489,7 @@ void cCoopNetwork::BeforeMapLoad() {
     positioned=false; hasClientPosition=false; snapshotAge=0;
     prediction.Clear(); ResetPlayback();
     for(auto& guest:guests) { ResetGuestMap(*guest); guest->pendingSave.reset(); guest->pendingWeapon.clear(); }
-    restoredEquipment=false; baselineNames.clear(); receivedJournal=0; pendingNote.clear(); deferredMessages.clear();
+    restoredEquipment=false; baselineNames.clear(); receivedJournal=0; pendingNote.clear(); deferredMessages.clear(); replicatedSounds.clear();
     currentMusic.clear(); currentSkybox.clear();
 }
 // Punto libero vicino a `center` per il corpo `body`: prima le posizioni
@@ -600,13 +601,20 @@ void cCoopNetwork::AfterMapLoad(const tString& file) {
 }
 bool cCoopNetwork::ClientAction(online::PlayerAction action, bool pressed,const std::string& item,const std::string& second) {
     if(!IsClient()) return false;
+    // Un clic (sinistro o destro) che chiude un messaggio del client resta sul
+    // client: sull'host diventerebbe un'interazione (afferrare un oggetto) o
+    // chiuderebbe il messaggio dell'host. Anche il rilascio non viene inviato.
+    if((action==online::PlayerAction::Interact || action==online::PlayerAction::Attack) && item.empty()) {
+        bool& consumed=action==online::PlayerAction::Interact?interactForMessage:examineForMessage;
+        if(pressed && init->mpPlayer->GetState()==ePlayerState_Message) { consumed=true; init->mpGameMessageHandler->ShowNext(); return true; }
+        if(!pressed && consumed) { consumed=false; return true; }
+    }
     if(action==online::PlayerAction::Interact) { interactHeld=pressed; if(!pressed) gestureYaw=gesturePitch=0; }
     online::ActionRequest request; request.epoch=g->map.epoch; request.sequence=++actionSequence; request.action=action; request.pressed=pressed; request.item=item; request.secondItem=second;
     if(action==online::PlayerAction::Interact && pressed && init->mpPlayer->GetState()==ePlayerState_UseItem && init->mpPlayer->GetCurrentItem())
         request.item=init->mpPlayer->GetCurrentItem()->GetName();
     if(Ready()) g->session.SendAction(request);
     if(action==online::PlayerAction::Interact && pressed && !request.item.empty()) init->mpPlayer->ChangeState(ePlayerState_Normal);
-    if(action==online::PlayerAction::Interact && pressed && init->mpGameMessageHandler->HasMessage()) init->mpGameMessageHandler->ShowNext();
     // Predict the first-person swing immediately; world damage runs only on the host.
     return !(action==online::PlayerAction::Interact && init->mpPlayer->GetState()==ePlayerState_WeaponMelee);
 }
@@ -814,6 +822,66 @@ void cCoopNetwork::PublishJournal() {
         Log("[NET/JOURNAL] Cannot encode journal entries=%u; the client cannot finish loading\n",unsigned(next.entries.size()));
     if(bytes!=g->journalBytes) { next.revision=g->journalRevision+1; if(g->session.SendJournal(next)) { g->journalBytes=bytes; g->journalRevision=next.revision; } }
 }
+void cCoopNetwork::StopSpectating(cPlayer* me) {
+    spectating=false;
+    if(me && me->GetCharacterBody()) {
+        me->GetCharacterBody()->SetCamera(me->GetCamera());
+        me->GetCamera()->SetPosition(me->GetCharacterBody()->GetFeetPosition()+cVector3f(0,me->GetSize().y+me->GetCameraHeightAdd(),0));
+    }
+    Log("[COOP/SPECTATOR] Stop role=%s\n",IsHost()?"host":"client");
+}
+void cCoopNetwork::UpdateSpectator(float dt) {
+    cPlayer* me=IsHost()?hostPlayer:init->mpPlayer;
+    const bool down=me && me->GetCharacterBody() && me->IsDead() && Ready();
+    // Compagni vivi: occhi, direzione dello sguardo e ID.
+    struct Target { uint8_t id; cVector3f eye; float yaw, pitch; };
+    std::vector<Target> targets;
+    if(down && IsHost()) {
+        for(auto& guest:guests) {
+            auto* p=guest->player;
+            if(!p || !p->GetCharacterBody() || p->IsDead() || !guest->session.Connected() || !guest->session.IsWorldApplied(guest->map.epoch)) continue;
+            targets.push_back({guest->session.GuestPlayerId(),p->GetCamera()->GetPosition(),p->GetCamera()->GetYaw(),p->GetCamera()->GetPitch()});
+        }
+    } else if(down) {
+        const float eyeHeight=me->GetSize().y+me->GetCameraHeightAdd();
+        for(uint8_t n=0;n<g->latest.playerCount && n<online::MaxPlayers;++n) {
+            if(n==1) continue; // il giocatore di questo PC
+            const auto& s=g->latest.players[n];
+            if(!s.id || (s.flags&8) || !(s.flags&4)) continue;
+            targets.push_back({s.id,cVector3f(s.x/1000.0f,s.y/1000.0f+eyeHeight,s.z/1000.0f),s.yaw/1000.0f,s.pitch/1000.0f});
+        }
+    }
+    if(targets.empty()) { if(spectating) StopSpectating(me); return; }
+    size_t index=0;
+    for(size_t n=0;n<targets.size();++n) if(targets[n].id==spectatorTarget) index=n;
+    // Clic (Interagisci): compagno successivo.
+    if(spectating && targets.size()>1 && init->mpGame->GetInput()->BecameTriggerd("Interact")) {
+        index=(index+1)%targets.size();
+        Log("[COOP/SPECTATOR] Next target=%u\n",unsigned(targets[index].id));
+    }
+    const Target& t=targets[index];
+    auto* camera=me->GetCamera();
+    if(!spectating) {
+        spectating=true; spectatorTime=0; spectatorFollowLogged=false;
+        me->GetCharacterBody()->SetCamera(nullptr); // la telecamera non segue più il corpo a terra
+        spectatorPos=camera->GetPosition(); spectatorYaw=camera->GetYaw(); spectatorPitch=camera->GetPitch();
+        init->mpEffectHandler->GetSubTitle()->Add(cString::To16Char(ItalianGame(init)?"Sei a terra: guardi un compagno (clic: cambia compagno)":"You are down: watching a partner (click: next partner)"),4,false);
+        Log("[COOP/SPECTATOR] Start role=%s target=%u targets=%u\n",IsHost()?"host":"client",unsigned(t.id),unsigned(targets.size()));
+    }
+    spectatorTarget=t.id; spectatorTime+=dt;
+    // Inseguimento morbido: niente scatti né tremolii dagli aggiornamenti di rete.
+    const float k=1.0f-std::exp(-dt*10.0f);
+    spectatorPos+= (t.eye-spectatorPos)*k;
+    float dYaw=t.yaw-spectatorYaw;
+    while(dYaw>kPif) dYaw-=k2Pif;
+    while(dYaw<-kPif) dYaw+=k2Pif;
+    spectatorYaw+=dYaw*k; spectatorPitch+=(t.pitch-spectatorPitch)*k;
+    camera->SetPosition(spectatorPos); camera->SetYaw(spectatorYaw); camera->SetPitch(spectatorPitch); camera->SetRoll(0);
+    if(!spectatorFollowLogged && spectatorTime>1.5f) {
+        spectatorFollowLogged=true;
+        Log("[COOP/SPECTATOR] Following role=%s target=%u distance=%.3f\n",IsHost()?"host":"client",unsigned(t.id),(spectatorPos-t.eye).Length());
+    }
+}
 void cCoopNetwork::WeaponHit(const std::string& entity,float health) {
     if(!IsHost()) return;
     worldDirty=true;
@@ -864,6 +932,8 @@ bool cCoopNetwork::ClientLook(float yaw,float pitch) {
 bool cCoopNetwork::RelayMessage(const tWString& text) {
     if(!IsHost()) return false;
     auto* owner=GuestFor(init->mpPlayer);
+    // Un messaggio personale dell'host resta sull'host.
+    if(!owner && personalMessage) return false;
     online::Presentation e; e.kind=online::PresentationKind::Message; e.target=owner?owner->session.GuestPlayerId():0; e.text[0]=cString::To8Char(text); Present(e);
     return owner!=nullptr;
 }
@@ -883,6 +953,10 @@ void cCoopNetwork::RelayGuiSound(const std::string& file,float volume) {
     online::Presentation e; e.kind=online::PresentationKind::GuiSound; e.target=owner?owner->session.GuestPlayerId():0; e.text[0]=file; e.values[0]=int32_t(std::clamp(volume,0.0f,1.0f)*1000); Present(e);
 }
 void cCoopNetwork::Update(float dt) {
+    // Finestra chiusa con la X o Alt+F4: stessa uscita ordinata del menu
+    // (questo aggiornamento gira sempre, anche nei menu e in gioco singolo).
+    if(hpl::gbQuitRequested) { hpl::gbQuitRequested=false; Log("[COOP] Window close requested; exiting\n"); init->mpGame->Exit(); }
+    hpl::gbPhysicsSoundsMuted=IsClient(); // suoni della fisica: sul client arrivano dall'host
     if(!IsOnline()) return;
     steam.Update();
     if(IsHost()) transport.Poll(); else g->session.Poll();
@@ -921,6 +995,7 @@ void cCoopNetwork::Update(float dt) {
     (IsHost()?g->diag.clock:clientDiag.clock).Tick(Milliseconds());
     InjectQAHitch();
     if(IsHost()) UpdateHost(dt); else UpdateClient(dt);
+    UpdateSpectator(dt);
     ReportDiagnostics();
     const auto elapsed=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-perfStart).count());
     perfSum+=elapsed; perfMax=std::max(perfMax,elapsed); ++perfSamples; perfTime+=dt;
@@ -1043,7 +1118,6 @@ void cCoopNetwork::UpdateGuest(float dt) {
         }
         if(action.epoch!=g->map.epoch || !canPlay || remotePlayer->IsDead()) continue;
         if(action.action==online::PlayerAction::Checkpoint) { checkpointRequested=true; continue; }
-        if(action.action==online::PlayerAction::Interact && action.pressed && init->mpGameMessageHandler->HasMessage()) { init->mpGameMessageHandler->ShowNext(); continue; }
         PlayerScope scope(init,remotePlayer,remoteHands);
         if(action.action==online::PlayerAction::Interact) {
             if(action.pressed && !action.item.empty()) UseItemAction(remotePlayer,action.item);
@@ -1235,6 +1309,11 @@ void cCoopNetwork::UpdateClient(float dt) {
         const bool drive=BodyDriveEnabled() && e->GetType()!=eGameEntityType_Enemy;
         // L'host non sposta il corpo da un secondo: è fermo.
         const bool resting=double(pair.second.history.NewestTick())+60<playback.Tick();
+        // Fermo e già al suo posto: niente SetMatrix a ogni fotogramma (ognuno
+        // passa dalla fisica; con molti oggetti il costo cresceva nel tempo).
+        const bool settle=!drive && resting && alpha>=1;
+        if(settle && pair.second.settled && pair.second.settledTick==pair.second.history.NewestTick()) continue;
+        pair.second.settled=settle; pair.second.settledTick=pair.second.history.NewestTick();
         auto& drives=pair.second.drive; if(drives.size()<to->bodies.size()) drives.resize(to->bodies.size());
         const cVector3f gravity=init->mpGame->GetScene()->GetWorld3D()->GetPhysicsWorld()->GetGravity()*dt;
         for(size_t n=0;n<to->bodies.size() && n<from->bodies.size() && n<size_t(e->GetBodyNum());++n) {
@@ -1865,6 +1944,8 @@ void cCoopNetwork::RunQA(float dt) {
             init->mpPlayer->GetCamera()->SetYaw(s.yaw/1000.0f); init->mpPlayer->GetCamera()->SetPitch(s.pitch/1000.0f); qaStage=1;
             auto it=init->mpMapHandler->GetGameEntityIterator(); while(it.HasNext()) { auto* e=it.Next(); if(e->GetName().find("whiskey")!=std::string::npos && e->GetBodyNum()) { qaObject=e->GetName(); qaObjectPosition=e->GetBody(0)->GetLocalPosition(); break; } }
         }
+        // Come un giocatore: prima chiude i pensieri a schermo, poi interagisce.
+        if(qaStage==1 && qaTime<8 && init->mpPlayer->GetState()==ePlayerState_Message) init->mpGameMessageHandler->ShowNext();
         if(qaStage==1 && qaTime>8) { ClientAction(online::PlayerAction::Interact,true); qaStage=2; }
         if(qaStage==2 && qaTime>9.5f && qaTime<10.5f) init->mpPlayer->GetCamera()->AddYaw(dt*.25f);
         if(auto* bottle=qaObject.empty()?nullptr:init->mpMapHandler->GetGameEntity(qaObject,false)) {
@@ -2349,12 +2430,26 @@ void cCoopNetwork::PublishMedia() {
     }
     auto* world=init->mpGame->GetScene()->GetWorld3D();
     auto sounds=world->GetSoundEntityIterator();
+    // Più suoni possono avere lo stesso nome (ogni cigolio di porta è
+    // "MoveSound"): i doppioni viaggiano come "nome#n".
+    std::map<std::string,int> seen;
+    std::set<std::string> present;
     while(sounds.HasNext()) {
-        auto* sound=sounds.Next(); online::MediaState s; s.epoch=g->map.epoch; s.id=EntityID(sound->GetName()); s.kind=online::MediaKind::Sound;
-        s.name=sound->GetName(); s.file=sound->GetData()->GetName(); s.flags=sound->IsStopped()?0:1;
-        s.transform=Pack(sound->GetWorldMatrix()); s.values[0]=int32_t(sound->GetVolume()*1000);
-        auto bytes=online::EncodeMedia(s); auto key="s/"+s.name;
+        auto* sound=sounds.Next(); online::MediaState s; s.epoch=g->map.epoch; s.kind=online::MediaKind::Sound;
+        const int copy=seen[sound->GetName()]++;
+        s.name=copy?sound->GetName()+"#"+std::to_string(copy):sound->GetName(); s.id=EntityID(s.name);
+        s.file=sound->GetData()->GetName(); s.flags=sound->IsStopped()?0:1;
+        // Volume al centesimo: una dissolvenza non genera un invio a ogni fotogramma.
+        s.transform=Pack(sound->GetWorldMatrix()); s.values[0]=int32_t(std::lround(sound->GetVolume()*100))*10;
+        auto bytes=online::EncodeMedia(s); auto key="s/"+s.name; present.insert(key);
         if(g->mediaBytes[key]!=bytes && g->session.SendMedia(s)) g->mediaBytes[key]=bytes;
+    }
+    // Suoni distrutti sull'host (per esempio il cigolio di una porta che si è
+    // fermata): il client li ferma, altrimenti un loop continuerebbe per sempre.
+    for(auto it=g->mediaBytes.begin();it!=g->mediaBytes.end();) {
+        if(it->first.compare(0,2,"s/")!=0 || present.count(it->first)) { ++it; continue; }
+        online::MediaState gone; gone.epoch=g->map.epoch; gone.kind=online::MediaKind::Sound; gone.name=it->first.substr(2); gone.id=EntityID(gone.name); gone.flags=128;
+        if(g->session.SendMedia(gone)) it=g->mediaBytes.erase(it); else break;
     }
     auto* song=init->mpGame->GetSound()->GetMusicHandler()->GetCurrentSong();
     online::MediaState s; s.epoch=g->map.epoch; s.id=1; s.kind=online::MediaKind::Music; s.name="campaign_music";
@@ -2384,7 +2479,15 @@ void cCoopNetwork::ApplyMedia(const online::MediaState& s) {
         world->CreateParticleSystem(s.name,s.file,cVector3f(1,1,1),Unpack(s.transform));
     if(s.kind==online::MediaKind::Sound) {
         auto* sound=world->GetSoundEntity(s.name);
-        if(!sound && (s.flags&1)) sound=world->CreateSoundEntity(s.name,s.file,false);
+        if(s.flags&128) {
+            // Creato dalla replica: si elimina (prima restava, e le entità del
+            // client crescevano). Della mappa: solo fermato, altri oggetti
+            // possono usarlo.
+            if(sound && replicatedSounds.erase(s.name)) { sound->Stop(false); world->DestroySoundEntity(sound); }
+            else if(sound && !sound->IsStopped()) sound->Stop(false);
+            return;
+        }
+        if(!sound && (s.flags&1)) { sound=world->CreateSoundEntity(s.name,s.file,false); if(sound) replicatedSounds.insert(s.name); }
         if(!sound) return;
         sound->SetMatrix(Unpack(s.transform)); sound->SetVolume(s.values[0]/1000.0f);
         if((s.flags&1) && sound->IsStopped()) sound->Play(false);
@@ -2397,6 +2500,29 @@ void cCoopNetwork::ApplyMedia(const online::MediaState& s) {
     }
 }
 void cCoopNetwork::OnPostSceneDraw() {
+    // FPS reali (fotogrammi disegnati) ogni 5 s, anche in gioco singolo, per
+    // confrontare la mod con il gioco senza rete nelle stesse condizioni.
+    {
+        const uint64_t now=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        if(fpsWindowStart==0) fpsWindowStart=now;
+        else { const uint64_t gap=now-fpsLastFrame; fpsGapMax=std::max(fpsGapMax,gap); if(gap>33334) ++fpsSlowFrames; }
+        fpsLastFrame=now; ++fpsFrames;
+        if(now-fpsWindowStart>=5000000) {
+            const double seconds=(now-fpsWindowStart)/1e6;
+            // Suoni: entità presenti e in riproduzione (il mixer ha 32 voci).
+            unsigned soundEntities=0, soundsPlaying=0;
+            if(auto* world=init->mpGame->GetScene()->GetWorld3D()) {
+                auto sounds=world->GetSoundEntityIterator();
+                std::string playing;
+                while(sounds.HasNext()) { auto* sound=sounds.Next(); ++soundEntities; if(!sound->IsStopped()) { ++soundsPlaying; if(playing.size()<400) playing+=sound->GetName()+"("+sound->GetData()->GetName()+") "; } }
+                if(getenv("PENUMBRA_COOP_QA") && soundsPlaying) Log("[COOP/SOUND] role=%s playing=%s\n",IsHost()?"host":IsClient()?"client":"single",playing.c_str());
+            }
+            Log("[COOP/FPS] role=%s fps=%.1f frame_ms_mean=%.2f frame_ms_max=%.1f frames_over_33ms=%u sound_entities=%u sounds_playing=%u channels_playing=%d\n",IsHost()?"host":IsClient()?"client":"single",
+                fpsFrames/seconds,seconds*1000.0/std::max(1u,fpsFrames),fpsGapMax/1000.0,fpsSlowFrames,soundEntities,soundsPlaying,
+                int(init->mpGame->GetSound()->GetSoundHandler()->GetWorldEntryList()->size()+init->mpGame->GetSound()->GetSoundHandler()->GetGuiEntryList()->size()));
+            fpsWindowStart=now; fpsFrames=0; fpsGapMax=0; fpsSlowFrames=0;
+        }
+    }
     if(!getenv("PENUMBRA_COOP_QA") || !Ready()) return;
     const char* path=getenv("PENUMBRA_COOP_SCREENSHOT");
     if(!path || !*path) return;

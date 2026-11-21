@@ -46,6 +46,8 @@ public sealed class CoopLauncher : Form {
         var saved=Path.Combine(state,"game-folder.txt"); if(File.Exists(saved)) folder.Text=File.ReadAllText(saved).Trim();
         if(!Valid(folder.Text)) folder.Text=Discover();
         var preference=Path.Combine(state,"use-steam.txt"); if(File.Exists(preference)) useSteam.Checked=File.ReadAllText(preference).Trim()=="1";
+        // Schermo intero come nel gioco originale, e la scelta viene ricordata.
+        var screen=Path.Combine(state,"fullscreen.txt"); fullscreen.Checked=!File.Exists(screen) || File.ReadAllText(screen).Trim()=="1";
         var count=Path.Combine(state,"players.txt"); int savedPlayers;
         if(File.Exists(count) && Int32.TryParse(File.ReadAllText(count).Trim(),out savedPlayers) && savedPlayers>=2 && savedPlayers<=4) players.Value=savedPlayers;
     }
@@ -134,6 +136,8 @@ public sealed class CoopLauncher : Form {
             launch.EnvironmentVariables["PENUMBRA_COOP_PORT"]=port.Value.ToString();
             launch.EnvironmentVariables["PENUMBRA_COOP_FULLSCREEN"]=fullscreen.Checked?"1":"0";
             launch.EnvironmentVariables["PENUMBRA_COOP_PROFILE_ROOT"]=Path.Combine(state,role);
+            File.WriteAllText(Path.Combine(state,"fullscreen.txt"),fullscreen.Checked?"1":"0");
+            ImportOriginalSettings(role);
             if(useSteam.Checked) {
                 if(!SteamInstallation(folder.Text)) throw new IOException("Usa Steam richiede l'installazione originale di Penumbra: Overture nella libreria Steam. Per la versione DVD disattiva l'opzione.");
                 var clients=Process.GetProcessesByName("steam"); bool running=clients.Length>0; foreach(var client in clients) client.Dispose();
@@ -145,6 +149,22 @@ public sealed class CoopLauncher : Form {
             File.WriteAllText(Path.Combine(state,"use-steam.txt"),useSteam.Checked?"1":"0");
             Process.Start(launch); Close();
         } catch(Exception error) { MessageBox.Show(this,error.Message,"Avvio non riuscito",MessageBoxButtons.OK,MessageBoxIcon.Error); }
+    }
+    // Una volta per profilo: risoluzione, grafica, audio e tasti del gioco
+    // originale (Documenti\Penumbra Overture\Episode1\settings.cfg). La
+    // configurazione precedente della mod resta come copia di sicurezza.
+    void ImportOriginalSettings(string role) {
+        try {
+            var marker=Path.Combine(state,role+"-settings-imported.txt"); if(File.Exists(marker)) return;
+            var original=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),"Penumbra Overture","Episode1","settings.cfg");
+            var profile=Path.Combine(state,role,"PenumbraOnlineCoop","Overture"); var target=Path.Combine(profile,"settings.cfg");
+            if(File.Exists(original)) {
+                Directory.CreateDirectory(profile);
+                if(File.Exists(target)) File.Copy(target,target+".prima-dell-importazione",true);
+                File.Copy(original,target,true);
+            }
+            File.WriteAllText(marker,File.Exists(original)?original:"originale non trovato");
+        } catch(IOException) { } catch(UnauthorizedAccessException) { }
     }
     [STAThread] public static void Main(string[] args) {
         if(args.Length==2 && args[0]=="--validate") { Environment.Exit(Valid(args[1])?0:1); return; }

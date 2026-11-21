@@ -26,6 +26,7 @@
 #include "GameMessageHandler.h"
 #include "EffectHandler.h"
 #include "GameStickArea.h"
+#include "CoopNetwork.h"
 
 //-----------------------------------------------------------------------
 
@@ -373,7 +374,11 @@ void iGameEntity::OnPlayerExamine()
 {
 	if(mfMaxExamineDist >= mpInit->mpPlayer->GetPickedDist() && msDescription!=_W(""))
 	{
-		mpInit->mpGameMessageHandler->Add(msDescription);
+		{
+			// Co-op: la descrizione è solo di chi esamina.
+			cCoopNetwork::PersonalMessage personal(mpInit->mpCoop);
+			mpInit->mpGameMessageHandler->Add(msDescription);
+		}
 		//if(mbShowDescritionOnce) msDescription = _W("");
 		mbHasBeenExamined = true;
 		
