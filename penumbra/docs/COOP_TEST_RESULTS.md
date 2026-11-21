@@ -865,3 +865,36 @@ monitor 3440x1440), con l'host sul PC dell'amico via Radmin. Log del client:
   launcher.
 - L'audio ascoltato in una partita vera.
 - Una partita completa fra due PC.
+
+
+## 21. Prove della release v0.6.5 fra due PC (21 novembre)
+
+Exe e launcher scaricati dalla release v0.6.5 (compilati dalla CI). Host su
+questo PC (AMD RX 9060 XT), client sul secondo PC (Intel HD 4400, monitor
+1920x1080) collegato via Radmin VPN. Audio a zero in tutte le prove.
+
+| Punto | Come | Risultato |
+| --- | --- | --- |
+| Porte e suoni | `full` su due PC: il client trascina l'anta dell'armadietto | PASS. Elenco dei suoni attivi uguale su host e client per tutta la prova; nessun cigolio rimasto acceso |
+| Spettatore | `campaign` su due PC | PASS. Host e client entrano in spettatore, si agganciano al compagno dopo 1,5 s, escono alla rinascita |
+| X della finestra | Partita collegata; la X (`SC_CLOSE`, lo stesso comando del clic) inviata al client e poi all'host | Uscita in circa 1 s, codice 0, "HPL Exit was successful" su entrambi; l'host registra la disconnessione |
+| X della finestra, a mano | Clic vero sulla X su questo PC, con il gioco nel menu Opzioni | Il gioco si chiude subito con uscita pulita |
+| Risoluzioni | Menu Grafica aperto e scorso a mano su questo PC | 26 voci fino a 3440x1440, comprese 2560x1080, 2560x1440 e 3024x1296. Secondo PC: 20 voci fino a 1920x1200 (dal log) |
+| Descrizioni | Partita come dal launcher (senza prove automatiche): l'host esamina la bottiglia, il client è in mappa da 16 s | L'host vede "Whiskey. Empty. Shame."; lo screenshot interno del client non la mostra |
+| Pensieri | Il client chiude il proprio pensiero iniziale col clic mentre l'host ha una descrizione aperta | Il pensiero del client si chiude; la descrizione dell'host resta; il personaggio del client non afferra nulla |
+| Rete nella partita a mano | Log | RTT 23 ms, nessuna perdita, nessuna correzione oltre i 10 cm |
+
+**Note:**
+- La cattura dello schermo di Windows (GDI e PrintWindow) dà una finestra
+  bianca per il gioco OpenGL sulla Intel HD 4400. Per il client si usa
+  `PENUMBRA_COOP_FINAL_SCREENSHOT`, che scatta un fotogramma alla volta.
+- L'orologio del secondo PC è avanti di circa 8 s.
+
+**Non verificato:**
+- L'audio ascoltato: le prove sono senza audio; i suoni sono stati confrontati
+  solo negli elenchi del log.
+- La descrizione esaminata dal client vista dall'host: il client non ha
+  inquadrato un oggetto con descrizione.
+- Il cambio di compagno da spettatore con 3-4 giocatori.
+- L'importazione delle impostazioni dal launcher.
+- Una partita completa.
