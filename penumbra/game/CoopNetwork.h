@@ -75,6 +75,10 @@ public:
         ~PersonalMessage() { if(coop) coop->personalMessage=false; }
     };
     bool personalMessage = false;
+    // Descrizione esaminata da un ospite: entità e corpo da mettere a fuoco sul
+    // suo schermo (iGameEntity::OnPlayerExamine; la sfocatura è di chi esamina).
+    std::string personalFocusEntity;
+    int personalFocusBody = -1;
     void RelayFade(bool fadeOut, float seconds);
     void RelayGuiSound(const std::string& file, float volume);
     void OnStart(hpl::cSoundEntity* sound);
@@ -170,6 +174,8 @@ private:
     std::vector<hpl::tWString> deferredMessages;
     // Client: suoni creati dalla replica (si eliminano quando l'host li elimina).
     std::set<std::string> replicatedSounds;
+    // Client: entità a cui la replica ha dato l'interazione da script (vedi ApplyEntity).
+    std::set<std::string> replicaInteraction;
     float pendingNoteTime = 0;
     // Silhouette di un altro giocatore, per ID: sull'host gli ospiti, sul
     // client l'host (e, dal passo 4, gli altri ospiti).
@@ -243,6 +249,12 @@ private:
     // successiva, con il controllo degli inventari.
     void RunCabinQA(float dt);
     int qaCabinStep = 0, qaCabinPhase = -1;
+    // Client: occhio sul mirino per un oggetto esaminabile, icona della porta.
+    std::string qaEyeTarget; float qaEyeAt = 0; bool qaEyeDone = false, qaEyeOk = false, qaDoorIconDone = false;
+    // Esame del client: messa a fuoco sul client, nessuna sfocatura sull'host.
+    int qaExamineStep = 0; float qaExamineAt = 0; bool qaExamineFocus = false, qaHostBlur = false;
+    // Host: movimento durante un pensiero (AllowMovementDuringThoughts).
+    bool qaThoughtMove = false; hpl::cVector3f qaThoughtFeet; float qaThoughtYaw = 0;
     float qaCabinAt = 0;
     // QA: mette `body` fermo in un punto libero vicino a `of` (0.9-1.5 m,
     // davanti se possibile); restituisce i piedi.
@@ -280,7 +292,7 @@ private:
     online::MapState currentMap;
     online::MovementPrediction prediction;
     online::ClientNetDiagnostics clientDiag;
-    uint64_t diagReportAt = 0;
+    uint64_t diagReportAt = 0, diagSentBytes = 0, diagReceivedBytes = 0;
     float hitchClock = 0, partnerClosest = 1000, partnerCorrectionMax = 0;
     // QA (full): time from the client's gesture to the first visible motion of
     // the grabbed bottle (camera turn while holding) and of the dragged door.
@@ -300,7 +312,9 @@ private:
     struct Pose { std::vector<hpl::cMatrixf> bodies; hpl::cMatrixf mesh; bool meshMotion = false; };
     // settledTick: ultima posa dell'host già applicata a un oggetto fermo
     // (non va riposizionato a ogni fotogramma finché non arriva una posa nuova).
-    struct Motion { online::PoseHistory<Pose,16> history; std::vector<DriveState> drive; uint32_t settledTick = 0; bool settled = false; };
+    struct Motion { online::PoseHistory<Pose,16> history; std::vector<DriveState> drive; uint32_t settledTick = 0; bool settled = false;
+        // Diagnostica: arrivo dell'ultima posa in movimento, posizione e passo mostrati.
+        uint64_t lastArrival = 0; bool hasShown = false, hasStep = false; hpl::cVector3f shown, step; };
     std::map<std::string, Motion> motion;
     online::PoseHistory<online::PlayerState,32> partnerHistory;
     // Client: gli altri ospiti (players[2..] degli snapshot), per ID.

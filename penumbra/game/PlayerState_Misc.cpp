@@ -675,7 +675,7 @@ void cPlayerState_Message::OnUpdate(float afTimeStep)
 
 bool cPlayerState_Message::OnJump()
 { 
-	return false;
+	return mpInit->mbAllowMovementDuringThoughts;
 }
 
 //-----------------------------------------------------------------------
@@ -698,13 +698,14 @@ void cPlayerState_Message::OnStartExamine()
 
 //-----------------------------------------------------------------------
 
-bool cPlayerState_Message::OnMoveForwards(float afMul, float afTimeStep){	return false;}
-bool cPlayerState_Message::OnMoveSideways(float afMul, float afTimeStep){	return false;}
+// Mod: movimento e visuale liberi durante i pensieri (vedi cInit::mbAllowMovementDuringThoughts).
+bool cPlayerState_Message::OnMoveForwards(float afMul, float afTimeStep){	return mpInit->mbAllowMovementDuringThoughts;}
+bool cPlayerState_Message::OnMoveSideways(float afMul, float afTimeStep){	return mpInit->mbAllowMovementDuringThoughts;}
 
 //-----------------------------------------------------------------------
 
-bool cPlayerState_Message::OnAddYaw(float afVal){ return false;}
-bool cPlayerState_Message::OnAddPitch(float afVal){return false;}
+bool cPlayerState_Message::OnAddYaw(float afVal){ return mpInit->mbAllowMovementDuringThoughts;}
+bool cPlayerState_Message::OnAddPitch(float afVal){return mpInit->mbAllowMovementDuringThoughts;}
 
 //-----------------------------------------------------------------------
 
@@ -721,6 +722,8 @@ void cPlayerState_Message::EnterState(iPlayerState* apPrevState)
 
 void cPlayerState_Message::LeaveState(iPlayerState* apNextState)
 {
+	// Ci si è potuti muovere: la postura scelta nel frattempo resta.
+	if(mpInit->mbAllowMovementDuringThoughts) return;
 	if(mPrevMoveState != ePlayerMoveState_Run && mPrevMoveState !=ePlayerMoveState_Jump)
 		mpPlayer->ChangeMoveState(mPrevMoveState);
 	else

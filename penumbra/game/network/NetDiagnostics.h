@@ -58,6 +58,11 @@ struct ClientNetDiagnostics {
         partnerX = x; partnerZ = z; hasPartner = true;
     }
     unsigned snapshots = 0;
+    // Oggetti replicati: aggiornamenti ricevuti, intervallo fra due pose dello
+    // stesso oggetto in movimento (ms) e regolarità del moto mostrato: variazione
+    // del passo fra tick consecutivi (cm), cioè lo scatto che si vede.
+    unsigned entityUpdates = 0, objectsMoving = 0;
+    WindowStat entityGap, objectJerk;
     unsigned over2cm = 0, over10cm = 0, reset25cm = 0, hard2m = 0;
     unsigned unpredictedTicks = 0, replayTruncated = 0, teleports = 0;
     // Replay steps refused by the client's collision test, out of all replayed steps.

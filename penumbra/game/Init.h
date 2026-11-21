@@ -153,6 +153,10 @@ public:
 	
 	bool mbSubtitles;
 	bool mbSimpleWeaponSwing;
+	// Mod: con un pensiero o una descrizione a schermo ci si può muovere e
+	// guardare intorno (Game/AllowMovementDuringThoughts, predefinito sì). I
+	// blocchi delle sequenze (SetPlayerActive, LookAt) restano.
+	bool mbAllowMovementDuringThoughts = true;
 	bool mbDisablePersonalNotes;
 	bool mbAllowQuickSave;
 	bool mbFlashItems;

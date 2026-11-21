@@ -160,6 +160,8 @@ public:
 	bool GetShowDescritionOnce(){ return mbShowDescritionOnce;}
 
 	bool GetHasBeenExamined(){ return mbHasBeenExamined;}
+	// Co-op (client): stato di esame ricevuto dall'host.
+	void SetHasBeenExamined(bool abX){ mbHasBeenExamined = abX;}
 
 	void SetGameName(const tWString& asName){ msGameName = asName;}
 	const tWString& GetGameName(){ return msGameName;}
@@ -212,6 +214,8 @@ public:
 	virtual void OnPlayerGravityCollide(iCharacterBody *apCharBody, cCollideData *apCollideData){}
 
 	bool GetHasInteraction(){ return mbHasInteraction;}
+	// Co-op (client): interazione da script ricevuta dall'host.
+	void SetHasInteraction(bool abX){ mbHasInteraction = abX;}
 
 	float GetMaxExamineDist(){ return mfMaxExamineDist;}
 	void SetMaxExamineDist(float afX){ mfMaxExamineDist = afX;}

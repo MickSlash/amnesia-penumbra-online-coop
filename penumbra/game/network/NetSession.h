@@ -246,6 +246,11 @@ private:
     void Maintain(uint32_t now);
     Logger log_;
     _ENetHost* host_ = nullptr;
+public:
+    // Byte UDP inviati e ricevuti dall'avvio (diagnostica della banda).
+    uint64_t SentBytes() const;
+    uint64_t ReceivedBytes() const;
+private:
     _ENetPeer* peer_ = nullptr;
     Role role_ = Role::Offline;
     bool initialized_ = false, ready_ = false, hasInput_ = false;

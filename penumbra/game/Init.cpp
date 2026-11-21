@@ -366,6 +366,7 @@ if(const char* mode=getenv("PENUMBRA_COOP_FULLSCREEN")) mbFullScreen = std::stri
 	mbSimpleWeaponSwing  = mpConfig->GetBool("Game","SimpleWeaponSwing",false); 
 	mbDisablePersonalNotes  = mpConfig->GetBool("Game","DisablePersonalNotes",false); 
 	mbAllowQuickSave  = mpConfig->GetBool("Game","AllowQuickSave",false); 
+	mbAllowMovementDuringThoughts = mpConfig->GetBool("Game","AllowMovementDuringThoughts",true);
 	mbFlashItems  = mpConfig->GetBool("Game","FlashItems",true);
 	mbShowCrossHair  = mpConfig->GetBool("Game","ShowCrossHair",false);
 	
@@ -884,6 +885,7 @@ void cInit::Exit()
 	mpConfig->SetBool("Game","SimpleWeaponSwing",mbSimpleWeaponSwing); 
 	mpConfig->SetBool("Game","DisablePersonalNotes",mbDisablePersonalNotes); 
 	mpConfig->SetBool("Game","AllowQuickSave",mbAllowQuickSave); 
+	mpConfig->SetBool("Game","AllowMovementDuringThoughts",mbAllowMovementDuringThoughts);
 	mpConfig->SetBool("Game","FlashItems",mbFlashItems); 
 	mpConfig->SetBool("Game","ShowCrossHair",mbShowCrossHair);
 

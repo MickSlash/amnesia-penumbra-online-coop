@@ -946,4 +946,6 @@ bool Session::AcknowledgeCheckpoint(uint32_t id) {
     if(role_ != Role::Client || !ready_ || !id || id != checkpointDelivered_) return false;
     auto ack = Header(Message::CheckpointAck); U32(ack,id); return Send(ack,0,true);
 }
+uint64_t Session::SentBytes() const { return host_ ? host_->totalSentData : 0; }
+uint64_t Session::ReceivedBytes() const { return host_ ? host_->totalReceivedData : 0; }
 }

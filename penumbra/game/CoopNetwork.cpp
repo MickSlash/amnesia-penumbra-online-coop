@@ -8,6 +8,7 @@
 #include "PlayerHands.h"
 #include "MapHandler.h"
 #include "GameEntity.h"
+#include "GameArea.h"
 #include "Inventory.h"
 #include "GameItemType.h"
 #include "GameMessageHandler.h"
@@ -493,7 +494,7 @@ void cCoopNetwork::BeforeMapLoad() {
     positioned=false; hasClientPosition=false; snapshotAge=0;
     prediction.Clear(); ResetPlayback();
     for(auto& guest:guests) { ResetGuestMap(*guest); guest->pendingSave.reset(); guest->pendingWeapon.clear(); }
-    restoredEquipment=false; baselineNames.clear(); receivedJournal=0; pendingNote.clear(); deferredMessages.clear(); replicatedSounds.clear(); gReplicaMass.clear();
+    restoredEquipment=false; baselineNames.clear(); receivedJournal=0; pendingNote.clear(); deferredMessages.clear(); replicatedSounds.clear(); gReplicaMass.clear(); replicaInteraction.clear();
     currentMusic.clear(); currentSkybox.clear();
 }
 // Punto libero vicino a `center` per il corpo `body`: prima le posizioni
@@ -938,7 +939,9 @@ bool cCoopNetwork::RelayMessage(const tWString& text) {
     auto* owner=GuestFor(init->mpPlayer);
     // Un messaggio personale dell'host resta sull'host.
     if(!owner && personalMessage) return false;
-    online::Presentation e; e.kind=online::PresentationKind::Message; e.target=owner?owner->session.GuestPlayerId():0; e.text[0]=cString::To8Char(text); Present(e);
+    online::Presentation e; e.kind=online::PresentationKind::Message; e.target=owner?owner->session.GuestPlayerId():0; e.text[0]=cString::To8Char(text);
+    if(owner && personalMessage && !personalFocusEntity.empty()) { e.text[1]=personalFocusEntity; e.values[0]=personalFocusBody+1; }
+    Present(e);
     return owner!=nullptr;
 }
 // Evento di presentazione per ogni ospite connesso interessato (target 0 = tutti).
@@ -1195,7 +1198,8 @@ void cCoopNetwork::UpdateGuest(float dt) {
             if(g->session.SendInventory(next)) { g->inventory=next; g->inventoryBytes=bytes; }
         }
         for(auto it=g->pendingPresentation.begin();it!=g->pendingPresentation.end();) { it->epoch=g->map.epoch; if(g->session.SendPresentation(*it)) it=g->pendingPresentation.erase(it); else break; }
-        g->worldTime+=dt; if(dirtyWorld || g->worldTime+0.000001f>=1.0f/30) { g->worldTime=std::max(0.0f,g->worldTime-1.0f/30); PublishWorld(false); }
+        static const float worldPeriod=1.0f/std::clamp(getenv("PENUMBRA_COOP_WORLD_HZ")?float(atof(getenv("PENUMBRA_COOP_WORLD_HZ"))):30.0f,10.0f,60.0f);
+        g->worldTime+=dt; if(dirtyWorld || g->worldTime+0.000001f>=worldPeriod) { g->worldTime=std::max(0.0f,g->worldTime-worldPeriod); PublishWorld(false); }
         else if(g->baselineSent) PublishHeld();
         g->sendTime+=dt; g->backupTime+=dt;
         if(g->sendTime+0.000001f>=1.0f/60) {
@@ -1346,6 +1350,20 @@ void cCoopNetwork::UpdateClient(float dt) {
             const auto target=cMath::MatrixSlerp(alpha,from->bodies[n],to->bodies[n],true);
             auto* body=e->GetBody(int(n));
             if(drive && !body->IsCharacter()) DriveBody(body,target,resting && alpha>=1,drives[n],dt,gravity); else body->SetMatrix(target);
+            if(n==0 && e->GetType()!=eGameEntityType_Enemy) {
+                auto& m=pair.second; const cVector3f p=target.GetTranslation();
+                if(m.hasShown) {
+                    cVector3f step=p-m.shown;
+                    if(m.hasStep && (step.Length()>0.0005f || m.step.Length()>0.0005f) && step.Length()<0.5f) {
+                        cVector3f change=step-m.step; const float jerk=change.Length()*100; clientDiag.objectJerk.Add(jerk); ++clientDiag.objectsMoving;
+                        static unsigned spikes=0; static uint64_t spikeWindow=0; if(Milliseconds()-spikeWindow>5000) { spikeWindow=Milliseconds(); spikes=0; }
+                        if(jerk>3 && spikes++<6) Log("[COOP/NETDIAG] Object jerk entity=%s jerk_cm=%.1f step_cm=%.1f previous_cm=%.1f alpha=%.2f from_tick=%u newest_tick=%u playback=%.1f samples_gap=%d\n",pair.first.c_str(),jerk,step.Length()*100,m.step.Length()*100,alpha,
+                            unsigned(pair.second.history.NewestTick()),unsigned(newestHostTick),playback.Tick(),int(double(pair.second.history.NewestTick())-playback.Tick()));
+                    }
+                    m.step=step; m.hasStep=true;
+                }
+                m.shown=p; m.hasShown=true;
+            }
         }
     }
     ApplyHeldPrediction();
@@ -1354,6 +1372,16 @@ void cCoopNetwork::UpdateClient(float dt) {
         if(event.epoch!=g->map.epoch || (event.target && event.target!=g->session.GuestPlayerId())) continue;
         if(event.kind==online::PresentationKind::Hint) init->mpEffectHandler->GetSubTitle()->Add(cString::To16Char(event.text[0]),3,false);
         if(event.kind==online::PresentationKind::Note) { pendingNote=event.text[0]; pendingNoteTime=0; }
+        if(event.kind==online::PresentationKind::Message && !event.text[1].empty() && event.values[0]>0) {
+            // Descrizione di un oggetto che questo client ha esaminato: messa a
+            // fuoco come nel gioco (iGameEntity::OnPlayerExamine), spenta alla chiusura.
+            auto* e=init->mpMapHandler->GetGameEntity(event.text[1],false);
+            if(e && event.values[0]<=e->GetBodyNum()) {
+                auto* dof=init->mpEffectHandler->GetDepthOfField();
+                dof->FocusOnBody(e->GetBody(event.values[0]-1)); dof->SetFocusBody(NULL); dof->SetActive(true,1.2f);
+                init->mpGameMessageHandler->SetFocusIsedUsed(true);
+            }
+        }
         if(event.kind==online::PresentationKind::Message) {
             // Un messaggio chiude il taccuino: chi sta leggendo lo vede dopo.
             if(init->mpNotebook->IsActive() && deferredMessages.size()<16) { deferredMessages.push_back(cString::To16Char(event.text[0])); Log("[COOP/JOURNAL] Message deferred while reading: %s\n",event.text[0].c_str()); }
@@ -1458,7 +1486,7 @@ void cCoopNetwork::UpdateClient(float dt) {
     if(Ready()) {
         online::PlayerInput input; input.epoch=g->map.epoch; input.sequence=++inputSequence;
         auto* p=init->mpPlayer; auto* keys=init->mpGame->GetInput();
-        if(init->mpGame->GetUpdater()->GetCurrentContainerName()=="Default" && p->IsActive() && !init->mpGameMessageHandler->HasMessage()) {
+        if(init->mpGame->GetUpdater()->GetCurrentContainerName()=="Default" && p->IsActive() && (!init->mpGameMessageHandler->HasMessage() || init->mbAllowMovementDuringThoughts)) {
             input.forward=(keys->IsTriggerd("Forward")?1000:0)-(keys->IsTriggerd("Backward")?1000:0);
             input.strafe=(keys->IsTriggerd("Right")?1000:0)-(keys->IsTriggerd("Left")?1000:0);
             input.buttons=(keys->IsTriggerd("Jump")?1:0)|(keys->IsTriggerd("Run")?4:0);
@@ -1563,7 +1591,13 @@ void cCoopNetwork::ReportDiagnostics() {
             d.clock.ticks,d.clock.burst,d.snapshots,d.unpredictedTicks,d.replayTruncated,d.over2cm,d.over10cm,d.reset25cm,d.hard2m);
         std::snprintf(text+strlen(text),sizeof text-strlen(text)," host_path_m=%.3f shown_path_m=%.3f replay_steps=%u replay_blocked=%u moving_poses=%u stalled_poses=%u",d.hostPath,d.shownPath,d.replaySteps,d.replayBlocked,d.movingPoses,d.stalledPoses);
         std::snprintf(text+strlen(text),sizeof text-strlen(text)," playback_held=%u teleports=%u",d.playbackHeld,d.teleports);
-        line+=text+d.playbackDelay.Format("playback_delay_ticks")+d.partnerJerk.Format("partner_jerk_cm",100)+d.hostStep.Format("host_step_cm",100)+d.nominalStep.Format("nominal_step_cm")+d.freeCorrection.Format("free_correction_cm",100)+d.clock.interval.Format("tick_gap_ms")+d.snapshotInterval.Format("snapshot_gap_ms")+d.correction.Format("correction_cm",100)+d.pending.Format("pending")+d.ackLag.Format("ack_lag");
+        {
+            const uint64_t sent=g->session.SentBytes(), received=g->session.ReceivedBytes();
+            std::snprintf(text+strlen(text),sizeof text-strlen(text)," entity_updates_per_s=%.1f object_moving_ticks=%u send_kbps=%.1f receive_kbps=%.1f",
+                d.entityUpdates*1000.0/window,d.objectsMoving,(sent-diagSentBytes)*8.0/window,(received-diagReceivedBytes)*8.0/window);
+            diagSentBytes=sent; diagReceivedBytes=received;
+        }
+        line+=text+d.entityGap.Format("entity_gap_ms")+d.objectJerk.Format("object_jerk_cm")+d.playbackDelay.Format("playback_delay_ticks")+d.partnerJerk.Format("partner_jerk_cm",100)+d.hostStep.Format("host_step_cm",100)+d.nominalStep.Format("nominal_step_cm")+d.freeCorrection.Format("free_correction_cm",100)+d.clock.interval.Format("tick_gap_ms")+d.snapshotInterval.Format("snapshot_gap_ms")+d.correction.Format("correction_cm",100)+d.pending.Format("pending")+d.ackLag.Format("ack_lag");
         d.ResetWindow();
     }
     Log("%s\n",line.c_str());
@@ -1631,6 +1665,14 @@ bool cCoopNetwork::PublishEntity(iGameEntity* entity,bool baseline) {
         std::replace(e.file.begin(),e.file.end(),'\\','/');
         if(e.file.find(':')!=std::string::npos) e.file=cString::GetFileName(e.file);
         e.flags=entity->IsActive()?1:0; e.subtype=uint16_t(entity->GetType());
+        // Mirino del client (gli script girano solo sull'host): 2 = esaminabile
+        // (descrizione o callback di esame: l'occhio), 8 = interazione da script
+        // (la mano), 16 = già esaminato; byte alto di subtype = icona dell'area + 1.
+        if(entity->GetCallbackScript(eGameEntityScriptType_PlayerExamine) || !entity->GetDescription().empty()) e.flags|=2;
+        if(entity->GetCallbackScript(eGameEntityScriptType_PlayerInteract)) e.flags|=8;
+        if(entity->GetHasBeenExamined()) e.flags|=16;
+        if(entity->GetType()==eGameEntityType_Area && static_cast<cGameArea*>(entity)->GetUsesCustomIcon())
+            e.subtype|=uint16_t((std::clamp(int(static_cast<cGameArea*>(entity)->GetCustomIcon()),0,254)+1)<<8);
         if(entity->GetType()==eGameEntityType_Enemy) {
             auto* enemy=static_cast<iGameEnemy*>(entity);
             e.health=int32_t(std::clamp(enemy->GetHealth(),0.0f,100000000.0f)*10);
@@ -1648,7 +1690,7 @@ bool cCoopNetwork::PublishEntity(iGameEntity* entity,bool baseline) {
         if(auto* mesh=entity->GetMeshEntity()) e.transform=Pack(mesh->GetWorldMatrix()); else e.transform=Pack(cMatrixf::Identity);
         for(int n=0;n<entity->GetBodyNum() && n<32;++n) e.bodies.push_back(Pack(entity->GetBody(n)->GetLocalMatrix()));
         const auto found=g->published.find(name);
-        const bool lifecycle=found==g->published.end() || found->second.flags!=e.flags || (e.subtype==eGameEntityType_Enemy && ((found->second.health<=0)!=(e.health<=0) || found->second.enemyState!=e.enemyState));
+        const bool lifecycle=found==g->published.end() || found->second.flags!=e.flags || ((e.subtype&255)==eGameEntityType_Enemy && ((found->second.health<=0)!=(e.health<=0) || found->second.enemyState!=e.enemyState));
         const bool moved=found==g->published.end() || found->second.bodies!=e.bodies || found->second.transform!=e.transform || found->second.character!=e.character || !e.animations.empty();
         // Durante la baseline un'entità già inviata non va reinviata se non
         // cambia stato: i nemici animati risultano sempre "mossi" e venivano
@@ -1678,6 +1720,18 @@ void cCoopNetwork::ApplyEntity(const online::EntityState& s) {
     if(!entity) return;
     if((s.flags&4) && entity->IsActive() && getenv("PENUMBRA_COOP_QA")) Log("[COOP/QA] Replica removed entity=%s t_ms=%llu\n",s.name.c_str(),(unsigned long long)Milliseconds());
     entity->SetActive((s.flags&1)!=0 && !(s.flags&4));
+    if(!(s.flags&4)) {
+        // Occhio, mano e icone delle aree come sull'host. La descrizione vera
+        // resta all'host (l'esame del client lo mostra lui): qui basta che non
+        // sia vuota.
+        if(s.flags&2) { if(entity->GetDescription().empty()) entity->SetDescription(_W(" ")); }
+        else if(!entity->GetDescription().empty()) entity->SetDescription(_W(""));
+        entity->SetHasBeenExamined((s.flags&16)!=0);
+        const bool scripted=(s.flags&8)!=0;
+        if(scripted && !entity->GetHasInteraction()) { entity->SetHasInteraction(true); replicaInteraction.insert(s.name); }
+        if(!scripted && replicaInteraction.erase(s.name)) entity->SetHasInteraction(false);
+        if(entity->GetType()==eGameEntityType_Area && (s.subtype>>8)) static_cast<cGameArea*>(entity)->SetCustomIcon(eCrossHairState((s.subtype>>8)-1));
+    }
     if(s.flags&4) { motion.erase(s.name); auto collider=enemyColliders.find(s.name); if(collider!=enemyColliders.end() && collider->second) collider->second->SetActive(false); return; }
     if(auto* mesh=entity->GetMeshEntity()) if(s.bodies.empty()) mesh->SetMatrix(Unpack(s.transform));
     if(entity->GetType()==eGameEntityType_Enemy) {
@@ -1726,6 +1780,11 @@ void cCoopNetwork::ApplyEntity(const online::EntityState& s) {
     // Live poses are played back on the host timeline; a reliable baseline or
     // lifecycle pose is applied at once and restarts the history from itself.
     auto& history=motion[s.name].history;
+    if(s.liveMotion) {
+        auto& m=motion[s.name]; const uint64_t now=Milliseconds(); ++clientDiag.entityUpdates;
+        if(m.lastArrival && now-m.lastArrival<1000) clientDiag.entityGap.Add(double(now-m.lastArrival));
+        m.lastArrival=now;
+    }
     if(!s.liveMotion) history.Clear();
     history.Add(s.hostTick,pose); NoteHostTick(s.hostTick);
 }
@@ -2243,7 +2302,7 @@ void cCoopNetwork::RunPartyQA(float dt) {
 void cCoopNetwork::RunCabinQA(float dt) {
     // Entrambi chiudono i pensieri con un clic, come un giocatore.
     const int phase=int(qaTime/2);
-    if(qaTime>7 && phase!=qaCabinPhase && init->mpGameMessageHandler->HasMessage()) {
+    if(qaTime>7 && phase!=qaCabinPhase && init->mpGameMessageHandler->HasMessage() && !(IsHost() && qaCabinStep==21)) {
         if(IsHost()) init->mpPlayer->StartInteract(); else ClientAction(online::PlayerAction::Interact,true);
         qaCabinPhase=phase;
     }
@@ -2254,11 +2313,49 @@ void cCoopNetwork::RunCabinQA(float dt) {
         return s;
     };
     if(IsClient()) {
+        auto lookAt=[&](iGameEntity* e) {
+            const auto a=AimAngles(init->mpPlayer->GetCamera()->GetPosition(),e->GetBody(0)->GetBV()->GetWorldCenter());
+            init->mpPlayer->GetCamera()->SetYaw(a.y); init->mpPlayer->GetCamera()->SetPitch(a.x);
+        };
+        // Occhio: l'oggetto esaminabile più vicino (descrizione impostata dallo
+        // script dell'host), non raccoglibile e non trascinabile.
+        if(!outside && qaTime>12 && qaEyeTarget.empty() && !init->mpGameMessageHandler->HasMessage()) {
+            float best=1000; auto it=init->mpMapHandler->GetGameEntityIterator();
+            while(it.HasNext()) { auto* e=it.Next(); if(!e->IsActive() || !e->GetBodyNum() || e->GetDescription().empty() || e->GetHasBeenExamined() || CoopPickMass(e->GetBody(0))>0 || e->GetType()==eGameEntityType_Item) continue;
+                const float d=(e->GetBody(0)->GetBV()->GetWorldCenter()-init->mpPlayer->GetCamera()->GetPosition()).Length();
+                // Prima le aree con una descrizione (nome *desc): il loro esame mette a fuoco.
+                const float score=d+(e->GetName().find("desc")!=std::string::npos?0.0f:100.0f);
+                if(score<best && d<e->GetMaxExamineDist()*0.9f) { best=score; qaEyeTarget=e->GetName(); } }
+            if(qaEyeTarget.empty()) qaEyeTarget="-";
+            qaEyeAt=qaTime;
+        }
+        if(!qaEyeDone && !qaEyeTarget.empty()) {
+            auto* e=qaEyeTarget=="-"?nullptr:init->mpMapHandler->GetGameEntity(qaEyeTarget,false);
+            if(e) lookAt(e);
+            if(qaTime>qaEyeAt+0.5f) {
+                const bool picked=e && init->mpPlayer->GetPickedBody()==e->GetBody(0);
+                qaEyeOk=e && init->mpPlayer->GetCrossHairState()==eCrossHairState_Examine; qaEyeDone=true;
+                Log("[COOP/QA] Replica eye target=%s picked=%d crosshair=%d examine=%d\n",qaEyeTarget.c_str(),picked?1:0,int(init->mpPlayer->GetCrossHairState()),qaEyeOk?1:0);
+            }
+        }
+        // Il client esamina l'oggetto con l'occhio (clic destro): arriva la sua
+        // descrizione e il suo schermo mette a fuoco l'oggetto.
+        if(qaEyeDone && qaEyeOk && qaExamineStep==0 && !init->mpGameMessageHandler->HasMessage()) { ClientAction(online::PlayerAction::Attack,true); qaExamineStep=1; qaExamineAt=qaTime; }
+        if(qaExamineStep==1 && qaTime>qaExamineAt+0.1f) { ClientAction(online::PlayerAction::Attack,false); qaExamineStep=2; }
+        if(qaExamineStep==2 && init->mpEffectHandler->GetDepthOfField()->IsActive() && init->mpGameMessageHandler->HasMessage()) qaExamineFocus=true;
+        if(qaExamineStep==2 && qaTime>qaExamineAt+1.5f) {
+            Log("[COOP/QA] Replica examine message=%d focus=%d\n",init->mpGameMessageHandler->HasMessage()?1:0,init->mpEffectHandler->GetDepthOfField()->IsActive()?1:0); qaExamineStep=3;
+        }
+        if(!outside && !qaDoorIconDone) if(auto* door=init->mpMapHandler->GetGameEntity("exitdoor",false)) if(door->IsActive() && door->GetBodyNum()
+            && (door->GetBody(0)->GetBV()->GetWorldCenter()-init->mpPlayer->GetCamera()->GetPosition()).Length()<1.6f) {
+            lookAt(door);
+            if(init->mpPlayer->GetPickedBody()==door->GetBody(0)) { qaDoorIconDone=true; Log("[COOP/QA] Replica exit door crosshair=%d custom_icon=%d\n",int(init->mpPlayer->GetCrossHairState()),int(static_cast<cGameArea*>(door)->GetCustomIcon())); }
+        }
         if(outside && Ready()) {
             if(qaCabinAt<=0) qaCabinAt=qaTime;
             if(qaCabinStep==0 && qaTime>qaCabinAt+3) {
-                const bool ok=init->mpInventory->GetItem("flashlight") && init->mpInventory->GetItem("notebook") && init->mpInventory->GetItem("glowstick");
-                Log("[COOP/QA] %s cabin exit role=client map=%s items=[%s]\n",ok?"PASS":"FAIL",g->map.file.c_str(),items(init->mpInventory).c_str());
+                const bool ok=init->mpInventory->GetItem("flashlight") && init->mpInventory->GetItem("notebook") && init->mpInventory->GetItem("glowstick") && qaEyeOk && qaExamineFocus;
+                Log("[COOP/QA] %s cabin exit role=client map=%s items=[%s] eye=%d examine_focus=%d\n",ok?"PASS":"FAIL",g->map.file.c_str(),items(init->mpInventory).c_str(),qaEyeOk?1:0,qaExamineFocus?1:0);
                 qaCabinStep=1;
             }
         }
@@ -2290,6 +2387,10 @@ void cCoopNetwork::RunCabinQA(float dt) {
     auto* hostInv=mainInventory; auto* guestInv=InventoryFor(remotePlayer);
     const char* who=hostExits?"host":"guest";
     if(qaTime<1) { init->mpEffectHandler->GetDepthOfField()->SetActive(false,0); }
+    // L'host non esamina mai nulla: la sua sfocatura dopo l'introduzione viene
+    // solo da un esame dell'ospite.
+    if(qaTime>12 && !outside && init->mpEffectHandler->GetDepthOfField()->IsActive()) {
+        if(!qaHostBlur) Log("[COOP/QA] Host screen blurred by depth of field t=%.1f\n",qaTime); qaHostBlur=true; }
     if(qaCabinStep==0 && qaTime>9 && init->mpPlayer->IsActive() && remotePlayer->IsActive() && !init->mpGameMessageHandler->HasMessage()) {
         Log("[COOP/QA] Cabin unlocked host_active=1 guest_active=1 t=%.1f\n",qaTime); qaCabinStep=1; qaCabinAt=qaTime;
     }
@@ -2309,7 +2410,21 @@ void cCoopNetwork::RunCabinQA(float dt) {
         }
     }
     // 2: l'host prende la torcia dal cassetto; 3: apre l'armadietto con la chiave.
-    if(qaCabinStep==2 && qaTime>qaCabinAt+2) { take(init->mpPlayer,hostHands,"flashlight"); qaCabinStep=3; qaCabinAt=qaTime; }
+    if(qaCabinStep==2 && qaTime>qaCabinAt+2) { take(init->mpPlayer,hostHands,"flashlight"); qaCabinStep=21; qaCabinAt=qaTime; }
+    // 21: il pensiero della torcia è a schermo; l'host cammina e si gira.
+    if(qaCabinStep==21) {
+        if(qaThoughtFeet==cVector3f(0) && init->mpPlayer->GetState()==ePlayerState_Message) { qaThoughtFeet=init->mpPlayer->GetCharacterBody()->GetFeetPosition(); qaThoughtYaw=init->mpPlayer->GetCamera()->GetYaw(); qaCabinAt=qaTime; }
+        if(!(qaThoughtFeet==cVector3f(0)) && qaTime<qaCabinAt+0.6f) { init->mpPlayer->MoveForwards(-1,dt); init->mpPlayer->AddYaw(0.01f); }
+        if(!(qaThoughtFeet==cVector3f(0)) && qaTime>qaCabinAt+0.9f) {
+            cVector3f delta=init->mpPlayer->GetCharacterBody()->GetFeetPosition()-qaThoughtFeet; delta.y=0;
+            const float turned=std::fabs(init->mpPlayer->GetCamera()->GetYaw()-qaThoughtYaw);
+            const bool message=init->mpPlayer->GetState()==ePlayerState_Message;
+            qaThoughtMove=delta.Length()>0.15f && turned>0.05f && message;
+            Log("[COOP/QA] Cabin thought movement moved_m=%.2f turned_rad=%.2f message_still_shown=%d\n",delta.Length(),turned,message?1:0);
+            qaCabinStep=3; qaCabinAt=qaTime;
+        }
+        if(qaThoughtFeet==cVector3f(0) && qaTime>qaCabinAt+3) { Log("[COOP/QA] Cabin thought movement: no thought on screen\n"); qaCabinStep=3; qaCabinAt=qaTime; }
+    }
     if(qaCabinStep==3) {
         auto* lock=init->mpMapHandler->GetGameEntity("lock1",false);
         if(lock && qaTime<qaCabinAt+0.2f) place(init->mpPlayer,lock,0.8f);
@@ -2332,8 +2447,8 @@ void cCoopNetwork::RunCabinQA(float dt) {
         if(late && levelHints && guestInv && !guestInv->GetItem("notebook") && !hostInv->GetItem("notebook")) {
             Log("[COOP/QA] Cabin notebook hint shown after %.1f s\n",qaTime-qaCabinAt); take(remotePlayer,remoteHands,"notebook"); qaCabinAt=qaTime;
         }
-        if(door && door->IsActive()) { Log("[COOP/QA] Cabin exit door enabled after %.1f s\n",qaTime-qaCabinAt); qaCabinStep=6; qaCabinAt=qaTime; }
-        else if(qaTime>qaCabinAt+(late && !levelHints?45:15)) { Log("[COOP/QA] FAIL cabin exit door never enabled host=[%s] guest=[%s]\n",items(hostInv).c_str(),items(guestInv).c_str()); qaCabinStep=99; }
+        if(door && door->IsActive() && qaTime>32) { Log("[COOP/QA] Cabin exit door enabled after %.1f s\n",qaTime-qaCabinAt); qaCabinStep=6; qaCabinAt=qaTime; }
+        else if(qaTime>std::max(qaCabinAt+(late && !levelHints?45:15),40.0f)) { Log("[COOP/QA] FAIL cabin exit door never enabled host=[%s] guest=[%s]\n",items(hostInv).c_str(),items(guestInv).c_str()); qaCabinStep=99; }
     }
     // 6: chi esce guarda la porta e interagisce.
     if(qaCabinStep==6) {
@@ -2352,7 +2467,7 @@ void cCoopNetwork::RunCabinQA(float dt) {
     if(qaCabinStep==8 && qaTime>qaCabinAt+2) {
         const bool ok=hostInv->GetItem("flashlight") && hostInv->GetItem("notebook") && hostInv->GetItem("glowstick")
             && guestInv && guestInv->GetItem("flashlight") && guestInv->GetItem("notebook") && guestInv->GetItem("glowstick");
-        Log("[COOP/QA] %s cabin exit role=host exit_by=%s map=%s host=[%s] guest=[%s]\n",ok?"PASS":"FAIL",who,g->map.file.c_str(),items(hostInv).c_str(),items(guestInv).c_str());
+        Log("[COOP/QA] %s cabin exit role=host exit_by=%s host_blur=%d thought_move=%d map=%s host=[%s] guest=[%s]\n",ok&&!qaHostBlur&&qaThoughtMove?"PASS":"FAIL",who,qaHostBlur?1:0,qaThoughtMove?1:0,g->map.file.c_str(),items(hostInv).c_str(),items(guestInv).c_str());
         qaCabinStep=9; qaCabinAt=qaTime;
     }
     if(qaCabinStep==99) { Log("[COOP/QA] FAIL cabin exit role=host\n"); qaCabinStep=100; qaCabinAt=qaTime; }

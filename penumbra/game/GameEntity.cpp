@@ -377,18 +377,33 @@ void iGameEntity::OnPlayerExamine()
 		{
 			// Co-op: la descrizione è solo di chi esamina.
 			cCoopNetwork::PersonalMessage personal(mpInit->mpCoop);
+			// Un ospite mette a fuoco l'oggetto sul proprio schermo.
+			if(mpInit->mpCoop && mpInit->mpPlayer->IsNetworkRemote())
+			{
+				mpInit->mpCoop->personalFocusEntity = msName;
+				mpInit->mpCoop->personalFocusBody = -1;
+				for(int i=0; i<(int)mvBodies.size(); ++i) if(mvBodies[i] == mpInit->mpPlayer->GetPickedBody()) mpInit->mpCoop->personalFocusBody = i;
+				if(mpInit->mpCoop->personalFocusBody < 0) mpInit->mpCoop->personalFocusEntity.clear();
+			}
 			mpInit->mpGameMessageHandler->Add(msDescription);
+			if(mpInit->mpCoop) mpInit->mpCoop->personalFocusEntity.clear();
 		}
 		//if(mbShowDescritionOnce) msDescription = _W("");
 		mbHasBeenExamined = true;
 		
 		//////////////////////////////
 		//Set focus on the object
+		// Co-op: sfocatura e messa a fuoco sono dello schermo di chi esamina. Se
+		// esamina un ospite, sull'host non c'è il messaggio che la spegnerebbe e
+		// lo schermo dell'host restava sfocato; il client la applica da sé.
+		if(!mpInit->mpPlayer->IsNetworkRemote())
+		{
 		mpInit->mpEffectHandler->GetDepthOfField()->FocusOnBody(mpInit->mpPlayer->GetPickedBody());
 		mpInit->mpEffectHandler->GetDepthOfField()->SetFocusBody(NULL);
 		mpInit->mpEffectHandler->GetDepthOfField()->SetActive(true,1.2f);
 
 		mpInit->mpGameMessageHandler->SetFocusIsedUsed(true);
+		}
 	}
 }
 
