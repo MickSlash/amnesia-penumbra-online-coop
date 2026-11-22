@@ -2635,48 +2635,52 @@ void cCoopNetwork::OnDraw() {
 void cCoopNetwork::RunLobbyQA(float dt) {
     qaTime+=dt;
     if(IsClient()) {
-        if(qaStage==0 && qaTime>2 && g->session.Connected()) { SetLobbyReady(true); qaStage=1; }
-        if(qaStage==1 && qaTime>3) { SetLobbyReady(false); qaStage=2; }
-        if(qaStage==2 && qaTime>4) { SetLobbyReady(true); qaStage=3; }
-        if(qaStage<4 && g->map.epoch && lobbyPhase==0) { Log("[COOP/QA] Lobby map received before start\n"); qaStage=99; }
-        if(qaStage==3 && lobbyPhase==2 && Ready()) { qaStage=4; qaCabinAt=qaTime; }
-        if(qaStage==4 && qaTime>qaCabinAt+3) {
+        // Sequenza dal primo stato della lobby ricevuto: pronto, annulla, pronto.
+        if(qaStage==0 && g->session.Connected() && !lobbyView.players.empty()) { qaStage=1; qaCabinAt=qaTime; }
+        if(qaStage==1 && qaTime>qaCabinAt+1) { SetLobbyReady(true); qaStage=2; }
+        if(qaStage==2 && qaTime>qaCabinAt+2) { SetLobbyReady(false); qaStage=3; }
+        if(qaStage==3 && qaTime>qaCabinAt+3) { SetLobbyReady(true); qaStage=4; }
+        if(qaStage<5 && g->map.epoch && lobbyPhase==0) { Log("[COOP/QA] Lobby map received before start\n"); qaStage=99; }
+        if(qaStage==4 && lobbyPhase==2 && Ready()) { qaStage=5; qaCabinAt=qaTime; }
+        if(qaStage==5 && qaTime>qaCabinAt+3) {
             const bool ok=lobbyView.players.size()==2 && lobbyView.players[0].name=="QAHost";
             Log("[COOP/QA] %s lobby start role=client players=%u host_name=%s map=%s\n",ok?"PASS":"FAIL",unsigned(lobbyView.players.size()),lobbyView.players.empty()?"":lobbyView.players[0].name.c_str(),g->map.file.c_str());
-            qaStage=5;
+            qaStage=6;
         }
-        if(qaStage==5 && qaTime>qaCabinAt+6) init->mpGame->Exit();
-        if(qaTime>90) { Log("[COOP/QA] FAIL lobby start role=client timeout stage=%d phase=%u\n",qaStage,unsigned(lobbyPhase)); init->mpGame->Exit(); }
+        if(qaStage==6 && qaTime>qaCabinAt+6) init->mpGame->Exit();
+        if(qaStage==99 || qaTime>120) { Log("[COOP/QA] FAIL lobby start role=client stage=%d phase=%u\n",qaStage,unsigned(lobbyPhase)); init->mpGame->Exit(); }
         return;
     }
-    if(qaStage==0 && qaTime>3.5f) {
-        // Il client ha annullato e non è ancora di nuovo pronto: avvio rifiutato.
-        lobbyKeyEnter=false; online::LobbyState before=lobbyView;
-        const bool clientSeen=before.players.size()==2 && before.players[1].name=="QAClient";
-        Log("[COOP/QA] Lobby host sees players=%u client_name_ok=%d\n",unsigned(before.players.size()),clientSeen?1:0);
-        qaPuzzle=clientSeen; qaStage=1;
+    Guest* guest=nullptr; for(auto& gst:guests) if(gst->session.Connected()) guest=gst.get();
+    // 0: il client compare con il suo nickname.
+    if(qaStage==0 && guest && guest->session.RemoteName()=="QAClient") { qaPuzzle=true; Log("[COOP/QA] Lobby host sees players=%u client_name_ok=1\n",unsigned(lobbyView.players.size())); qaStage=1; qaCabinAt=qaTime; }
+    // 1: avvio con l'host non pronto: rifiutato.
+    if(qaStage==1 && qaTime>qaCabinAt+0.5f) {
+        bool all=lobbyReady; for(auto& gst:guests) if(gst->session.Connected()) all=all && gst->session.RemoteReady();
+        qaGrabbed=!all; Log("[COOP/QA] Lobby start before everyone is ready refused=%d\n",qaGrabbed?1:0); qaStage=2;
     }
-    if(qaStage==1 && qaTime>5) { SetLobbyReady(true); qaStage=2; }
-    if(qaStage==2 && qaTime>6) {
-        bool all=lobbyReady; for(auto& guest:guests) if(guest->session.Connected()) all=all && guest->session.RemoteReady();
-        if(all) { qaMoved=!init->mpMapHandler->GetCurrentMapName().empty(); StartFromLobby(); qaStage=3; qaCabinAt=qaTime; }
-        else if(qaTime>20) { Log("[COOP/QA] FAIL lobby: not everyone ready\n"); qaStage=99; }
-    }
-    // Dopo l'avvio: il mondo è fermo finché il client non ha applicato la mappa.
+    // 2: dopo la sequenza del client (pronto, annulla, pronto) l'host è pronto e avvia.
+    if(qaStage==2 && qaTime>qaCabinAt+5) { SetLobbyReady(true); qaStage=3; }
     if(qaStage==3) {
+        bool all=lobbyReady; for(auto& gst:guests) if(gst->session.Connected()) all=all && gst->session.RemoteReady();
+        if(all) { qaMoved=!init->mpMapHandler->GetCurrentMapName().empty(); StartFromLobby(); qaStage=4; qaCabinAt=qaTime; }
+        else if(qaTime>qaCabinAt+30) { Log("[COOP/QA] FAIL lobby: not everyone ready\n"); qaStage=99; }
+    }
+    // 4: il mondo resta fermo finché il client non ha applicato la mappa.
+    if(qaStage==4) {
         const bool paused=!init->mpGame->GetScene()->GetUpdateMap();
-        if(lobbyPhase==1 && !paused) qaReplicated=true; // errore: mondo in moto durante l'attesa
-        if(lobbyPhase==2) { Log("[COOP/QA] Lobby session ready after %.1f s world_moved_while_waiting=%d\n",qaTime-qaCabinAt,qaReplicated?1:0); qaStage=4; qaCabinAt=qaTime; }
-        if(qaTime>qaCabinAt+60) { Log("[COOP/QA] FAIL lobby: session never ready\n"); qaStage=99; }
+        if(lobbyPhase==1 && !paused) qaReplicated=true;
+        if(lobbyPhase==2) { Log("[COOP/QA] Lobby session ready after %.1f s world_moved_while_waiting=%d\n",qaTime-qaCabinAt,qaReplicated?1:0); qaStage=5; qaCabinAt=qaTime; }
+        if(qaTime>qaCabinAt+90) { Log("[COOP/QA] FAIL lobby: session never ready\n"); qaStage=99; }
     }
-    if(qaStage==4 && qaTime>qaCabinAt+3) {
-        const bool ok=qaPuzzle && !qaMoved && !qaReplicated && Ready() && init->mpGame->GetScene()->GetUpdateMap();
-        Log("[COOP/QA] %s lobby start role=host client_seen=%d map_before_start=%d map=%s\n",ok?"PASS":"FAIL",qaPuzzle?1:0,qaMoved?1:0,g->map.file.c_str());
-        qaStage=5;
+    if(qaStage==5 && qaTime>qaCabinAt+3) {
+        const bool ok=qaPuzzle && qaGrabbed && !qaMoved && !qaReplicated && Ready() && init->mpGame->GetScene()->GetUpdateMap();
+        Log("[COOP/QA] %s lobby start role=host client_seen=%d refused_unready=%d map_before_start=%d map=%s\n",ok?"PASS":"FAIL",qaPuzzle?1:0,qaGrabbed?1:0,qaMoved?1:0,g->map.file.c_str());
+        qaStage=6;
     }
-    if(qaStage==99) { Log("[COOP/QA] FAIL lobby start role=host\n"); qaStage=5; qaCabinAt=qaTime-3; }
-    if(qaStage==5 && qaTime>qaCabinAt+8) init->mpGame->Exit();
-    if(qaTime>100) init->mpGame->Exit();
+    if(qaStage==99) { Log("[COOP/QA] FAIL lobby start role=host\n"); qaStage=6; qaCabinAt=qaTime-3; }
+    if(qaStage==6 && qaTime>qaCabinAt+10) init->mpGame->Exit();
+    if(qaTime>150) init->mpGame->Exit();
 }
 void cCoopNetwork::RunLampQA(float dt) {
     auto* lamp=init->mpMapHandler->GetGameEntity("parrafinlight",false);

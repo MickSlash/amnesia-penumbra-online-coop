@@ -14,7 +14,7 @@ param(
     [Parameter(Mandatory=$true)][string]$HostAddress,        # indirizzo di questo PC per la partita
     [string]$RemoteDir = '',                                 # predefinita: Desktop\PenumbraCoopTest
     [string]$Key = "$env:USERPROFILE\.ssh\id_ed25519_penumbra_test",
-    [ValidateSet('baseline','full','hammer','campaign','resume','cabin')][string]$Mode = 'full',
+    [ValidateSet('baseline','full','hammer','campaign','resume','cabin','lobby')][string]$Mode = 'full',
     [int]$Seconds = 0,
     [string]$PreviousRun = '',
     [string]$ClientSettings = '',                            # settings.cfg da usare sul client
@@ -30,7 +30,7 @@ $ssh = @('-i', $Key, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15')
 $user = $Remote.Split('@')[0]
 if (!$RemoteDir) { $RemoteDir = "C:\Users\$user\Desktop\PenumbraCoopTest" }
 $remoteSlash = $RemoteDir.Replace('\', '/')
-if (!$Seconds) { $Seconds = @{ baseline = 50; full = 90; hammer = 110; campaign = 180; resume = 70; cabin = 185 }[$Mode] }
+if (!$Seconds) { $Seconds = @{ baseline = 50; full = 90; hammer = 110; campaign = 180; resume = 70; cabin = 185; lobby = 120 }[$Mode] }
 $id = 'twopc-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
 $run = Join-Path $root "build\qa\$id"
 New-Item -ItemType Directory -Force $run | Out-Null
@@ -61,6 +61,8 @@ $size = $ClientSize.Split('x')
 $cmd = @"
 @echo off
 set PENUMBRA_COOP_QA=$Mode
+set PENUMBRA_COOP_LOBBY=$(if ($Mode -eq 'lobby') { '1' } else { '' })
+set PENUMBRA_COOP_NAME=QAClient
 set PENUMBRA_COOP_ROLE=client
 set PENUMBRA_COOP_ADDRESS=$HostAddress
 set PENUMBRA_COOP_PORT=$Port
@@ -85,6 +87,8 @@ $cmdFile = Join-Path $run 'run_client.cmd'
 & ssh @ssh $Remote "schtasks /Create /TN PenumbraCoopClient /TR `"$RemoteDir\run_client.cmd`" /SC ONCE /ST 23:59 /IT /F" | Out-Null
 
 $env:PENUMBRA_COOP_QA = $Mode
+$env:PENUMBRA_COOP_LOBBY = if ($Mode -eq 'lobby') { '1' } else { '' }
+$env:PENUMBRA_COOP_NAME = 'QAHost'
 $env:PENUMBRA_COOP_PORT = "$Port"
 $env:PENUMBRA_COOP_RESUME = $resume
 $env:PENUMBRA_COOP_ROLE = 'host'
