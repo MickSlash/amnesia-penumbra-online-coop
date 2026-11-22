@@ -1,6 +1,26 @@
-# Penumbra: Overture — Online Co-op 0.6.1 sperimentale
+# Penumbra: Overture — Online Co-op 0.7 sperimentale
 
 Mod per **2 giocatori** su Windows; **3-4 giocatori** in prova (l'host li sceglie nel launcher; provati solo con più istanze sullo stesso PC). Richiede un'installazione originale di **Penumbra: Overture** su ogni PC. La campagna completa resta da validare.
+
+## Novità della 0.7
+
+Correzioni della seconda partita reale fra due PC. **Protocollo 9:** non si
+collega con la 0.6.x, aggiornare entrambi.
+
+- **Lobby prepartita:** nickname, ruoli e Pronto/Non pronto. R = pronto,
+  INVIO (host) = avvia quando tutti sono pronti; la partita parte per tutti
+  quando ognuno ha caricato la mappa. Nel launcher: campo Nickname e casella
+  "Lobby prepartita".
+- **Uscita dalla cabina:** la porta si apre solo quando il gruppo ha torcia,
+  taccuino e glowstick; ora un avviso dice se manca il taccuino.
+- **Occhio e icone sul client:** il mirino mostra l'occhio sugli oggetti
+  esaminabili, la mano sulle interazioni da script e l'icona delle porte.
+- **Sfocatura:** quando l'ospite esamina un oggetto, lo schermo dell'host non
+  si sfoca più; la messa a fuoco è di chi esamina.
+- **Movimento durante i pensieri:** ci si muove e ci si guarda intorno con un
+  pensiero a schermo (`AllowMovementDuringThoughts` in `settings.cfg`).
+- **Oggetti più fluidi** sul client quando ripartono dopo una pausa.
+- **F9:** scrive nel log lo stato degli effetti grafici e salva uno screenshot.
 
 ## Novità della 0.6.1
 
@@ -57,7 +77,7 @@ Correzioni del primo test reale fra due PC e nuove funzioni:
    - Con **Lobby prepartita** (attiva di norma) si entra in una lobby con il proprio **Nickname**: **R** = pronto o annulla, l'host preme **INVIO** quando tutti sono pronti. La partita parte per tutti quando ognuno ha caricato la mappa.
    - Durante i pensieri ci si può muovere; per il comportamento originale mettere `AllowMovementDuringThoughts="false"` nella sezione `Game` di `settings.cfg`.
    - **F9** scrive nel log lo stato della grafica e salva uno screenshot (vedi `docs/COOP_LOGS.md`).
-4. Aggiornare entrambi alla stessa build (**0.6.1, protocollo 8**). La 0.5 e la 0.6 usano lo stesso protocollo e si collegano, ma senza le correzioni più recenti; le build precedenti non sono compatibili.
+4. Aggiornare entrambi alla stessa build (**0.7, protocollo 9**). Le build precedenti (0.6.x, protocollo 8) non sono compatibili.
 
 Per giocare non serve PowerShell. Non vengono sostituiti gli eseguibili originali. Il pacchetto non contiene mappe, texture, audio o DLL commerciali: usa quelle della propria installazione `redist`. Il runtime Visual C++ x86 (`msvcp140.dll`, `vcruntime140.dll`) è incluso in `bin`. Se manca OpenAL, installare quello fornito con il gioco.
 

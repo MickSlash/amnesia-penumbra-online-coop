@@ -14,7 +14,7 @@ $evidence=Get-Content -LiteralPath $EvidenceFile -Raw | ConvertFrom-Json
 if($evidence.game_sha256 -ne (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash) {throw 'Test evidence does not match the game binary'}
 if($evidence.launcher_sha256 -ne (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash) {throw 'Test evidence does not match the launcher'}
 if(!$evidence.protocol_pass -or !$evidence.native_full_pass -or !$evidence.native_intro_pass -or !$evidence.native_hammer_pass -or !$evidence.native_hammer_impaired_pass -or !$evidence.steam_presence_pass -or !$evidence.native_campaign_pass -or !$evidence.native_campaign_impaired_pass -or !$evidence.native_resume_pass) {throw 'Required prototype checks have not passed'}
-$version='0.6.1'
+$version='0.7'
 $name="PenumbraOnlineCoop_${version}_" + (Get-Date -Format 'yyyyMMdd_HHmmss') + '_' + $revision.Substring(0,8)
 $packages=Join-Path $root 'packages'
 $release=Join-Path $packages $name
