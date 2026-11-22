@@ -54,6 +54,9 @@ Correzioni del primo test reale fra due PC e nuove funzioni:
 1. Estrarre lo ZIP in una cartella separata e aprire **PenumbraCoopLauncher.exe**.
 2. Selezionare la cartella del gioco, per esempio `E:\Steam\steamapps\common\Penumbra Overture`. Il launcher trova anche `redist`.
 3. L'host sceglie quanti giocatori (2-4) e poi **Ospita partita**. Il client inserisce l'IP dell'host e sceglie **Connettiti all'host**. Porta predefinita: **UDP 27120**.
+   - Con **Lobby prepartita** (attiva di norma) si entra in una lobby con il proprio **Nickname**: **R** = pronto o annulla, l'host preme **INVIO** quando tutti sono pronti. La partita parte per tutti quando ognuno ha caricato la mappa.
+   - Durante i pensieri ci si può muovere; per il comportamento originale mettere `AllowMovementDuringThoughts="false"` nella sezione `Game` di `settings.cfg`.
+   - **F9** scrive nel log lo stato della grafica e salva uno screenshot (vedi `docs/COOP_LOGS.md`).
 4. Aggiornare entrambi alla stessa build (**0.6.1, protocollo 8**). La 0.5 e la 0.6 usano lo stesso protocollo e si collegano, ma senza le correzioni più recenti; le build precedenti non sono compatibili.
 
 Per giocare non serve PowerShell. Non vengono sostituiti gli eseguibili originali. Il pacchetto non contiene mappe, texture, audio o DLL commerciali: usa quelle della propria installazione `redist`. Il runtime Visual C++ x86 (`msvcp140.dll`, `vcruntime140.dll`) è incluso in `bin`. Se manca OpenAL, installare quello fornito con il gioco.

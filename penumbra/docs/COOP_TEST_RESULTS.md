@@ -922,3 +922,55 @@ Due bug segnalati dalla seconda partita reale.
   PASS.
 - **Non verificato:** la postura sotto la lampada della cabina, provata solo
   con il log diagnostico; una partita giocata a mano.
+
+
+## 23. Seconda partita reale: passaggio di livello, occhio, lobby, rete (22 novembre)
+
+| Problema | Causa | Correzione | Verifica |
+| --- | --- | --- | --- |
+| Non si esce dalla cabina | Lo script apre l'uscita solo quando il gruppo ha torcia, taccuino e glowstick. Nel log dell'host della partita reale il taccuino non risulta mai raccolto; il passaggio in sé funziona | Avviso a tutti se manca solo il taccuino da 30 s (la condizione dello script non cambia). Nuova prova `cabin`: il livello giocato fino alla neve | `cabin` PASS su un PC e su due PC: porta aperta 6,5 s dopo il terzo oggetto, uscita dell'ospite e dell'host, inventari intatti; variante col taccuino per ultimo: avviso dopo 30 s |
+| L'occhio non compare al client | L'occhio è il mirino "esamina"; descrizioni e callback li impostano gli script, che girano solo sull'host. Mancavano anche la mano da script e l'icona della porta | Bit dello stato dell'entità: esaminabile, interazione da script, già esaminato, icona dell'area | `cabin`: mirino 4 (Examine) su `mapdesc`, icona 7 (DoorLink) sull'uscita, anche fra due PC |
+| Grafica che sembra a bassa risoluzione | Quando l'ospite esamina, la profondità di campo dell'host si accendeva e nulla la spegneva (la descrizione va solo al client) | La sfocatura è di chi esamina; il client mette a fuoco l'oggetto indicato dall'host; tasto F9 diagnostico | `cabin`: host mai sfocato (senza la correzione: sfocato a t=23,3 s); il client mette a fuoco |
+| Pensieri che bloccano | Stato "messaggio" del gioco | `Game/AllowMovementDuringThoughts` (sì di norma) | `cabin`: con il pensiero a schermo 0,41 m e 0,37 rad, pensiero ancora visibile |
+| Scatti degli oggetti | L'host invia solo i cambiamenti: un oggetto che riparte dopo una pausa veniva interpolato dall'ultima posa vecchia e il primo spostamento appariva in un tick | Bit "ripartenza" dall'host; il client considera ferma la posa precedente fino a 2 tick prima | `hammer` 30 Hz, rete disturbata: scatto medio da 0,16 a 0,11-0,12 cm, massimo da 10,0 a 5,6-6,0 cm |
+| Lobby | Il gioco partiva subito con la mappa | Lobby nel gioco (protocollo 9) e avvio sincronizzato | `lobby` PASS su un PC e su due PC |
+| Lanterna | Da capire | Prova `lamp` | Pose degli anelli uguali su host e client entro 1 mm, catena mai allungata (0,596 m); lo spostamento dello screenshot va confrontato col gioco singolo |
+
+### Frequenze misurate
+
+- **Logica e fisica:** 60 Hz fissi.
+- **Pose dei giocatori:** 60 Hz; 300 per 5 s, 16,67 ms fra l'una e l'altra.
+- **Comandi del client:** 60 Hz.
+- **Oggetti del mondo:** 30 Hz, solo se cambiano; quelli tenuti o trascinati
+  60 Hz.
+- **Ritardo di interpolazione:** 3 tick (50 ms) misurati, fino a 15 con
+  ritardi irregolari.
+
+`hammer`, rete disturbata (35 ms ogni direzione, ±10 ms, 1 pacchetto su 20 perso):
+
+| Oggetti | Aggiornamenti/s | Scatto medio | Scatto max | kbit/s ricevuti |
+| --- | --- | --- | --- | --- |
+| 20 Hz | 23,5 | 0,17 cm | 8,1 cm | 167 |
+| 30 Hz | 29,0 | 0,16 cm | 10,0 cm | 191 |
+| 40 Hz | 32,4 | 0,24 cm | 14,9 cm | 219 |
+| 60 Hz | 52,3 | 0,19 cm | 9,0 cm | 286 |
+| 30 Hz con la correzione | 30,0-30,7 | 0,11-0,12 cm | 5,6-6,0 cm | 197-200 |
+
+Più Hz non rendono il moto più regolare e costano banda: la frequenza resta 30 Hz
+(`PENUMBRA_COOP_WORLD_HZ` per altre misure).
+
+### Prove
+
+- **Su un PC:** `full`, `cabin`, `lobby`, `intro`, `hammer`, `campaign`,
+  `resume`, `party` a 3 e 4, `maps` (25/25), `ctest`: tutte PASS, nessun
+  crash dump. `lamp`: misura.
+- **Su due PC via Radmin:** `lobby`, `cabin`, `full`, `campaign` PASS. Un
+  client con protocollo 8 viene rifiutato da un host con protocollo 9.
+
+### Ancora aperto
+
+- Cambio di risoluzione senza riavvio: con SDL 1.2 su Windows cambiare modo
+  video ricrea il contesto OpenGL, e il motore non sa ricaricare texture,
+  shader e buffer degli effetti.
+- Lanterna: confronto con il gioco singolo.
+- Una partita giocata a mano con la lobby.

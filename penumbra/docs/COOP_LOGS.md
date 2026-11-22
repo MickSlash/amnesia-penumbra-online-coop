@@ -60,6 +60,8 @@ Un solo file, `hpl.log`, raccoglie i log del motore, del gioco e della mod.
 | `[COOP/LIFE]`, `[COOP/SPECTATOR]` | Mod | Morte, rinascita, spettatore |
 | `[COOP/INVENTORY]`, `[COOP/HINT]`, `[COOP/JOURNAL]`, `[COOP/SAVE]` | Mod | Oggetti passati, avvisi, diario, salvataggi |
 | `[COOP/STEAM]` | Mod | Presenza Steam |
+| `[COOP/LOBBY]` | Mod | Lobby: apertura, Pronto, stato dei giocatori, avvio, attesa dei caricamenti, inizio della partita |
+| `[COOP/RENDER]` | Tasto F9 | Stato degli effetti grafici (bloom, scia, profondità di campo, nebbia, menu, messaggio) e nome dello screenshot salvato nella cartella del log |
 | `[COOP/QA]`, `[COOP/SOUND]` | Solo nelle prove automatiche | Esiti delle prove; elenco dei suoni attivi |
 
 ## Riconoscere i problemi
@@ -84,6 +86,16 @@ Un solo file, `hpl.log`, raccoglie i log del motore, del gioco e della mod.
   - un log che finisce senza "HPL Exit was successful!";
   - i dump in `%LocalAppData%\CrashDumps\PenumbraCoop.exe.*.dmp`, se
     Windows li crea.
+- **Oggetti che scattano** (client), in `[COOP/NETDIAG]`:
+  - `entity_updates_per_s`: aggiornamenti di oggetti ricevuti al secondo;
+  - `entity_gap_ms`: intervallo fra due pose dello stesso oggetto;
+  - `object_jerk_cm`: variazione del passo fra tick consecutivi, cioè lo
+    scatto visibile; le righe `Object jerk` danno oggetto e situazione dei
+    picchi sopra 3 cm;
+  - `send_kbps`, `receive_kbps`: banda.
+- **Grafica degradata:** premere F9 quando succede, poi ESC, tornare in
+  gioco e premere di nuovo F9: le due righe `[COOP/RENDER]` e i due
+  screenshot `render_*.bmp` mostrano cosa cambia.
 - **Audio:**
   - la sezione "Initializing Sound Module" indica dispositivo e voci (32);
   - `sounds_playing` in `[COOP/FPS]` vicino a 32 vuol dire voci esaurite;
