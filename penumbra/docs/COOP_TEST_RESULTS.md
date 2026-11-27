@@ -704,13 +704,13 @@ su due PC reali.
 
 ### Configurazione
 
-- **Host:** PC di sviluppo, indirizzo Radmin `26.175.119.47`.
+- **Host:** PC di sviluppo, indirizzo Radmin `<indirizzo Radmin dell'host>`.
 - **Client:** secondo PC con i3-4150 e Intel HD Graphics 4400 (driver
   20.19.15.5171), Windows 10 IoT Enterprise LTSC, collegato in Wi-Fi alla LAN;
-  indirizzo Radmin `26.28.80.238`.
+  indirizzo Radmin `<indirizzo Radmin del client>`.
 - **Collegamenti:**
   - LAN solo per il controllo, con SSH a chiave e Desktop Remoto;
-  - la partita passa solo da Radmin (`PENUMBRA_COOP_ADDRESS=26.175.119.47`).
+  - la partita passa solo da Radmin (`PENUMBRA_COOP_ADDRESS=<indirizzo Radmin dell'host>`).
 - **Avvio:**
   - il client parte nella sessione di Desktop Remoto di Michael, con
     un'attività pianificata interattiva;

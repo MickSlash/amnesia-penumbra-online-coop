@@ -5,6 +5,13 @@ support: an **AddOn** (AngelScript) plus a small **bridge** process that does
 the networking, because the game's script API has no sockets. Game files are
 never modified. Design and plan: [docs/RAPPORTO_INIZIALE.md](docs/RAPPORTO_INIZIALE.md).
 
+No game script is redistributed. The add-on hooks the game through its
+`ModEventHandler` script, which it overrides by name; that copy is rebuilt at
+install time from the player's own installation plus the six `[COOP]` lines in
+[`mod/OnlineCoop/patches/ModEventHandler.coop.txt`](mod/OnlineCoop/patches/ModEventHandler.coop.txt).
+Both `tools/InstallMod.ps1` and `BunkerCoop.exe` do this; the avatar animations
+are copied from the installation the same way.
+
 Status: phase 3 — game ↔ bridge channel and bridge ↔ bridge network work
 (handshake, state both ways, reliable events, timeout and reconnect), plus a
 launcher. Phase 4: the other player is visible (soldier avatar with the
@@ -19,6 +26,7 @@ Players: unzip the package from `tools/PackageBunker.ps1`, open Steam, run
 | Path | What |
 |---|---|
 | `mod/OnlineCoop/` | the add-on copied into the game's `mods/` folder |
+| `mod/OnlineCoop/patches/` | the `[COOP]` additions applied to the game's `ModEventHandler` at install time |
 | `bridge/BridgeCore.cs` | game channel + UDP link (shared by launcher and command-line bridge) |
 | `bridge/CoopBridge.cs` | command-line bridge, stand-in game, `--test-net` scripted network checks |
 | `launcher/BunkerLauncher.cs` | `BunkerCoop.exe`: host/join, installs the add-on, runs the bridge, starts the game |

@@ -5,7 +5,7 @@
 // and for running a bridge by hand.
 //
 //   CoopBridge --host [--port 27030]                  host a session
-//   CoopBridge --join 26.1.2.3[:27030]                join a host
+//   CoopBridge --join 26.x.x.x[:27030]                join a host
 //     options: --name NAME  --ipc-dir DIR  --minutes N
 //              --sim-loss PCT  --sim-delay MS  --sim-jitter MS   (network simulator)
 //              --fake-game     a stand-in game on the ipc folder (no game needed)

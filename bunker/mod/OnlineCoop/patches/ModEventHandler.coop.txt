@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# OnlineCoop additions to the game's script/modules/ModEventHandler.hps.
+#
+# The add-on overrides that script by name (the add-on mechanism of the
+# official sample), but the game's script is not part of this project and is
+# not redistributed. tools/InstallMod.ps1 and BunkerCoop.exe read it from the
+# player's own installation and write the patched copy into mods/OnlineCoop
+# at install time.
+#
+# One instruction per line: <op>|<anchor>|<line to insert>
+#   after   insert after the line equal to <anchor>
+#   body    insert as the first line of the block opened after <anchor>
+#   before  insert before the line equal to <anchor>
+# Anchors are compared after trimming whitespace and must match exactly one
+# line. "\t" in the inserted text is a tab.
+#
+# sha256 is the game file these instructions were tested on. A different file
+# (after a game update) is still patched if every anchor matches once.
+
+source|script/modules/ModEventHandler.hps
+sha256|fe14b68fb7b5adefa73eea8559076aa25ea78edcb770e9b7ddd8639bb136d7e6
+after|#include "modules/ModuleInterfaces.hps"|#include "coop/OnlineCoop_Core.hps" // [COOP]
+body|void Init()|\t\tmCoop.Init(); // [COOP]
+body|void OnMapEnter(cLuxMap @apMap)|\t\tmCoop.OnMapEnter(apMap); // [COOP]
+body|void OnMapLeave(cLuxMap @apMap)|\t\tmCoop.OnMapLeave(apMap); // [COOP]
+body|void Update(float afTimeStep)|\t\tmCoop.Update(afTimeStep); // [COOP]
+before|array<int> mListeners;|\tcCoopCore mCoop; // [COOP]
